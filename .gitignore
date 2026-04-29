@@ -1,0 +1,6 @@
+.env
+data/
+.test-tmp/
+__pycache__/
+*.pyc
+node_modules/

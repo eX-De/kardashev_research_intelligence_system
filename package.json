@@ -1,0 +1,33 @@
+{
+  "name": "research-intelligence-system",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --configLoader native",
+    "build": "vite build --configLoader native",
+    "preview": "vite preview --host 0.0.0.0 --configLoader native",
+    "start": "npm run build && node server.js",
+    "start:api": "node server.js",
+    "check": "node --check server.js && npm run build && python -m compileall worker tests",
+    "init-db": "python -m worker.cli init-db",
+    "sync-obsidian": "python -m worker.cli sync-obsidian",
+    "fetch-arxiv": "python -m worker.cli fetch-arxiv",
+    "cache-arxiv-text": "python -m worker.cli cache-arxiv-text",
+    "generate-reports": "python -m worker.cli generate-reports",
+    "run-daily": "python -m worker.cli run-daily",
+    "test": "python -m unittest discover -s tests"
+  },
+  "engines": {
+    "node": ">=22",
+    "python": ">=3.11"
+  },
+  "dependencies": {
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.1",
+    "vite": "^8.0.10"
+  }
+}

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" role="img" aria-label="Research graph mark">
+  <rect width="96" height="96" rx="18" fill="#ffffff"/>
+  <path d="M22 67h52" stroke="#dfe5dd" stroke-width="6" stroke-linecap="round"/>
+  <path d="M24 64l17-23 14 11 18-25" fill="none" stroke="#167e5b" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="24" cy="64" r="7" fill="#265d9c"/>
+  <circle cx="41" cy="41" r="7" fill="#167e5b"/>
+  <circle cx="55" cy="52" r="7" fill="#a96f00"/>
+  <circle cx="73" cy="27" r="7" fill="#b34747"/>
+</svg>
