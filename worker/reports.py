@@ -2,17 +2,22 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 from .config import Settings
 from .db import clean_unicode, from_json, to_json, utc_now
-from .llm import call_chat_json
+from .llm import EXPLANATION_REPORT_CONFIDENCE_THRESHOLD, call_chat_json
+
+
+DAILY_REPORT_DIR = Path("Research Intelligence") / "Daily"
+DAILY_REPORT_LIMIT = 40
 
 
 def _safe_filename(value: str) -> str:
     cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", clean_unicode(value)).strip(" .")
-    return cleaned or "paper"
+    return cleaned or "report"
 
 
 def _short(value: object, limit: int = 900) -> str:
@@ -20,50 +25,79 @@ def _short(value: object, limit: int = 900) -> str:
     return text[:limit]
 
 
-def _project_folder(project: sqlite3.Row) -> str:
-    folder = str(project["obsidian_folder"] or project["obsidian_output_dir"] or "").strip("/\\")
-    if folder:
-        return folder.replace("\\", "/")
-    path = str(project["obsidian_project_path"] or "").strip().replace("\\", "/")
-    if "/" in path:
-        return path.rsplit("/", 1)[0]
-    return f"Projects/{_safe_filename(project['name'])}"
+def _float(value: object) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
-def _resolve_report_path(settings: Settings, project: sqlite3.Row, paper: sqlite3.Row) -> tuple[Path, str]:
+def _paper_filter(
+    paper_ids: list[int] | None,
+    table_alias: str = "p",
+    extra_conditions: list[str] | None = None,
+    extra_params: list[Any] | None = None,
+) -> tuple[str, list[Any]]:
+    conditions = list(extra_conditions or [])
+    params: list[Any] = list(extra_params or [])
+    if paper_ids is None:
+        if not conditions:
+            return "", []
+        return "WHERE " + " AND ".join(conditions), params
+    if not paper_ids:
+        return "WHERE 1 = 0", []
+    placeholders = ", ".join("?" for _ in paper_ids)
+    conditions.insert(0, f"{table_alias}.id IN ({placeholders})")
+    return "WHERE " + " AND ".join(conditions), [*paper_ids, *params]
+
+
+def _report_explanation_condition(alias: str = "e") -> str:
+    return (
+        f"({alias}.paper_id IS NULL OR "
+        f"({alias}.suggested_action != 'ignore' AND {alias}.confidence >= ?))"
+    )
+
+
+def _resolve_daily_report_path(settings: Settings, report_date: str) -> tuple[Path, str]:
     if not settings.obsidian_vault_path:
         raise RuntimeError("Obsidian vault path is not configured")
     vault = settings.obsidian_vault_path.expanduser().resolve()
     if not vault.exists() or not vault.is_dir():
         raise RuntimeError("Obsidian vault path does not exist")
-    filename = f"{_safe_filename(str(paper['arxiv_id']))} - {_safe_filename(str(paper['title']))}.md"
-    relative = Path(_project_folder(project)) / "Papers" / filename
+    relative = DAILY_REPORT_DIR / f"{_safe_filename(report_date)}.md"
     target = (vault / relative).resolve()
     try:
         rel_path = target.relative_to(vault).as_posix()
     except ValueError as exc:
-        raise RuntimeError("Paper report path must be inside the configured vault") from exc
+        raise RuntimeError("Daily report path must be inside the configured vault") from exc
     return target, rel_path
 
 
-def _report_rows(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
+def _project_match_rows(
+    conn: sqlite3.Connection,
+    paper_ids: list[int] | None,
+    limit: int,
+) -> list[sqlite3.Row]:
+    where, params = _paper_filter(
+        paper_ids,
+        "p",
+        [_report_explanation_condition("e")],
+        [EXPLANATION_REPORT_CONFIDENCE_THRESHOLD],
+    )
     return conn.execute(
-        """
+        f"""
         SELECT
           ppm.project_id,
           ppm.paper_id,
           ppm.score,
-          ppm.best_arxiv_chunk_id,
-          ppm.best_obsidian_chunk_id,
-          ppm.evidence_json,
           ppm.updated_at AS match_updated_at,
           p.arxiv_id,
           p.title AS paper_title,
           p.summary,
           p.link,
-          p.pdf_link,
           p.published_at,
           p.categories_json,
+          p.text_status,
           ac.page_start,
           ac.page_end,
           ac.text AS arxiv_text,
@@ -73,292 +107,274 @@ def _report_rows(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
           n.path AS note_path,
           rp.name AS project_name,
           rp.status AS project_status,
-          rp.goals,
-          rp.summary AS project_summary,
-          rp.keywords_json,
           rp.obsidian_project_path,
-          rp.obsidian_output_dir,
-          rp.obsidian_folder
+          rp.obsidian_folder,
+          e.recommendation_reason,
+          e.relevant_points_json,
+          e.suggested_action,
+          e.confidence
         FROM project_paper_matches ppm
         JOIN arxiv_papers p ON p.id = ppm.paper_id
         JOIN research_projects rp ON rp.id = ppm.project_id
         LEFT JOIN arxiv_text_chunks ac ON ac.id = ppm.best_arxiv_chunk_id
         LEFT JOIN research_chunks c ON c.id = ppm.best_obsidian_chunk_id
         LEFT JOIN obsidian_notes n ON n.id = c.note_id
-        LEFT JOIN project_artifacts pa
-          ON pa.project_id = ppm.project_id
-         AND pa.artifact_type = 'paper_usefulness_report'
-         AND json_extract(pa.source_json, '$.paper_id') = ppm.paper_id
-        WHERE pa.id IS NULL OR pa.updated_at < ppm.updated_at
+        LEFT JOIN llm_explanations e ON e.paper_id = p.id
+        {where}
         ORDER BY ppm.score DESC, ppm.updated_at DESC
         LIMIT ?
         """,
-        (limit,),
+        (*params, limit),
     ).fetchall()
 
 
-def _prompt(row: sqlite3.Row) -> str:
-    evidence = from_json(row["evidence_json"], {})
-    return f"""
-Return JSON only.
-Keys:
-- usefulness: one of useful, maybe, not_useful
-- priority: one of high, medium, low
-- confidence: number 0-1
-- verdict: short Chinese conclusion
-- usefulness_types: array, choose from 方法参考, 实验设计, baseline, related work, 数据集, 工具实现, 写作素材, 未来方向
-- specific_uses: array of objects with keys area, explanation, paper_evidence, project_evidence, suggested_action
-- uncertainties: array of Chinese strings
-- recommended_actions: array of Chinese strings
-
-Question:
-这篇论文对我的研究有没有用？如果有用，具体有用在哪？
-
-Project:
-Name: {row['project_name']}
-Status: {row['project_status']}
-Summary: {row['project_summary']}
-Goals: {row['goals']}
-Keywords: {', '.join(from_json(row['keywords_json'], []))}
-Center page: {row['obsidian_project_path']}
-
-Paper:
-arXiv: {row['arxiv_id']}
-Title: {row['paper_title']}
-Categories: {', '.join(from_json(row['categories_json'], []))}
-Published: {row['published_at']}
-Abstract: {_short(row['summary'], 1600)}
-
-Matched paper evidence:
-Pages: {row['page_start'] or '?'}-{row['page_end'] or '?'}
-Text: {_short(row['arxiv_text'], 1600)}
-
-Matched project evidence:
-Note: {row['note_title']} ({row['note_path']})
-Heading: {row['obsidian_heading']}
-Text: {_short(row['obsidian_text'], 1600)}
-
-Match metadata:
-Score: {float(row['score'] or 0):.3f}
-Evidence JSON: {_short(to_json(evidence), 1200)}
-
-Rules:
-- 不要泛泛总结论文。
-- 每个 specific_use 必须同时说明论文证据和项目证据。
-- 如果证据不足，usefulness 设为 maybe 或 not_useful，并解释缺什么。
-""".strip()
+def _global_match_rows(
+    conn: sqlite3.Connection,
+    paper_ids: list[int] | None,
+    limit: int,
+) -> list[sqlite3.Row]:
+    where, params = _paper_filter(
+        paper_ids,
+        "p",
+        [_report_explanation_condition("e")],
+        [EXPLANATION_REPORT_CONFIDENCE_THRESHOLD],
+    )
+    return conn.execute(
+        f"""
+        SELECT
+          p.id AS paper_id,
+          p.arxiv_id,
+          p.title AS paper_title,
+          p.summary,
+          p.link,
+          p.published_at,
+          p.categories_json,
+          p.text_status,
+          MAX(m.score) AS score,
+          e.recommendation_reason,
+          e.suggested_action,
+          e.confidence
+        FROM arxiv_papers p
+        JOIN matches m ON m.paper_id = p.id
+        LEFT JOIN llm_explanations e ON e.paper_id = p.id
+        {where}
+        GROUP BY p.id
+        ORDER BY score DESC, p.published_at DESC
+        LIMIT ?
+        """,
+        (*params, limit),
+    ).fetchall()
 
 
-def _fallback_judgment(row: sqlite3.Row) -> dict[str, Any]:
-    score = float(row["score"] or 0)
-    usefulness = "useful" if score >= 0.55 else "maybe"
-    priority = "high" if score >= 0.75 else "medium" if score >= 0.45 else "low"
-    return {
-        "usefulness": usefulness,
-        "priority": priority,
-        "confidence": min(0.9, max(0.2, score)),
-        "verdict": f"这篇论文可能对项目“{row['project_name']}”有用，主要依据是论文正文片段与项目笔记存在直接匹配。",
-        "usefulness_types": ["方法参考", "related work"],
-        "specific_uses": [
-            {
-                "area": "项目上下文匹配",
-                "explanation": "系统检测到论文片段与项目笔记在方法或概念上相近，适合先作为候选阅读材料。",
-                "paper_evidence": _short(row["arxiv_text"], 360),
-                "project_evidence": _short(row["obsidian_text"], 360),
-                "suggested_action": "阅读命中片段，确认是否应纳入核心文献或 related work。",
-            }
-        ],
-        "uncertainties": ["未配置可用 LLM 时，报告只基于检索证据生成，判断较保守。"],
-        "recommended_actions": ["阅读论文命中页附近内容", "与项目方法笔记对照后决定是否标为 core"],
-        "raw": {"mode": "fallback"},
-    }
-
-
-def _normalize_judgment(value: dict[str, Any] | None, row: sqlite3.Row) -> dict[str, Any]:
-    judgment = value or _fallback_judgment(row)
-    fallback = _fallback_judgment(row)
-    normalized = {**fallback, **{key: val for key, val in judgment.items() if val not in (None, "")}}
-    if not isinstance(normalized.get("specific_uses"), list):
-        normalized["specific_uses"] = fallback["specific_uses"]
-    if not isinstance(normalized.get("uncertainties"), list):
-        normalized["uncertainties"] = fallback["uncertainties"]
-    if not isinstance(normalized.get("recommended_actions"), list):
-        normalized["recommended_actions"] = fallback["recommended_actions"]
-    if not isinstance(normalized.get("usefulness_types"), list):
-        normalized["usefulness_types"] = fallback["usefulness_types"]
-    return clean_unicode(normalized)
-
-
-def _md_list(items: list[Any], empty: str = "无") -> list[str]:
-    if not items:
-        return [f"- {empty}"]
-    return [f"- {clean_unicode(str(item))}" for item in items]
-
-
-def _report_markdown(row: sqlite3.Row, judgment: dict[str, Any], rel_path: str) -> str:
-    generated_at = utc_now()
-    uses = judgment.get("specific_uses", [])
-    lines = [
-        "---",
-        f"title: {_safe_filename(str(row['paper_title']))}",
-        f"arxiv_id: {row['arxiv_id']}",
-        f"project: {row['project_name']}",
-        f"usefulness: {judgment.get('usefulness')}",
-        f"priority: {judgment.get('priority')}",
-        f"confidence: {float(judgment.get('confidence') or 0):.2f}",
-        f"match_score: {float(row['score'] or 0):.3f}",
-        f"generated_at: {generated_at}",
-        "source: research_intelligence_system",
-        "tags:",
-        "  - paper/usefulness-report",
-        "---",
-        "",
-        f"# {row['paper_title']}",
-        "",
-        "## 结论",
-        "",
-        f"- 判断: **{judgment.get('usefulness')}**",
-        f"- 相关项目: [[{row['project_name']}]]",
-        f"- 用途类型: {', '.join(str(item) for item in judgment.get('usefulness_types', []))}",
-        f"- 优先级: {judgment.get('priority')}",
-        f"- 置信度: {float(judgment.get('confidence') or 0):.2f}",
-        f"- 匹配分数: {float(row['score'] or 0):.3f}",
-        f"- 报告路径: `{rel_path}`",
-        "",
-        clean_unicode(str(judgment.get("verdict") or "")),
-        "",
-        "## 具体有用在哪",
-        "",
-    ]
-    if uses:
-        for index, item in enumerate(uses, start=1):
-            if not isinstance(item, dict):
-                continue
-            lines.extend(
-                [
-                    f"### {index}. {clean_unicode(str(item.get('area') or '用途'))}",
-                    "",
-                    clean_unicode(str(item.get("explanation") or "")),
-                    "",
-                    f"- 论文证据: {clean_unicode(str(item.get('paper_evidence') or ''))}",
-                    f"- 项目证据: {clean_unicode(str(item.get('project_evidence') or ''))}",
-                    f"- 建议动作: {clean_unicode(str(item.get('suggested_action') or ''))}",
-                    "",
-                ]
-            )
-    else:
-        lines.append("暂无可提取用途。")
-        lines.append("")
-
-    lines.extend(
+def _frontmatter(report_date: str) -> str:
+    return "\n".join(
         [
-            "## 证据",
-            "",
-            "### 论文片段",
-            "",
-            f"- arXiv: [{row['arxiv_id']}]({row['link']})",
-            f"- 页码: {row['page_start'] or '?'}-{row['page_end'] or '?'}",
-            "",
-            _short(row["arxiv_text"], 1200),
-            "",
-            "### 项目片段",
-            "",
-            f"- 笔记: `{row['note_path'] or ''}`",
-            f"- 标题: {row['note_title'] or ''}",
-            "",
-            _short(row["obsidian_text"], 1200),
-            "",
-            "## 不确定点",
-            "",
-            *_md_list(list(judgment.get("uncertainties", []))),
-            "",
-            "## 建议动作",
-            "",
-            *_md_list(list(judgment.get("recommended_actions", []))),
+            "---",
+            f"title: {report_date} 科研情报日报",
+            f"date: {report_date}",
+            f"generated_at: {utc_now()}",
+            "source: research_intelligence_system",
+            "tags:",
+            "  - research/daily-report",
+            "---",
             "",
         ]
     )
-    return clean_unicode("\n".join(lines).rstrip() + "\n")
 
 
-def generate_project_paper_reports(
+def _strip_markdown_fence(value: str) -> str:
+    text = clean_unicode(value).strip()
+    if not text.startswith("```"):
+        return text
+    text = re.sub(r"^```(?:markdown|md)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text)
+    return text.strip()
+
+
+def _strip_frontmatter(value: str) -> str:
+    text = value.strip()
+    if not text.startswith("---"):
+        return text
+    parts = text.split("---", 2)
+    if len(parts) == 3:
+        return parts[2].strip()
+    return text
+
+
+def _normalize_llm_markdown(value: object, report_date: str) -> str:
+    body = _strip_frontmatter(_strip_markdown_fence(str(value or ""))).strip()
+    if not body:
+        return ""
+    if not body.startswith("#"):
+        body = f"# {report_date} 科研情报日报\n\n{body}"
+    if "## 今日结论" not in body:
+        body = body.replace("\n", "\n\n", 1) if "\n" in body else f"{body}\n\n"
+        body += "\n\n## 今日结论\n\n见上文摘要。"
+    return clean_unicode(body.rstrip() + "\n")
+
+
+def _project_payload(row: sqlite3.Row) -> dict[str, object]:
+    return {
+        "project": row["project_name"],
+        "project_status": row["project_status"],
+        "arxiv_id": row["arxiv_id"],
+        "title": row["paper_title"],
+        "link": row["link"],
+        "published_at": row["published_at"],
+        "match_score": round(_float(row["score"]), 4),
+        "explanation_confidence": round(_float(row["confidence"]), 4),
+        "suggested_action": row["suggested_action"] or "read_later",
+        "recommendation_reason": _short(row["recommendation_reason"], 700),
+        "relevant_points": from_json(row["relevant_points_json"], []),
+        "paper_evidence": _short(row["arxiv_text"], 700),
+        "project_evidence": _short(row["obsidian_text"], 700),
+        "project_note_path": row["note_path"],
+    }
+
+
+def _global_payload(row: sqlite3.Row) -> dict[str, object]:
+    return {
+        "arxiv_id": row["arxiv_id"],
+        "title": row["paper_title"],
+        "link": row["link"],
+        "published_at": row["published_at"],
+        "categories": from_json(row["categories_json"], []),
+        "match_score": round(_float(row["score"]), 4),
+        "explanation_confidence": round(_float(row["confidence"]), 4),
+        "suggested_action": row["suggested_action"] or "read_later",
+        "recommendation_reason": _short(row["recommendation_reason"], 700),
+    }
+
+
+def _report_source_payload(
+    report_date: str,
+    rel_path: str,
+    stats: dict[str, Any],
+    project_rows: list[sqlite3.Row],
+    global_rows: list[sqlite3.Row],
+) -> dict[str, object]:
+    project_paper_ids = {int(row["paper_id"]) for row in project_rows}
+    global_payload = [
+        _global_payload(row)
+        for row in global_rows
+        if int(row["paper_id"]) not in project_paper_ids
+    ]
+    return {
+        "date": report_date,
+        "report_path": rel_path,
+        "pipeline_stats": clean_unicode(stats),
+        "project_candidates": [_project_payload(row) for row in project_rows],
+        "global_recommendations": global_payload,
+        "counts": {
+            "project_candidates": len(project_rows),
+            "global_recommendations": len(global_payload),
+        },
+    }
+
+
+def _llm_report_prompt(payload: dict[str, object]) -> str:
+    return f"""
+只返回 JSON，不要 Markdown fence，不要额外解释。
+JSON schema: {{"markdown": "...完整 Markdown 正文..."}}
+
+你是科研情报编辑，也是研究助理。请基于下面所有候选论文解读、项目证据、论文证据和流程指标，生成一篇中文科研情报日报。
+目标不是列清单，而是让读者快速理解：今天有哪些论文值得投入注意力、为什么和现有项目有关、具体能怎么用、还需要验证什么。
+
+硬性要求：
+- markdown 字段必须是一篇完整 Markdown 正文，不要包含 YAML frontmatter。
+- 使用中文撰写；论文标题可以保留英文。
+- 事实只能来自输入 JSON；不要编造 arXiv ID、链接、项目名、分数或不存在的论文。
+- 保留每篇论文的 arXiv 链接，格式可用 [arXivID](URL)。
+- 按项目组织“项目候选论文”；每个项目下，每篇候选论文写成一个自然段，不要用脚本式字段堆砌。
+- 每篇项目候选论文都必须解释清楚 5 件事：一句话结论、为什么它和项目相关、论文里具体可借鉴的机制/方法/实验、可以落到项目里的下一步动作、主要不确定性或需要复核的证据。
+- 每篇项目候选论文段落建议 120-220 个中文字符；候选很多时可以压缩，但不能只写标题、分数或一句“值得关注”。
+- 不要直接复述 recommendation_reason；要综合 recommendation_reason、relevant_points、paper_evidence、project_evidence，写成读者能理解的判断。
+- 如果 paper_evidence 或 project_evidence 不足，要明确说“证据不足在哪里”，不要用确定语气。
+- 对已归入项目的论文，不要在“全局推荐”里重复展开。
+- 全局推荐只写没有明确项目归属但值得注意的论文；每篇也要用 2-3 句说明主题、潜在价值和为什么暂时没有明确项目归属。
+- 如果候选很多，仍要覆盖输入中的项目候选；可以用更紧凑的自然段，但不要只给标题列表。
+- 把流程指标放在靠后的“流程状态”部分，不能压过正文。
+- “重点优先级”不要只排序，要解释优先级原因：项目相关度、可行动性、证据强度、时间敏感性。
+- “今日忽略/过滤情况”要用通俗语言说明哪些论文/解释被筛掉，以及筛掉依据；没有相关输入时简短说明即可。
+- “下一步动作”要具体到可执行动作，例如阅读哪篇的哪些部分、把哪条想法写入哪个项目、需要补充什么验证。
+- 术语可以保留英文，但第一次出现时尽量用中文解释其作用。
+- 避免重复模板句、空泛判断和机械字段名；不要写“该论文具有重要意义”这类无信息量句子。
+- 不要输出“暂无流程指标”，除非 pipeline_stats 为空。
+
+建议结构：
+# <日期> 科研情报日报
+## 今日结论
+## 重点优先级
+## 按项目候选论文
+### [[项目名]]
+每篇论文一段。
+## 全局补充推荐
+## 今日忽略/过滤情况
+## 流程状态
+## 下一步动作
+
+输入 JSON：
+{to_json(payload)}
+""".strip()
+
+
+def _llm_daily_report_markdown(
+    settings: Settings,
+    report_date: str,
+    rel_path: str,
+    stats: dict[str, Any],
+    project_rows: list[sqlite3.Row],
+    global_rows: list[sqlite3.Row],
+) -> str:
+    provider = settings.chat_provider()
+    if not provider or not provider.api_key or not provider.base_url or not settings.llm_chat_model:
+        raise RuntimeError("LLM chat provider is not fully configured; daily report generation requires LLM output")
+    payload = _report_source_payload(report_date, rel_path, stats, project_rows, global_rows)
+    response = call_chat_json(
+        settings,
+        _llm_report_prompt(payload),
+        system="你是严谨的中文科研情报编辑，只根据输入事实生成可读 Markdown 日报。",
+    )
+    if not isinstance(response, dict):
+        raise RuntimeError("LLM daily report generation failed: no valid JSON response")
+    body = _normalize_llm_markdown(response.get("markdown"), report_date)
+    if not body:
+        raise RuntimeError("LLM daily report generation failed: response missing non-empty markdown")
+    return body
+
+
+def generate_daily_report(
     conn: sqlite3.Connection,
     settings: Settings,
+    stats: dict[str, Any] | None = None,
+    paper_ids: list[int] | None = None,
     limit: int | None = None,
-) -> dict[str, int]:
+) -> dict[str, object]:
     if not settings.obsidian_vault_path:
-        return {"reports_considered": 0, "reports_created": 0, "reports_skipped": 1}
-    rows = _report_rows(conn, limit or settings.arxiv_max_results)
-    created = 0
-    failed = 0
-    for row in rows:
-        project = conn.execute("SELECT * FROM research_projects WHERE id = ?", (int(row["project_id"]),)).fetchone()
-        paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (int(row["paper_id"]),)).fetchone()
-        if not project or not paper:
-            continue
-        try:
-            target, rel_path = _resolve_report_path(settings, project, paper)
-            judgment = _normalize_judgment(
-                call_chat_json(
-                    settings,
-                    _prompt(row),
-                    system="You generate evidence-grounded Chinese research usefulness reports for papers.",
-                ),
-                row,
-            )
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(_report_markdown(row, judgment, rel_path), encoding="utf-8")
-            now = utc_now()
-            conn.execute(
-                """
-                INSERT INTO project_artifacts(
-                  project_id, artifact_type, title, obsidian_path, status, source_json, created_at, updated_at
-                )
-                VALUES (?, 'paper_usefulness_report', ?, ?, 'synced', ?, ?, ?)
-                ON CONFLICT(project_id, artifact_type, obsidian_path) DO UPDATE SET
-                  title = excluded.title,
-                  status = excluded.status,
-                  source_json = excluded.source_json,
-                  updated_at = excluded.updated_at
-                """,
-                (
-                    int(row["project_id"]),
-                    str(row["paper_title"]),
-                    rel_path,
-                    to_json(
-                        {
-                            "paper_id": int(row["paper_id"]),
-                            "arxiv_id": row["arxiv_id"],
-                            "score": float(row["score"] or 0),
-                            "judgment": judgment,
-                        }
-                    ),
-                    now,
-                    now,
-                ),
-            )
-            conn.commit()
-            created += 1
-        except Exception as exc:
-            failed += 1
-            conn.execute(
-                """
-                INSERT INTO project_artifacts(
-                  project_id, artifact_type, title, obsidian_path, status, source_json, created_at, updated_at
-                )
-                VALUES (?, 'paper_usefulness_report_error', ?, '', 'failed', ?, ?, ?)
-                """,
-                (
-                    int(row["project_id"]),
-                    str(row["paper_title"]),
-                    to_json({"paper_id": int(row["paper_id"]), "error": str(exc)[:1000]}),
-                    utc_now(),
-                    utc_now(),
-                ),
-            )
-            conn.commit()
+        raise RuntimeError("Obsidian vault path is not configured")
+    stats = clean_unicode(stats or {})
+    report_date = date.today().isoformat()
+    row_limit = limit or DAILY_REPORT_LIMIT
+    project_rows = _project_match_rows(conn, paper_ids, row_limit)
+    global_rows = _global_match_rows(conn, paper_ids, row_limit)
+    target, rel_path = _resolve_daily_report_path(settings, report_date)
+    body = _llm_daily_report_markdown(
+        settings,
+        report_date,
+        rel_path,
+        stats,
+        project_rows,
+        global_rows,
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(_frontmatter(report_date) + body, encoding="utf-8")
     return {
-        "reports_considered": len(rows),
-        "reports_created": created,
-        "reports_failed": failed,
+        "reports_considered": len(project_rows) + len(global_rows),
+        "reports_created": 1,
+        "reports_failed": 0,
+        "daily_reports_created": 1,
+        "daily_report_path": rel_path,
+        "daily_report_mode": "llm",
+        "daily_report_project_matches": len(project_rows),
+        "daily_report_global_papers": len(global_rows),
     }

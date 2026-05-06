@@ -116,19 +116,48 @@ def fetch_arxiv(conn: sqlite3.Connection, settings: Settings) -> dict[str, int |
     page_size = min(100, max(1, settings.arxiv_max_results))
     inserted = 0
     seen = 0
+    tombstone_skipped = 0
+    pages_fetched = 0
+    stopped_at_cutoff = 0
 
     for start in range(0, settings.arxiv_max_results, page_size):
         if start > 0:
             time.sleep(settings.arxiv_request_interval_seconds)
         xml_text = _fetch_page(search_query, start, page_size)
+        pages_fetched += 1
         papers = _parse_feed(xml_text)
         if not papers:
             break
-        now = utc_now()
+        recent_papers: list[ArxivPaper] = []
+        reached_cutoff = False
         for paper in papers:
-            if not _is_recent(paper, settings.arxiv_daily_lookback_days):
-                continue
+            if _is_recent(paper, settings.arxiv_daily_lookback_days):
+                recent_papers.append(paper)
+            else:
+                reached_cutoff = True
+        now = utc_now()
+        for paper in recent_papers:
             seen += 1
+            tombstone = conn.execute(
+                """
+                SELECT arxiv_id
+                FROM arxiv_paper_tombstones
+                WHERE arxiv_id = ?
+                """,
+                (paper.arxiv_id,),
+            ).fetchone()
+            if tombstone:
+                tombstone_skipped += 1
+                conn.execute(
+                    """
+                    UPDATE arxiv_paper_tombstones
+                    SET seen_count = seen_count + 1,
+                        last_seen_at = ?
+                    WHERE arxiv_id = ?
+                    """,
+                    (now, paper.arxiv_id),
+                )
+                continue
             cur = conn.execute(
                 """
                 INSERT OR IGNORE INTO arxiv_papers(
@@ -154,7 +183,17 @@ def fetch_arxiv(conn: sqlite3.Connection, settings: Settings) -> dict[str, int |
             if cur.rowcount:
                 inserted += 1
         conn.commit()
+        if reached_cutoff:
+            stopped_at_cutoff = 1
+            break
         if len(papers) < page_size:
             break
 
-    return {"batch_id": batch_id, "papers_seen": seen, "papers_inserted": inserted}
+    return {
+        "batch_id": batch_id,
+        "papers_seen": seen,
+        "papers_inserted": inserted,
+        "papers_tombstone_skipped": tombstone_skipped,
+        "pages_fetched": pages_fetched,
+        "stopped_at_cutoff": stopped_at_cutoff,
+    }

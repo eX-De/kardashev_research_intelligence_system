@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import sqlite3
 import unittest
+import urllib.error
+from datetime import date, datetime, timedelta, timezone
+from io import BytesIO
 from pathlib import Path
+from unittest.mock import patch
 
 from worker.config import LLMProvider, Settings
 from worker.api import (
@@ -14,12 +18,16 @@ from worker.api import (
     save_project,
     unlink_project_paper,
 )
-from worker.arxiv_text import cache_arxiv_full_texts, extract_pdf_text_to_file, safe_arxiv_filename
+from worker.arxiv_archive import archive_zero_match_papers
+from worker.arxiv_client import fetch_arxiv
+from worker.arxiv_text import cache_arxiv_full_texts, download_pdf, extract_pdf_text_to_file, safe_arxiv_filename
+from worker.cli import _daily_papers_for_run, _prefilter_daily_papers
 from worker.db import clean_unicode, init_db, to_json
 from worker.embeddings import ensure_arxiv_chunk_embedding
+from worker.llm import _prompt, generate_missing_explanations
 from worker.obsidian import parse_note
 from worker.obsidian import sync_obsidian
-from worker.reports import generate_project_paper_reports
+from worker.reports import generate_daily_report
 from worker.search import hybrid_search, rank_project_papers, rank_unmatched_papers
 from worker.settings_store import apply_stored_settings, get_app_settings, save_app_settings
 
@@ -45,6 +53,7 @@ def test_settings() -> Settings:
         rag_prefilter_threshold=0.18,
         rag_prefilter_top_k=20,
         rag_prefilter_min_keep=30,
+        rag_prefilter_max_keep=50,
         vector_index_backend="sqlite",
         llm_providers=[],
         llm_chat_provider_id="",
@@ -75,7 +84,400 @@ def embedding_settings() -> Settings:
     )
 
 
+def chat_settings(settings: Settings) -> Settings:
+    return Settings(
+        **{
+            **settings.__dict__,
+            "llm_providers": [
+                LLMProvider(
+                    id="test-chat",
+                    name="Test Chat",
+                    base_url="https://llm.test/v1",
+                    api_key="test-key",
+                    chat_models=["test-chat-model"],
+                    embedding_models=[],
+                )
+            ],
+            "llm_chat_provider_id": "test-chat",
+            "llm_chat_model": "test-chat-model",
+        }
+    )
+
+
 class WorkerTests(unittest.TestCase):
+    def test_fetch_arxiv_stops_when_page_reaches_lookback_cutoff(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        recent = now.isoformat().replace("+00:00", "Z")
+        old = (now - timedelta(days=2)).isoformat().replace("+00:00", "Z")
+
+        def entry(arxiv_id: str, title: str, published: str) -> str:
+            return f"""
+              <entry>
+                <id>https://arxiv.org/abs/{arxiv_id}</id>
+                <title>{title}</title>
+                <summary>Abstract</summary>
+                <published>{published}</published>
+                <updated>{published}</updated>
+                <author><name>Author</name></author>
+                <category term="cs.AI" />
+                <link rel="alternate" href="https://arxiv.org/abs/{arxiv_id}" />
+                <link title="pdf" href="https://arxiv.org/pdf/{arxiv_id}" />
+              </entry>
+            """
+
+        feed = f"""
+          <feed xmlns="http://www.w3.org/2005/Atom">
+            {entry("2605.00001", "Recent", recent)}
+            {entry("2604.00001", "Old", old)}
+          </feed>
+        """
+        settings = Settings(**{**test_settings().__dict__, "arxiv_max_results": 250})
+        with patch("worker.arxiv_client._fetch_page", return_value=feed) as fetch_page:
+            result = fetch_arxiv(conn, settings)
+
+        self.assertEqual(fetch_page.call_count, 1)
+        self.assertEqual(result["pages_fetched"], 1)
+        self.assertEqual(result["stopped_at_cutoff"], 1)
+        self.assertEqual(result["papers_inserted"], 1)
+        arxiv_ids = [row["arxiv_id"] for row in conn.execute("SELECT arxiv_id FROM arxiv_papers")]
+        self.assertEqual(arxiv_ids, ["2605.00001"])
+
+    def test_fetch_arxiv_skips_tombstoned_papers(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        conn.execute(
+            """
+            INSERT INTO arxiv_paper_tombstones(
+              arxiv_id, title, authors_json, summary, categories_json, published_at,
+              updated_at, link, pdf_link, reason, original_fetched_batch_id, tombstoned_at
+            )
+            VALUES (
+              '2605.00001', 'Ignored', '[]', 'Abstract', '["cs.AI"]', ?, ?,
+              'https://arxiv.org/abs/2605.00001', 'https://arxiv.org/pdf/2605.00001',
+              'no_match', 'old', 'now'
+            )
+            """,
+            (now, now),
+        )
+        conn.commit()
+
+        def entry(arxiv_id: str, title: str) -> str:
+            return f"""
+              <entry>
+                <id>https://arxiv.org/abs/{arxiv_id}</id>
+                <title>{title}</title>
+                <summary>Abstract</summary>
+                <published>{now}</published>
+                <updated>{now}</updated>
+                <author><name>Author</name></author>
+                <category term="cs.AI" />
+                <link rel="alternate" href="https://arxiv.org/abs/{arxiv_id}" />
+                <link title="pdf" href="https://arxiv.org/pdf/{arxiv_id}" />
+              </entry>
+            """
+
+        feed = f"""
+          <feed xmlns="http://www.w3.org/2005/Atom">
+            {entry("2605.00001", "Ignored")}
+            {entry("2605.00002", "New")}
+          </feed>
+        """
+        with patch("worker.arxiv_client._fetch_page", return_value=feed):
+            result = fetch_arxiv(conn, test_settings())
+
+        self.assertEqual(result["papers_seen"], 2)
+        self.assertEqual(result["papers_inserted"], 1)
+        self.assertEqual(result["papers_tombstone_skipped"], 1)
+        arxiv_ids = [row["arxiv_id"] for row in conn.execute("SELECT arxiv_id FROM arxiv_papers")]
+        self.assertEqual(arxiv_ids, ["2605.00002"])
+        tombstone = conn.execute(
+            "SELECT seen_count, last_seen_at FROM arxiv_paper_tombstones WHERE arxiv_id = '2605.00001'"
+        ).fetchone()
+        self.assertEqual(tombstone["seen_count"], 1)
+        self.assertIsNotNone(tombstone["last_seen_at"])
+
+    def test_pdf_download_retries_once_after_429(self) -> None:
+        class FakeResponse:
+            headers = {"content-type": "application/pdf"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self) -> bytes:
+                return b"%PDF-" + (b"x" * 1200)
+
+        target = Path.cwd() / ".test-tmp" / "pdf-retry" / "paper.pdf"
+        calls = [urllib.error.HTTPError("https://arxiv.org/pdf/2605.00001", 429, "Too Many Requests", {}, BytesIO())]
+
+        def fake_urlopen(*args, **kwargs):
+            if calls:
+                raise calls.pop(0)
+            return FakeResponse()
+
+        with patch("worker.arxiv_text.urllib.request.urlopen", side_effect=fake_urlopen) as urlopen:
+            with patch("worker.arxiv_text.time.sleep") as sleep:
+                download_pdf("https://arxiv.org/pdf/2605.00001", target)
+
+        self.assertEqual(urlopen.call_count, 2)
+        sleep.assert_called_once_with(20)
+        self.assertTrue(target.exists())
+
+    def test_daily_papers_skip_previously_completed_papers(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+
+        def insert_paper(arxiv_id: str, batch_id: str, text_status: str, text_path: str = "") -> int:
+            conn.execute(
+                """
+                INSERT INTO arxiv_papers(
+                  arxiv_id, title, authors_json, summary, categories_json, published_at,
+                  updated_at, link, pdf_link, text_path, text_status, fetched_batch_id, created_at
+                )
+                VALUES (?, ?, '[]', 'Abstract', '["cs.CL"]',
+                  '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', ?, ?,
+                  ?, ?, ?, 'now')
+                """,
+                (
+                    arxiv_id,
+                    arxiv_id,
+                    f"https://arxiv.org/abs/{arxiv_id}",
+                    f"https://arxiv.org/pdf/{arxiv_id}",
+                    text_path,
+                    text_status,
+                    batch_id,
+                ),
+            )
+            return int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+
+        new_id = insert_paper("2605.00001", "current", "pending")
+        completed_old_id = insert_paper("2604.00001", "old", "complete", "paper.txt")
+        retry_old_id = insert_paper("2604.00002", "old", "pending")
+        missing_chunks_old_id = insert_paper("2604.00003", "old", "complete", "paper-2.txt")
+        missing_match_old_id = insert_paper("2604.00004", "old", "complete", "paper-3.txt")
+        tombstoned_old_id = insert_paper("2604.00006", "old", "pending")
+        conn.execute(
+            """
+            INSERT INTO arxiv_paper_tombstones(
+              arxiv_id, title, authors_json, summary, categories_json, published_at,
+              updated_at, link, pdf_link, reason, original_fetched_batch_id, tombstoned_at
+            )
+            SELECT arxiv_id, title, authors_json, summary, categories_json, published_at,
+                   updated_at, link, pdf_link, 'no_match', fetched_batch_id, 'now'
+            FROM arxiv_papers
+            WHERE id = ?
+            """,
+            (tombstoned_old_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO arxiv_text_chunks(paper_id, chunk_index, source, text, token_count, char_count, created_at)
+            VALUES (?, 0, 'metadata', 'already chunked', 2, 15, 'now')
+            """,
+            (completed_old_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO arxiv_text_chunks(paper_id, chunk_index, source, text, token_count, char_count, created_at)
+            VALUES (?, 0, 'metadata', 'needs ranking', 2, 13, 'now')
+            """,
+            (missing_match_old_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO obsidian_notes(path, title, frontmatter_json, tags_json, sha256, mtime, indexed_at)
+            VALUES ('Research/Done.md', 'Done', '{}', '[]', 'done', 1, 'now')
+            """
+        )
+        note_id = conn.execute("SELECT id FROM obsidian_notes").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO research_chunks(note_id, chunk_index, heading, text, token_count, source, created_at)
+            VALUES (?, 0, 'Done', 'already matched context', 3, 'obsidian', 'now')
+            """,
+            (note_id,),
+        )
+        chunk_id = conn.execute("SELECT id FROM research_chunks").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO matches(paper_id, arxiv_chunk_id, chunk_id, score, searchers_json, evidence_json, created_at)
+            VALUES (?, 1, ?, 0.9, '[]', '{}', 'now')
+            """,
+            (completed_old_id, chunk_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO llm_explanations(
+              paper_id, recommendation_reason, relevant_points_json, evidence_refs_json,
+              confidence, suggested_action, raw_json, created_at
+            )
+            VALUES (?, 'done', '[]', '[]', 0.9, 'read', '{}', 'now')
+            """,
+            (completed_old_id,),
+        )
+        conn.commit()
+
+        papers, result = _daily_papers_for_run(conn, test_settings(), "current")
+        paper_ids = {int(paper["id"]) for paper in papers}
+
+        self.assertEqual(paper_ids, {new_id, retry_old_id, missing_chunks_old_id, missing_match_old_id})
+        self.assertEqual(result["daily_new_papers"], 1)
+        self.assertEqual(result["daily_retry_papers"], 3)
+        self.assertEqual(result["daily_retry_text_papers"], 2)
+        self.assertEqual(result["daily_retry_global_match_papers"], 1)
+        self.assertEqual(result["daily_candidate_papers"], 4)
+
+    def test_daily_prefilter_bypasses_resume_papers_missing_ranking(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO arxiv_papers(
+              arxiv_id, title, authors_json, summary, categories_json, published_at,
+              updated_at, link, pdf_link, text_path, text_status, fetched_batch_id, created_at
+            )
+            VALUES ('2604.00005', 'Cached but unranked', '[]', 'Abstract', '["cs.CL"]',
+              '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+              'https://arxiv.org/abs/2604.00005', 'https://arxiv.org/pdf/2604.00005',
+              'paper.txt', 'complete', 'old', 'now')
+            """
+        )
+        paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO arxiv_text_chunks(paper_id, chunk_index, source, text, token_count, char_count, created_at)
+            VALUES (?, 0, 'full_text', 'cached text ready for ranking', 5, 29, 'now')
+            """,
+            (paper_id,),
+        )
+        conn.commit()
+        settings = Settings(
+            **{
+                **test_settings().__dict__,
+                "rag_prefilter_enabled": True,
+                "rag_prefilter_min_keep": 0,
+                "rag_prefilter_threshold": 0.99,
+            }
+        )
+        selected: list[sqlite3.Row] = []
+
+        result = _prefilter_daily_papers(conn, settings, "current", selected)
+
+        self.assertEqual([int(paper["id"]) for paper in selected], [int(paper_id)])
+        self.assertEqual(result["daily_retry_global_match_papers"], 1)
+        self.assertEqual(result["prefilter_resume_bypassed"], 1)
+        self.assertEqual(result["prefilter_passed"], 1)
+
+    def test_archive_zero_match_papers_keeps_only_tombstone_metadata(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        root = Path.cwd() / ".test-tmp" / "zero-match-archive"
+        root.mkdir(parents=True, exist_ok=True)
+        pdf_path = root / "paper.pdf"
+        text_path = root / "paper.txt"
+        pdf_path.write_bytes(b"%PDF- archived")
+        text_path.write_text("--- page 1 ---\nNo project relevance.", encoding="utf-8")
+        conn.execute(
+            """
+            INSERT INTO arxiv_papers(
+              arxiv_id, title, authors_json, summary, categories_json, published_at,
+              updated_at, link, pdf_link, pdf_path, text_path, text_status,
+              fetched_batch_id, created_at
+            )
+            VALUES (
+              '2605.00003', 'No Match', '["Author"]', 'Abstract', '["cs.AI"]',
+              '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z',
+              'https://arxiv.org/abs/2605.00003', 'https://arxiv.org/pdf/2605.00003',
+              ?, ?, 'complete', 'batch', 'now'
+            )
+            """,
+            (str(pdf_path), str(text_path)),
+        )
+        paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO arxiv_text_chunks(paper_id, chunk_index, source, text, token_count, char_count, created_at)
+            VALUES (?, 0, 'full_text', 'No project relevance.', 3, 21, 'now')
+            """,
+            (paper_id,),
+        )
+        chunk_id = conn.execute("SELECT id FROM arxiv_text_chunks").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO arxiv_chunk_embeddings(arxiv_chunk_id, model, embedding_json, created_at)
+            VALUES (?, 'mock-embedding', '[0.1]', 'now')
+            """,
+            (chunk_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO arxiv_paper_embeddings(paper_id, model, embedding_json, created_at)
+            VALUES (?, 'mock-embedding', '[0.2]', 'now')
+            """,
+            (paper_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO paper_prefilter_runs(paper_id, model, score, rank, passed, reason, top_chunks_json, created_at)
+            VALUES (?, 'prefilter', 0.1, 1, 1, 'kept', '[]', 'now')
+            """,
+            (paper_id,),
+        )
+        conn.commit()
+
+        result = archive_zero_match_papers(conn, test_settings(), [int(paper_id)])
+
+        self.assertEqual(result["zero_match_papers_archived"], 1)
+        self.assertEqual(result["zero_match_files_deleted"], 2)
+        self.assertFalse(pdf_path.exists())
+        self.assertFalse(text_path.exists())
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM arxiv_papers").fetchone()["count"], 0)
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM arxiv_text_chunks").fetchone()["count"], 0)
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM arxiv_chunk_embeddings").fetchone()["count"], 0)
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM arxiv_paper_embeddings").fetchone()["count"], 0)
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM paper_prefilter_runs").fetchone()["count"], 0)
+        tombstone = conn.execute("SELECT * FROM arxiv_paper_tombstones").fetchone()
+        self.assertEqual(tombstone["arxiv_id"], "2605.00003")
+        self.assertEqual(tombstone["title"], "No Match")
+        self.assertEqual(tombstone["reason"], "no_match")
+
+    def test_archive_zero_match_papers_keeps_failed_text_for_retry(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO arxiv_papers(
+              arxiv_id, title, authors_json, summary, categories_json, published_at,
+              updated_at, link, pdf_link, text_status, fetched_batch_id, created_at
+            )
+            VALUES (
+              '2605.00004', 'Retry Later', '[]', 'Abstract', '["cs.AI"]',
+              '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z',
+              'https://arxiv.org/abs/2605.00004', 'https://arxiv.org/pdf/2605.00004',
+              'failed', 'batch', 'now'
+            )
+            """
+        )
+        paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
+        conn.commit()
+
+        result = archive_zero_match_papers(conn, test_settings(), [int(paper_id)])
+
+        self.assertEqual(result["zero_match_papers_archived"], 0)
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM arxiv_papers").fetchone()["count"], 1)
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM arxiv_paper_tombstones").fetchone()["count"], 0)
+
     def test_parse_note_frontmatter_and_tags(self) -> None:
         vault = Path.cwd() / ".test-tmp" / "vault"
         note = vault / "Research" / "Topic.md"
@@ -210,7 +612,7 @@ class WorkerTests(unittest.TestCase):
         project_note = vault / "Research" / "Agentic RAG" / "Home.md"
         project_note.parent.mkdir(parents=True, exist_ok=True)
         project_note.write_text(
-            "---\ntitle: Agentic RAG\ntags: [project, Status/进行中]\n---\n# Agentic RAG\nProject center page.",
+            "---\ntitle: Home Page\ntags: [project, Status/进行中]\n---\n# Agentic RAG\nProject center page.",
             encoding="utf-8",
         )
         method_note = vault / "Research" / "Agentic RAG" / "Method.md"
@@ -261,6 +663,33 @@ class WorkerTests(unittest.TestCase):
         text = project_note.read_text(encoding="utf-8")
         self.assertIn("Status/已完成", text)
         self.assertNotIn("Status/进行中", text)
+
+    def test_obsidian_include_dirs_accept_backslashes(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        vault = Path.cwd() / ".test-tmp" / "backslash-include-vault"
+        project_note = vault / "人工智能" / "个人研究" / "持续学习" / "中心页.md"
+        project_note.parent.mkdir(parents=True, exist_ok=True)
+        project_note.write_text(
+            "---\ntags: [Contents, Project/Research]\n---\n# 持续学习\nProject center page.",
+            encoding="utf-8",
+        )
+        settings = Settings(
+            **{
+                **test_settings().__dict__,
+                "obsidian_vault_path": vault,
+                "obsidian_include_dirs": ["人工智能\\个人研究"],
+                "obsidian_project_center_tags": ["contents", "project/research"],
+            }
+        )
+
+        result = sync_obsidian(conn, settings)
+        self.assertEqual(result["notes_seen"], 1)
+        self.assertEqual(result["projects_synced"], 1)
+        project = projects(conn)["items"][0]
+        self.assertEqual(project["name"], "持续学习")
+        self.assertEqual(project["obsidian_project_path"], "人工智能/个人研究/持续学习/中心页.md")
 
     def test_project_center_links_papers_and_notes(self) -> None:
         conn = sqlite3.connect(":memory:")
@@ -413,6 +842,98 @@ class WorkerTests(unittest.TestCase):
         self.assertIsNotNone(match["arxiv_chunk_id"])
         self.assertIn("arxiv_text", match["evidence_json"])
 
+    def test_generate_explanations_normalizes_label_confidence(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO obsidian_notes(path, title, frontmatter_json, tags_json, sha256, mtime, indexed_at)
+            VALUES ('Research/context.md', 'Context', '{}', '[]', 'abc', 1, 'now')
+            """
+        )
+        note_id = conn.execute("SELECT id FROM obsidian_notes").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO research_chunks(note_id, chunk_index, heading, text, token_count, source, created_at)
+            VALUES (?, 0, 'Context', 'Useful retrieval evidence.', 3, 'obsidian', 'now')
+            """,
+            (note_id,),
+        )
+        chunk_id = conn.execute("SELECT id FROM research_chunks").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO arxiv_papers(
+              arxiv_id, title, authors_json, summary, categories_json, published_at,
+              updated_at, link, pdf_link, fetched_batch_id, created_at
+            )
+            VALUES ('2605.00007', 'LLM confidence label', '[]', 'Abstract', '["cs.AI"]',
+              '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z',
+              'https://arxiv.org/abs/2605.00007', 'https://arxiv.org/pdf/2605.00007',
+              'batch', 'now')
+            """
+        )
+        paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO arxiv_text_chunks(paper_id, chunk_index, source, text, token_count, char_count, created_at)
+            VALUES (?, 0, 'full_text', 'Paper retrieval evidence.', 3, 25, 'now')
+            """,
+            (paper_id,),
+        )
+        arxiv_chunk_id = conn.execute("SELECT id FROM arxiv_text_chunks").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO matches(paper_id, arxiv_chunk_id, chunk_id, score, searchers_json, evidence_json, created_at)
+            VALUES (?, ?, ?, 0.77, '[]', '{}', 'now')
+            """,
+            (paper_id, arxiv_chunk_id, chunk_id),
+        )
+        conn.commit()
+
+        with patch(
+            "worker.llm._call_chat",
+            return_value={
+                "recommendation_reason": "Relevant to current notes.",
+                "relevant_points": ["retrieval"],
+                "evidence_refs": [int(chunk_id)],
+                "confidence": "moderate",
+                "suggested_action": "read",
+            },
+        ):
+            result = generate_missing_explanations(conn, test_settings())
+
+        self.assertEqual(result["explanations_created"], 1)
+        self.assertEqual(result["explanations_filtered"], 0)
+        explanation = conn.execute("SELECT confidence, suggested_action FROM llm_explanations").fetchone()
+        self.assertAlmostEqual(float(explanation["confidence"]), 0.5)
+        self.assertEqual(explanation["suggested_action"], "read")
+
+    def test_explanation_prompt_requires_chinese_values(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO arxiv_papers(
+              arxiv_id, title, authors_json, summary, categories_json, published_at,
+              updated_at, link, pdf_link, fetched_batch_id, created_at
+            )
+            VALUES ('2605.00008', 'Chinese prompt', '[]', 'Abstract', '["cs.AI"]',
+              '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z',
+              'https://arxiv.org/abs/2605.00008', 'https://arxiv.org/pdf/2605.00008',
+              'batch', 'now')
+            """
+        )
+        paper = conn.execute("SELECT * FROM arxiv_papers").fetchone()
+
+        prompt = _prompt(paper, [])
+
+        self.assertIn("所有可读文本字段值必须使用中文", prompt)
+        self.assertIn("recommendation_reason 必须是 1-3 句中文", prompt)
+        self.assertIn("relevant_points 必须是中文短语数组", prompt)
+        self.assertIn("JSON 字段名保持英文", prompt)
+
     def test_project_rank_uses_project_folder_chunks(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -489,21 +1010,231 @@ class WorkerTests(unittest.TestCase):
 
         vault = Path.cwd() / ".test-tmp" / "report-vault"
         (vault / "Research" / "Agentic RAG").mkdir(parents=True, exist_ok=True)
-        report_settings = Settings(**{**test_settings().__dict__, "obsidian_vault_path": vault})
-        report_result = generate_project_paper_reports(conn, report_settings)
+        report_settings = chat_settings(Settings(**{**test_settings().__dict__, "obsidian_vault_path": vault}))
+        with patch(
+            "worker.reports.call_chat_json",
+            return_value={
+                "markdown": "\n".join(
+                    [
+                        "# 今日科研情报日报",
+                        "",
+                        "## 今日结论",
+                        "",
+                        "Agentic RAG 今天有一篇值得跟进的候选论文。",
+                        "",
+                        "## 按项目候选论文",
+                        "",
+                        "### [[Agentic RAG]]",
+                        "",
+                        "[2501.00003](https://arxiv.org/abs/2501.00003) Agentic Retrieval Planning 可用于项目的 evidence selection 设计。",
+                    ]
+                )
+            },
+        ):
+            report_result = generate_daily_report(
+                conn,
+                report_settings,
+                stats={"arxiv_papers_inserted": 1, "project_paper_matches_created": 1},
+                paper_ids=[paper_id],
+            )
         self.assertEqual(report_result["reports_created"], 1)
-        report_path = vault / "Research" / "Agentic RAG" / "Papers" / "2501.00003 - Agentic Retrieval Planning.md"
+        report_path = vault / "Research Intelligence" / "Daily" / f"{date.today().isoformat()}.md"
         self.assertTrue(report_path.exists())
         report_text = report_path.read_text(encoding="utf-8")
-        self.assertIn("## 结论", report_text)
-        self.assertIn("## 具体有用在哪", report_text)
+        self.assertIn("## 今日结论", report_text)
+        self.assertIn("## 按项目候选论文", report_text)
         self.assertIn("Agentic Retrieval Planning", report_text)
-        artifact = conn.execute(
-            "SELECT artifact_type, obsidian_path, status FROM project_artifacts WHERE project_id = ?",
-            (project_id,),
-        ).fetchone()
-        self.assertEqual(artifact["artifact_type"], "paper_usefulness_report")
-        self.assertEqual(artifact["status"], "synced")
+        self.assertIn("Agentic RAG", report_text)
+        artifact_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM project_artifacts WHERE artifact_type = 'paper_usefulness_report'"
+        ).fetchone()["count"]
+        self.assertEqual(artifact_count, 0)
+
+    def test_daily_report_filters_by_explanation_and_writes_project_paragraphs(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO research_projects(
+              name, status, keywords_json, obsidian_project_path, obsidian_output_dir,
+              obsidian_folder, obsidian_status_tag, discovery_source, source_tags_json,
+              arxiv_categories_json, automation_json, created_at, updated_at
+            )
+            VALUES (
+              'Agentic RAG', 'active', '[]', 'Research/Agentic RAG/Home.md',
+              'Research/Agentic RAG', 'Research/Agentic RAG', 'Status/进行中',
+              'obsidian', '["project"]', '[]', '{}', 'now', 'now'
+            )
+            """
+        )
+        project_id = conn.execute("SELECT id FROM research_projects").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO obsidian_notes(path, title, frontmatter_json, tags_json, sha256, mtime, indexed_at)
+            VALUES ('Research/Agentic RAG/Method.md', 'Method', '{}', '[]', 'abc', 1, 'now')
+            """
+        )
+        note_id = conn.execute("SELECT id FROM obsidian_notes").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO research_chunks(note_id, chunk_index, heading, text, token_count, source, created_at)
+            VALUES (?, 0, 'Planner', 'The project needs retrieval planner state and evidence selection.', 8, 'obsidian', 'now')
+            """,
+            (note_id,),
+        )
+        obsidian_chunk_id = conn.execute("SELECT id FROM research_chunks").fetchone()["id"]
+
+        paper_ids = []
+        for arxiv_id, title in [
+            ("2605.01001", "Keep Planner Paper"),
+            ("2605.01002", "Ignored Generic Paper"),
+        ]:
+            conn.execute(
+                """
+                INSERT INTO arxiv_papers(
+                  arxiv_id, title, authors_json, summary, categories_json, published_at,
+                  updated_at, link, pdf_link, fetched_batch_id, created_at
+                )
+                VALUES (?, ?, '[]', 'Abstract', '["cs.AI"]',
+                  '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z', ?, ?, 'batch', 'now')
+                """,
+                (
+                    arxiv_id,
+                    title,
+                    f"https://arxiv.org/abs/{arxiv_id}",
+                    f"https://arxiv.org/pdf/{arxiv_id}",
+                ),
+            )
+            paper_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+            paper_ids.append(int(paper_id))
+            conn.execute(
+                """
+                INSERT INTO arxiv_text_chunks(paper_id, chunk_index, source, text, token_count, char_count, created_at)
+                VALUES (?, 0, 'full_text', ?, 5, 50, 'now')
+                """,
+                (paper_id, f"{title} discusses retrieval planner evidence selection."),
+            )
+            arxiv_chunk_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+            conn.execute(
+                """
+                INSERT INTO project_paper_matches(
+                  project_id, paper_id, score, best_arxiv_chunk_id, best_obsidian_chunk_id,
+                  searchers_json, evidence_json, match_type, created_at, updated_at
+                )
+                VALUES (?, ?, 0.8, ?, ?, '[]', '{}', 'project_context', 'now', 'now')
+                """,
+                (project_id, paper_id, arxiv_chunk_id, obsidian_chunk_id),
+            )
+
+        conn.execute(
+            """
+            INSERT INTO llm_explanations(
+              paper_id, recommendation_reason, relevant_points_json, evidence_refs_json,
+              confidence, suggested_action, raw_json, created_at
+            )
+            VALUES (?, '这篇论文直接讨论 retrieval planner state，可用于当前 Agentic RAG 设计。', '["planner state", "evidence selection"]', '[]', 0.82, 'read', '{}', 'now')
+            """,
+            (paper_ids[0],),
+        )
+        conn.execute(
+            """
+            INSERT INTO llm_explanations(
+              paper_id, recommendation_reason, relevant_points_json, evidence_refs_json,
+              confidence, suggested_action, raw_json, created_at
+            )
+            VALUES (?, '泛泛相关，不值得进入日报。', '[]', '[]', 0.9, 'ignore', '{}', 'now')
+            """,
+            (paper_ids[1],),
+        )
+        conn.commit()
+
+        vault = Path.cwd() / ".test-tmp" / "report-filter-vault"
+        vault.mkdir(parents=True, exist_ok=True)
+        report_settings = chat_settings(Settings(**{**test_settings().__dict__, "obsidian_vault_path": vault}))
+        with patch(
+            "worker.reports.call_chat_json",
+            return_value={
+                "markdown": "\n".join(
+                    [
+                        "# 今日科研情报日报",
+                        "",
+                        "## 今日结论",
+                        "",
+                        "只保留通过解释筛选的候选。",
+                        "",
+                        "## 按项目候选论文",
+                        "",
+                        "### [[Agentic RAG]]",
+                        "",
+                        "**[2605.01001](https://arxiv.org/abs/2605.01001)《Keep Planner Paper》** 这篇论文直接讨论 retrieval planner state。",
+                        "",
+                        "## 流程状态",
+                        "",
+                        "- 解释筛掉 1",
+                    ]
+                )
+            },
+        ) as call_chat:
+            result = generate_daily_report(
+                conn,
+                report_settings,
+                stats={"explanations_created": 2, "explanations_filtered": 1},
+                paper_ids=paper_ids,
+            )
+
+        self.assertEqual(result["reports_created"], 1)
+        self.assertEqual(result["daily_report_project_matches"], 1)
+        prompt = call_chat.call_args.args[1]
+        self.assertIn("Keep Planner Paper", prompt)
+        self.assertNotIn("Ignored Generic Paper", prompt)
+        report_path = vault / "Research Intelligence" / "Daily" / f"{date.today().isoformat()}.md"
+        report_text = report_path.read_text(encoding="utf-8")
+        self.assertIn("### [[Agentic RAG]]", report_text)
+        self.assertIn("**[2605.01001](https://arxiv.org/abs/2605.01001)《Keep Planner Paper》**", report_text)
+        self.assertIn("这篇论文直接讨论 retrieval planner state", report_text)
+        self.assertIn("解释筛掉 1", report_text)
+        self.assertNotIn("Ignored Generic Paper", report_text)
+
+    def test_daily_report_uses_llm_generated_markdown_when_available(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        vault = Path.cwd() / ".test-tmp" / "report-llm-vault"
+        vault.mkdir(parents=True, exist_ok=True)
+        report_settings = chat_settings(Settings(**{**test_settings().__dict__, "obsidian_vault_path": vault}))
+
+        with patch(
+            "worker.reports.call_chat_json",
+            return_value={
+                "markdown": "\n".join(
+                    [
+                        "# 2026-05-03 科研情报日报",
+                        "",
+                        "## 今日结论",
+                        "",
+                        "这是 LLM 统一生成的完整日报正文。",
+                        "",
+                        "## 按项目候选论文",
+                        "",
+                        "没有候选论文时，也由 LLM 解释原因。",
+                    ]
+                )
+            },
+        ) as call_chat:
+            result = generate_daily_report(conn, report_settings, stats={"arxiv_papers_inserted": 0})
+
+        self.assertEqual(result["reports_created"], 1)
+        self.assertEqual(result["daily_report_mode"], "llm")
+        call_chat.assert_called_once()
+        prompt = call_chat.call_args.args[1]
+        self.assertIn("为什么它和项目相关", prompt)
+        self.assertIn("120-220 个中文字符", prompt)
+        report_path = vault / "Research Intelligence" / "Daily" / f"{date.today().isoformat()}.md"
+        report_text = report_path.read_text(encoding="utf-8")
+        self.assertIn("source: research_intelligence_system", report_text)
+        self.assertIn("这是 LLM 统一生成的完整日报正文。", report_text)
+        self.assertNotIn("暂无项目级候选论文。", report_text)
 
     def test_arxiv_chunk_embedding_cache_is_reused(self) -> None:
         conn = sqlite3.connect(":memory:")
@@ -636,6 +1367,44 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(len(selected), 1)
         self.assertEqual(result["prefilter_skipped"], 1)
         self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM paper_prefilter_runs").fetchone()["count"], 2)
+
+    def test_prefilter_caps_selected_papers_with_max_keep(self) -> None:
+        from worker.search import prefilter_papers
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        for index in range(3):
+            conn.execute(
+                """
+                INSERT INTO arxiv_papers(
+                  arxiv_id, title, authors_json, summary, categories_json, published_at,
+                  updated_at, link, pdf_link, fetched_batch_id, created_at
+                )
+                VALUES (?, ?, '[]', 'Abstract', '["cs.CL"]',
+                  '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', ?, ?, 'batch', 'now')
+                """,
+                (
+                    f"2501.0002{index}",
+                    f"Paper {index}",
+                    f"https://arxiv.org/abs/2501.0002{index}",
+                    f"https://arxiv.org/pdf/2501.0002{index}",
+                ),
+            )
+        rows = conn.execute("SELECT * FROM arxiv_papers ORDER BY id").fetchall()
+        settings = Settings(
+            **{
+                **test_settings().__dict__,
+                "rag_prefilter_enabled": False,
+                "rag_prefilter_max_keep": 2,
+            }
+        )
+
+        selected, result = prefilter_papers(conn, settings, list(rows))
+        self.assertEqual(len(selected), 2)
+        self.assertEqual(result["prefilter_passed"], 2)
+        self.assertEqual(result["prefilter_skipped"], 1)
+        self.assertEqual(result["prefilter_capped"], 1)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .db import clean_unicode, from_json, to_json, utc_now
 from .config import Settings
+from .llm import EXPLANATION_REPORT_CONFIDENCE_THRESHOLD
 from .obsidian import status_tag_for_project_status, update_markdown_status_tag
 
 
@@ -661,10 +662,13 @@ def inbox(conn: sqlite3.Connection) -> dict[str, object]:
         JOIN matches m ON m.paper_id = p.id
         LEFT JOIN llm_explanations e ON e.paper_id = p.id
         LEFT JOIN user_feedback f ON f.paper_id = p.id
+        WHERE e.paper_id IS NULL
+           OR (e.suggested_action != 'ignore' AND e.confidence >= ?)
         GROUP BY p.id
         ORDER BY score DESC, p.published_at DESC
         LIMIT 100
-        """
+        """,
+        (EXPLANATION_REPORT_CONFIDENCE_THRESHOLD,),
     ).fetchall()
     items = []
     for row in rows:

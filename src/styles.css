@@ -187,6 +187,30 @@ button:disabled {
   align-items: start;
 }
 
+.project-center-grid {
+  display: grid;
+  grid-template-columns: minmax(640px, 1fr) minmax(360px, 0.34fr);
+  grid-template-areas:
+    "stats reminders"
+    "list list";
+  gap: 20px;
+  align-items: start;
+}
+
+.project-page-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.project-page .project-dashboard-header > div {
+  display: grid;
+  gap: 10px;
+}
+
+.project-page .project-dashboard-header button {
+  width: fit-content;
+}
+
 .project-stats-panel {
   grid-area: stats;
 }
@@ -428,6 +452,15 @@ h2 {
 
 .daily-progress-summary {
   padding-top: 2px;
+}
+
+.cache-progress-box {
+  display: grid;
+  gap: 7px;
+  padding: 9px;
+  border: 1px solid #dbe6f4;
+  border-radius: 9px;
+  background: #f8fbff;
 }
 
 .project-stats {
@@ -771,6 +804,17 @@ h2 {
   padding: 8px 10px;
   color: var(--ink);
   background: #fff;
+}
+
+.path-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.path-input-row button {
+  white-space: nowrap;
 }
 
 .project-form input:focus,
@@ -1343,6 +1387,14 @@ a {
       "detail";
   }
 
+  .project-center-grid {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "reminders"
+      "stats"
+      "list";
+  }
+
   .project-reminders {
     grid-template-columns: 1fr;
   }
@@ -1376,6 +1428,10 @@ a {
       "stats reminders"
       "list list"
       "detail detail";
+  }
+
+  .project-center-grid {
+    grid-template-columns: minmax(0, 1fr) 360px;
   }
 }
 

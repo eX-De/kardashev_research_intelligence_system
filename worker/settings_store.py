@@ -26,6 +26,7 @@ INT_FIELDS = {
     "rag_top_k",
     "rag_prefilter_top_k",
     "rag_prefilter_min_keep",
+    "rag_prefilter_max_keep",
     "scheduler_interval_hours",
 }
 
@@ -150,6 +151,7 @@ def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, An
         "rag_prefilter_threshold": settings.rag_prefilter_threshold,
         "rag_prefilter_top_k": settings.rag_prefilter_top_k,
         "rag_prefilter_min_keep": settings.rag_prefilter_min_keep,
+        "rag_prefilter_max_keep": settings.rag_prefilter_max_keep,
         "vector_index_backend": settings.vector_index_backend,
         "llm_providers": [_provider_to_payload(provider) for provider in settings.llm_providers],
         "llm_chat_provider_id": settings.llm_chat_provider_id,

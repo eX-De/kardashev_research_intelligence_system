@@ -1,4 +1,6 @@
-export function Sidebar() {
+export function Sidebar({ activeView, onNavigate, statusMessage }) {
+  const navView = activeView === "project" ? "projects" : activeView;
+
   return (
     <aside className="sidebar">
       <div className="brand">
@@ -10,20 +12,18 @@ export function Sidebar() {
       </div>
 
       <nav className="main-nav" aria-label="主导航">
-        <button className="nav-button active" data-view="projects" type="button">
+        <button className={`nav-button ${navView === "projects" ? "active" : ""}`} onClick={() => onNavigate("projects")} type="button">
           项目中心
         </button>
-        <button className="nav-button" data-view="inbox" type="button">
+        <button className={`nav-button ${navView === "inbox" ? "active" : ""}`} onClick={() => onNavigate("inbox")} type="button">
           论文推荐
         </button>
-        <button className="nav-button" data-view="control" type="button">
+        <button className={`nav-button ${navView === "control" ? "active" : ""}`} onClick={() => onNavigate("control")} type="button">
           配置与任务
         </button>
       </nav>
 
-      <div className="status" id="jobStatus">
-        Idle
-      </div>
+      <div className="status">{statusMessage || "Idle"}</div>
     </aside>
   );
 }

@@ -40,6 +40,10 @@ def _normalize_rel(path: Path) -> str:
     return clean_unicode(path.as_posix().lstrip("./"))
 
 
+def _normalize_include_dir(path: str) -> str:
+    return clean_unicode(path.strip().replace("\\", "/").strip("/"))
+
+
 def normalize_tag(value: object) -> str:
     return clean_unicode(str(value or "")).strip().lstrip("#").strip(".,;:!?，。；：").lower()
 
@@ -166,7 +170,7 @@ def _is_included(path: Path, vault: Path, settings: Settings) -> bool:
     if settings.obsidian_include_dirs:
         allowed = False
         for include_dir in settings.obsidian_include_dirs:
-            prefix = include_dir.strip("/\\")
+            prefix = _normalize_include_dir(include_dir)
             if rel == prefix or rel.startswith(prefix + "/"):
                 allowed = True
                 break
@@ -190,7 +194,7 @@ def discover_notes(settings: Settings) -> list[ParsedNote]:
         rel = _normalize_rel(path.relative_to(vault))
         if settings.obsidian_include_dirs:
             allowed = any(
-                rel == include.strip("/\\") or rel.startswith(include.strip("/\\") + "/")
+                rel == _normalize_include_dir(include) or rel.startswith(_normalize_include_dir(include) + "/")
                 for include in settings.obsidian_include_dirs
             )
             if not allowed:
@@ -363,6 +367,13 @@ def _project_center_match(note: ParsedNote, settings: Settings) -> bool:
     return bool(required) and required.issubset(set(note.tags))
 
 
+def _project_name_from_center_note(note: ParsedNote) -> str:
+    parent = Path(note.path).parent
+    if str(parent) == ".":
+        return note.title
+    return clean_unicode(parent.name.strip()) or note.title
+
+
 def _sync_project_from_note(
     conn: sqlite3.Connection,
     note: ParsedNote,
@@ -375,6 +386,7 @@ def _sync_project_from_note(
     now = utc_now()
     path = Path(note.path)
     folder = "" if str(path.parent) == "." else path.parent.as_posix()
+    project_name = _project_name_from_center_note(note)
     center_tags = [normalize_tag(tag) for tag in settings.obsidian_project_center_tags if normalize_tag(tag)]
     keywords = [
         tag
@@ -391,7 +403,7 @@ def _sync_project_from_note(
         (note_id, note.path, note_id),
     ).fetchone()
     payload = (
-        note.title,
+        project_name,
         status,
         to_json(keywords),
         note.path,

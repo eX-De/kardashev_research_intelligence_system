@@ -60,6 +60,7 @@ class Settings:
     rag_prefilter_threshold: float
     rag_prefilter_top_k: int
     rag_prefilter_min_keep: int
+    rag_prefilter_max_keep: int
     vector_index_backend: str
     llm_providers: list[LLMProvider]
     llm_chat_provider_id: str
@@ -146,6 +147,7 @@ def load_settings() -> Settings:
         rag_prefilter_threshold=float(os.environ.get("RAG_PREFILTER_THRESHOLD", "0.18")),
         rag_prefilter_top_k=int(os.environ.get("RAG_PREFILTER_TOP_K", "20")),
         rag_prefilter_min_keep=int(os.environ.get("RAG_PREFILTER_MIN_KEEP", "30")),
+        rag_prefilter_max_keep=int(os.environ.get("RAG_PREFILTER_MAX_KEEP", "50")),
         vector_index_backend=os.environ.get("VECTOR_INDEX_BACKEND", "sqlite"),
         llm_providers=providers,
         llm_chat_provider_id=os.environ.get("LLM_CHAT_PROVIDER_ID", ""),

@@ -228,11 +228,14 @@ def prefilter_papers(
     papers: list[sqlite3.Row],
 ) -> tuple[list[sqlite3.Row], dict[str, int]]:
     if not settings.rag_prefilter_enabled or "embedding_search" not in settings.rag_searchers:
-        return papers, {
+        max_keep = max(0, settings.rag_prefilter_max_keep)
+        selected = papers[:max_keep] if max_keep else papers
+        return selected, {
             "prefilter_considered": len(papers),
-            "prefilter_passed": len(papers),
-            "prefilter_skipped": 0,
+            "prefilter_passed": len(selected),
+            "prefilter_skipped": len(papers) - len(selected),
             "prefilter_fallback": 1,
+            "prefilter_capped": 1 if max_keep and len(papers) > max_keep else 0,
         }
 
     scored: list[tuple[sqlite3.Row, float, list[dict[str, object]]]] = []
@@ -254,20 +257,31 @@ def prefilter_papers(
         scored.append((paper, top_score, top_chunks))
 
     if fallback:
-        return papers, {
+        max_keep = max(0, settings.rag_prefilter_max_keep)
+        selected = papers[:max_keep] if max_keep else papers
+        return selected, {
             "prefilter_considered": len(papers),
-            "prefilter_passed": len(papers),
-            "prefilter_skipped": 0,
+            "prefilter_passed": len(selected),
+            "prefilter_skipped": len(papers) - len(selected),
             "prefilter_fallback": 1,
+            "prefilter_capped": 1 if max_keep and len(papers) > max_keep else 0,
         }
 
     scored.sort(key=lambda item: item[1], reverse=True)
     selected: list[sqlite3.Row] = []
     now = utc_now()
     min_keep = max(0, settings.rag_prefilter_min_keep)
+    max_keep = max(0, settings.rag_prefilter_max_keep)
+    capped = 0
     for rank, (paper, score, top_chunks) in enumerate(scored, start=1):
-        passed = score >= settings.rag_prefilter_threshold or rank <= min_keep
-        reason = "score" if score >= settings.rag_prefilter_threshold else "min_keep" if rank <= min_keep else "below_threshold"
+        would_pass = score >= settings.rag_prefilter_threshold or rank <= min_keep
+        if would_pass and max_keep and len(selected) >= max_keep:
+            passed = False
+            reason = "max_keep"
+            capped = 1
+        else:
+            passed = would_pass
+            reason = "score" if score >= settings.rag_prefilter_threshold else "min_keep" if rank <= min_keep else "below_threshold"
         conn.execute(
             """
             INSERT INTO paper_prefilter_runs(
@@ -294,6 +308,7 @@ def prefilter_papers(
         "prefilter_passed": len(selected),
         "prefilter_skipped": len(papers) - len(selected),
         "prefilter_fallback": 0,
+        "prefilter_capped": capped,
     }
 
 
@@ -572,7 +587,7 @@ def rank_project_papers(
                   evidence_json = excluded.evidence_json,
                   match_type = excluded.match_type,
                   updated_at = excluded.updated_at
-                WHERE excluded.score >= project_paper_matches.score
+                WHERE excluded.score > project_paper_matches.score
                 """,
                 (
                     project_id,

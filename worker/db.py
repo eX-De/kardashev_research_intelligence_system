@@ -62,6 +62,23 @@ CREATE TABLE IF NOT EXISTS arxiv_papers (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS arxiv_paper_tombstones (
+  arxiv_id TEXT PRIMARY KEY,
+  title TEXT NOT NULL DEFAULT '',
+  authors_json TEXT NOT NULL DEFAULT '[]',
+  summary TEXT NOT NULL DEFAULT '',
+  categories_json TEXT NOT NULL DEFAULT '[]',
+  published_at TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL DEFAULT '',
+  link TEXT NOT NULL DEFAULT '',
+  pdf_link TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT 'no_match',
+  original_fetched_batch_id TEXT NOT NULL DEFAULT '',
+  seen_count INTEGER NOT NULL DEFAULT 0,
+  last_seen_at TEXT,
+  tombstoned_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS arxiv_text_chunks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   paper_id INTEGER NOT NULL REFERENCES arxiv_papers(id) ON DELETE CASCADE,
@@ -221,6 +238,7 @@ CREATE TABLE IF NOT EXISTS project_artifacts (
 
 CREATE INDEX IF NOT EXISTS idx_research_chunks_note ON research_chunks(note_id);
 CREATE INDEX IF NOT EXISTS idx_arxiv_papers_published ON arxiv_papers(published_at);
+CREATE INDEX IF NOT EXISTS idx_arxiv_paper_tombstones_reason ON arxiv_paper_tombstones(reason, tombstoned_at DESC);
 CREATE INDEX IF NOT EXISTS idx_arxiv_text_chunks_paper ON arxiv_text_chunks(paper_id, chunk_index);
 CREATE INDEX IF NOT EXISTS idx_paper_prefilter_runs_paper ON paper_prefilter_runs(paper_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_matches_paper_score ON matches(paper_id, score DESC);

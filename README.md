@@ -70,7 +70,7 @@ http://localhost:5173
 
 ## Dashboard 功能
 
-- 项目中心：默认主界面，以项目看板管理 Obsidian 项目主页、输出目录、输入源、自动化开关、关联 arXiv 论文和关联笔记。
+- 项目中心：默认主界面，只保留全局运行概览、提醒、项目列表和新建入口；项目特定配置与关联信息进入单独项目页。
 - 论文推荐：展示进入推荐池的 arXiv 论文，按相关性排序。Inbox 只是候选入口，不是系统主界面。
 - 论文详情：展示摘要、arXiv 链接、命中的 arXiv 正文段、Obsidian 证据片段、解释和标注按钮。
 - Obsidian 同步：项目详情可以把项目索引同步到 Obsidian，减少手写项目维护文本。
@@ -90,10 +90,10 @@ npm run sync-obsidian
 
 这些命令不是常驻服务，而是一次性 worker 任务：
 
-- `npm run run-daily`：完整每日流程，依次同步 Obsidian、抓取 arXiv、摘要粗筛、缓存通过粗筛的 PDF/TXT、匹配论文、生成解释和用途报告。
+- `npm run run-daily`：完整每日流程，依次同步 Obsidian、抓取 arXiv、摘要粗筛、缓存通过粗筛的 PDF/TXT、匹配论文、生成解释和每日总报告。
 - `npm run fetch-arxiv`：抓取 arXiv 元数据，并按摘要粗筛结果缓存 PDF/TXT，适合补抓或调试。
 - `npm run cache-arxiv-text`：显式补缓存命令，会对已入库且未完成全文缓存的论文下载 PDF，并用 PyMuPDF 提取 TXT。
-- `npm run generate-reports`：为项目候选论文生成“这篇论文对我的研究有没有用、具体有用在哪”的 Obsidian Markdown 报告。
+- `npm run generate-reports`：生成一篇 Obsidian Markdown 每日总报告，汇总当天流程指标、项目候选论文、全局推荐论文、风险和下一步动作。
 - `npm run sync-obsidian`：只刷新 Obsidian 研究画像索引。
 
 ## 开发验证命令
@@ -114,6 +114,7 @@ npm run check
 业务配置可以在 dashboard 的“配置与任务”里修改：
 
 - `OBSIDIAN_VAULT_PATH`：Obsidian vault 路径。
+- 路径输入框支持手动输入，也可以点击“选择”由本地 Node 服务打开 Finder / 系统文件选择器；选择 vault 本身不需要先保存配置，项目主页和输出目录会优先按当前表单里的 vault 转成相对路径。
 - `OBSIDIAN_INCLUDE_DIRS`：需要扫描的文件夹，例如 `Research,Papers`。
 - `OBSIDIAN_INCLUDE_TAGS`：需要纳入研究画像的标签，例如 `research,paper,direction`。
 - `OBSIDIAN_PROJECT_CENTER_TAGS`：项目中心页必须同时具备的标签组合。匹配的 Markdown 会被识别为项目中心页，它所在的父文件夹会作为项目文件夹。
@@ -126,19 +127,19 @@ npm run check
 - `RAG_PREFILTER_THRESHOLD`：粗筛通过阈值，默认偏宽松。
 - `RAG_PREFILTER_TOP_K`：粗筛时参与评分的 Obsidian chunk 数量。
 - `RAG_PREFILTER_MIN_KEEP`：每天即使低于阈值也保底进入精排的论文数量。
+- `RAG_PREFILTER_MAX_KEEP`：每天最多进入精排的论文数量，`0` 表示不限制。
 - `RUN_DAILY_ON_STARTUP_ENABLED`：dashboard 每日首次启动时是否自动执行 `run-daily`。
 - `SCHEDULER_ENABLED`、`SCHEDULER_RUN_TIME`、`SCHEDULER_INTERVAL_HOURS`：dashboard 定时任务默认值。`RUN_DAILY_ON_STARTUP_ENABLED` 与 `SCHEDULER_ENABLED` 互斥。
 - `LLM_PROVIDERS_JSON`、`LLM_CHAT_PROVIDER_ID`、`LLM_CHAT_MODEL`、`LLM_EMBEDDING_PROVIDER_ID`、`LLM_EMBEDDING_MODEL`：LLM provider 默认值。日常建议直接在 dashboard 中配置多个 provider 和模型。
 
 dashboard 保存的业务配置会写入 SQLite，并覆盖 `.env` 中的对应默认值。启动级配置不会暴露在 dashboard，需要改 `.env` 并重启。
 
-项目配置保存在 SQLite，但可读内容以 Obsidian 为准：
+项目配置保存在 SQLite，但可读内容以 Obsidian 为准。项目中心只显示列表，单独项目页负责这些项目特定信息：
 
 - `obsidian_project_path`：项目主页 Markdown 路径，例如 `Projects/Agentic RAG.md`。
 - `obsidian_output_dir`：自动生成论文卡片、综述、实验记录整理结果的输出目录。
-- `source_tags`：该项目关注的 Obsidian 标签，用于把已有笔记作为 RAG 和整理输入。
-- `arxiv_categories`：该项目关注的 arXiv 分类；未配置时沿用全局配置。
-- `automation`：是否自动纳入高相关论文、生成论文卡片、生成项目综述、整理实验记录。
+- 项目页可修改项目名、状态、关键词、Obsidian 项目主页和输出目录。
+- 项目页可查看候选论文、项目证据、生成产物，并手动关联或移除论文/笔记。
 
 dashboard 不再把“项目摘要/目标/备注”作为主要手写输入。项目状态、论文集合、笔记集合和自动化结果由系统维护；需要人阅读和编辑的内容落在 Obsidian Markdown 中。
 
@@ -150,10 +151,10 @@ arXiv 正文会切成 `arxiv_text_chunks` 后逐段匹配 Obsidian 的 `research
 
 项目级论文匹配会把检索范围限制在该项目自动关联的 Obsidian 笔记 chunk 中，结果写入 `project_paper_matches`，并把高相关论文作为 `candidate` 关联到项目。项目详情页会显示项目候选论文、命中分数和论文/项目证据片段。
 
-每日流程最后会基于 `project_paper_matches` 生成单篇论文用途报告，写入项目文件夹下的 `Papers/`，例如 `Research/Agentic RAG/Papers/2501.00003 - Agentic Retrieval Planning.md`。报告会回答：是否有用、对哪个项目有用、具体用途、论文证据、项目证据、不确定点和建议动作；生成记录会写入 `project_artifacts`。
+每日流程最后会生成一篇每日总报告，写入 `Research Intelligence/Daily/YYYY-MM-DD.md`。报告汇总当天流程指标、项目候选论文、全局推荐论文、风险/不确定点和下一步动作；不再为每个“项目 × 论文”生成单篇用途报告。
 
 如果配置了 embedding provider 和 embedding model，系统会为 arXiv 正文段生成 embedding，并写入 `arxiv_chunk_embeddings`。后续重跑 ranking 时会优先复用缓存，避免对同一个 arXiv chunk 重复请求 embedding API。
 
-ranking 采用两阶段流程：先用论文 `title + abstract` 的 embedding 做 paper-level 粗筛，并把分数、rank、通过原因写入 `paper_prefilter_runs`；通过粗筛或进入 `RAG_PREFILTER_MIN_KEEP` 保底集合的论文，才下载 PDF/TXT 并进入正文 chunk-level 精排。这样能减少全文下载、分段和匹配成本，同时避免固定阈值误杀当天的潜在相关论文。
+ranking 采用两阶段流程：先用论文 `title + abstract` 的 embedding 做 paper-level 粗筛，并把分数、rank、通过原因写入 `paper_prefilter_runs`；通过粗筛或进入 `RAG_PREFILTER_MIN_KEEP` 保底集合、且未超过 `RAG_PREFILTER_MAX_KEEP` 上限的论文，才下载 PDF/TXT 并进入正文 chunk-level 精排。这样能减少全文下载、分段和匹配成本，同时避免固定阈值误杀当天的潜在相关论文。
 
 没有配置 LLM provider API key 时，系统仍然可以完成 arXiv 抓取、PDF/TXT 缓存、Obsidian 解析、关键词排序和反馈持久化。embedding 和 LLM 解释会跳过，或使用仅基于证据片段的本地说明代替。

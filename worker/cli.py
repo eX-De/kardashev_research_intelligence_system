@@ -21,14 +21,15 @@ from .api import (
     unlink_project_note,
     unlink_project_paper,
 )
+from .arxiv_archive import archive_zero_match_papers
 from .arxiv_client import fetch_arxiv
 from .arxiv_text import cache_arxiv_full_texts
 from .config import load_settings
 from .db import clean_unicode, connect, init_db, job_run, update_job_meta, utc_now
 from .llm import generate_missing_explanations
 from .obsidian import sync_obsidian
-from .reports import generate_project_paper_reports
-from .search import prefilter_recent_papers, rank_project_papers, rank_unmatched_papers
+from .reports import generate_daily_report
+from .search import prefilter_papers, rank_project_papers, rank_unmatched_papers
 from .settings_store import apply_stored_settings, get_app_settings, save_app_settings
 
 
@@ -67,9 +68,11 @@ DAILY_STEPS = [
     ("cache_text", "缓存 PDF/TXT"),
     ("rank_global", "全局论文匹配"),
     ("rank_project", "项目论文匹配"),
+    ("archive_zero_match", "归档 0 命中论文"),
     ("explain", "生成解释"),
-    ("reports", "生成用途报告"),
+    ("reports", "生成每日总报告"),
 ]
+DAILY_RETRY_PAPER_LIMIT = 50
 
 
 def _daily_progress(
@@ -100,8 +103,10 @@ def _step_summary(result: dict[str, Any]) -> str:
         ("texts_extracted", "texts"),
         ("matched_papers", "matched papers"),
         ("project_paper_matches_created", "project matches"),
+        ("zero_match_papers_archived", "zero-match archived"),
         ("explanations_created", "explanations"),
-        ("reports_created", "reports"),
+        ("explanations_filtered", "filtered by explanations"),
+        ("reports_created", "daily reports"),
         ("reports_failed", "report failures"),
     ]
     parts = []
@@ -119,8 +124,11 @@ def _update_daily_progress(
     index: int,
     status: str,
     accumulated: dict[str, Any],
+    extra: dict[str, Any] | None = None,
 ) -> None:
     progress = _daily_progress(steps, index, status)
+    if extra:
+        progress.update(clean_unicode(extra))
     message = f"Daily run {progress['current']}/{progress['total']} · {progress['current_label']}"
     if status == "completed":
         message = "Daily run completed"
@@ -156,10 +164,171 @@ def _run_daily_step(
     return result
 
 
-def _prefilter_recent_for_daily(conn, settings, selected_papers: list[Any]) -> dict[str, int]:
-    papers, result = prefilter_recent_papers(conn, settings)
-    selected_papers[:] = papers
-    return result
+def _cache_text_progress_callback(
+    conn,
+    job_id: int,
+    steps: list[dict[str, Any]],
+    accumulated: dict[str, Any],
+) -> Callable[[dict[str, Any]], None]:
+    def callback(progress: dict[str, Any]) -> None:
+        _update_daily_progress(
+            conn,
+            job_id,
+            steps,
+            3,
+            "running",
+            accumulated,
+            {"cache_text_progress": progress},
+        )
+
+    return callback
+
+
+def _daily_papers_for_run(conn, settings, batch_id: str) -> tuple[list[Any], dict[str, int]]:
+    new_papers = conn.execute(
+        """
+        SELECT *
+        FROM arxiv_papers p
+        WHERE fetched_batch_id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM arxiv_paper_tombstones t
+            WHERE t.arxiv_id = p.arxiv_id
+          )
+        ORDER BY published_at DESC
+        """,
+        (batch_id,),
+    ).fetchall()
+
+    retry_limit = min(max(0, settings.arxiv_max_results), DAILY_RETRY_PAPER_LIMIT)
+    retry_papers: list[Any] = []
+    retry_seen_ids: set[int] = {int(paper["id"]) for paper in new_papers}
+    retry_counts = {
+        "daily_retry_text_papers": 0,
+        "daily_retry_global_match_papers": 0,
+        "daily_retry_project_match_papers": 0,
+        "daily_retry_explanation_papers": 0,
+    }
+
+    def add_retry_papers(rows: list[Any], count_key: str) -> None:
+        for row in rows:
+            if len(retry_papers) >= retry_limit:
+                return
+            paper_id = int(row["id"])
+            if paper_id in retry_seen_ids:
+                continue
+            retry_seen_ids.add(paper_id)
+            retry_papers.append(row)
+            retry_counts[count_key] += 1
+
+    retry_conditions = ["c.id IS NULL"]
+    if settings.arxiv_cache_full_text:
+        retry_conditions.append("(p.text_status != 'complete' OR p.text_path = '')")
+    if retry_limit:
+        add_retry_papers(conn.execute(
+            f"""
+            SELECT DISTINCT p.*
+            FROM arxiv_papers p
+            LEFT JOIN arxiv_text_chunks c ON c.paper_id = p.id
+            WHERE p.fetched_batch_id != ?
+              AND NOT EXISTS (
+                SELECT 1 FROM arxiv_paper_tombstones t
+                WHERE t.arxiv_id = p.arxiv_id
+              )
+              AND ({" OR ".join(retry_conditions)})
+            ORDER BY p.published_at DESC
+            LIMIT ?
+            """,
+            (batch_id, retry_limit),
+        ).fetchall(), "daily_retry_text_papers")
+        add_retry_papers(conn.execute(
+            """
+            SELECT DISTINCT p.*
+            FROM arxiv_papers p
+            JOIN arxiv_text_chunks c ON c.paper_id = p.id
+            LEFT JOIN matches m ON m.paper_id = p.id AND m.arxiv_chunk_id IS NOT NULL
+            WHERE p.fetched_batch_id != ?
+              AND NOT EXISTS (
+                SELECT 1 FROM arxiv_paper_tombstones t
+                WHERE t.arxiv_id = p.arxiv_id
+              )
+              AND m.id IS NULL
+            ORDER BY p.published_at DESC
+            LIMIT ?
+            """,
+            (batch_id, retry_limit),
+        ).fetchall(), "daily_retry_global_match_papers")
+        add_retry_papers(conn.execute(
+            """
+            SELECT DISTINCT p.*
+            FROM arxiv_papers p
+            JOIN arxiv_text_chunks c ON c.paper_id = p.id
+            WHERE p.fetched_batch_id != ?
+              AND NOT EXISTS (
+                SELECT 1 FROM arxiv_paper_tombstones t
+                WHERE t.arxiv_id = p.arxiv_id
+              )
+              AND EXISTS (
+                SELECT 1
+                FROM project_notes pn
+                JOIN research_chunks rc ON rc.note_id = pn.note_id
+                LIMIT 1
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM project_paper_matches ppm
+                WHERE ppm.paper_id = p.id
+              )
+            ORDER BY p.published_at DESC
+            LIMIT ?
+            """,
+            (batch_id, retry_limit),
+        ).fetchall(), "daily_retry_project_match_papers")
+        add_retry_papers(conn.execute(
+            """
+            SELECT DISTINCT p.*
+            FROM arxiv_papers p
+            JOIN matches m ON m.paper_id = p.id
+            LEFT JOIN llm_explanations e ON e.paper_id = p.id
+            WHERE p.fetched_batch_id != ?
+              AND NOT EXISTS (
+                SELECT 1 FROM arxiv_paper_tombstones t
+                WHERE t.arxiv_id = p.arxiv_id
+              )
+              AND e.paper_id IS NULL
+            ORDER BY p.published_at DESC
+            LIMIT ?
+            """,
+            (batch_id, retry_limit),
+        ).fetchall(), "daily_retry_explanation_papers")
+
+    seen_ids: set[int] = set()
+    papers: list[Any] = []
+    for paper in [*new_papers, *retry_papers]:
+        paper_id = int(paper["id"])
+        if paper_id in seen_ids:
+            continue
+        seen_ids.add(paper_id)
+        papers.append(paper)
+
+    return papers, {
+        "daily_new_papers": len(new_papers),
+        "daily_retry_papers": len(retry_papers),
+        "daily_candidate_papers": len(papers),
+        **retry_counts,
+    }
+
+
+def _prefilter_daily_papers(conn, settings, batch_id: str, selected_papers: list[Any]) -> dict[str, int]:
+    papers, candidate_result = _daily_papers_for_run(conn, settings, batch_id)
+    new_papers = [paper for paper in papers if str(paper["fetched_batch_id"]) == batch_id]
+    resume_papers = [paper for paper in papers if str(paper["fetched_batch_id"]) != batch_id]
+    papers, result = prefilter_papers(conn, settings, new_papers)
+    selected_papers[:] = [*papers, *resume_papers]
+    result = {
+        **result,
+        "prefilter_passed": int(result.get("prefilter_passed") or 0) + len(resume_papers),
+        "prefilter_resume_bypassed": len(resume_papers),
+    }
+    return {**candidate_result, **result}
 
 
 def cmd_init_db(_: argparse.Namespace) -> None:
@@ -185,7 +354,13 @@ def cmd_fetch_arxiv(_: argparse.Namespace) -> None:
     def run(conn, settings):
         with job_run(conn, "fetch-arxiv") as job_id:
             result = fetch_arxiv(conn, settings)
-            selected_papers, prefilter_result = prefilter_recent_papers(conn, settings)
+            selected_papers: list[Any] = []
+            prefilter_result = _prefilter_daily_papers(
+                conn,
+                settings,
+                str(result.get("batch_id") or ""),
+                selected_papers,
+            )
             result.update(prefilter_result)
             result.update(
                 {
@@ -231,12 +406,12 @@ def cmd_rank(_: argparse.Namespace) -> None:
 def cmd_generate_reports(_: argparse.Namespace) -> None:
     def run(conn, settings):
         with job_run(conn, "generate-reports") as job_id:
-            result = generate_project_paper_reports(conn, settings)
-            update_job_meta(conn, job_id, "Paper usefulness reports generated", result)
+            result = generate_daily_report(conn, settings)
+            update_job_meta(conn, job_id, "Daily research report generated", result)
         return result
 
     result = _with_db(run)
-    _print_json({"ok": True, "message": "Paper usefulness reports generated", **result})
+    _print_json({"ok": True, "message": "Daily research report generated", **result})
 
 
 def cmd_run_daily(_: argparse.Namespace) -> None:
@@ -276,7 +451,12 @@ def cmd_run_daily(_: argparse.Namespace) -> None:
                 steps,
                 2,
                 accumulated,
-                lambda: _prefilter_recent_for_daily(conn, settings, selected_papers),
+                lambda: _prefilter_daily_papers(
+                    conn,
+                    settings,
+                    str(arxiv_result.get("batch_id") or ""),
+                    selected_papers,
+                ),
             )
             accumulated.update(prefilter_result)
             selected_paper_ids = [int(paper["id"]) for paper in selected_papers]
@@ -287,7 +467,17 @@ def cmd_run_daily(_: argparse.Namespace) -> None:
                 steps,
                 3,
                 accumulated,
-                lambda: cache_arxiv_full_texts(conn, settings, paper_ids=selected_paper_ids),
+                lambda: cache_arxiv_full_texts(
+                    conn,
+                    settings,
+                    paper_ids=selected_paper_ids,
+                    progress_callback=_cache_text_progress_callback(
+                        conn,
+                        job_id,
+                        steps,
+                        accumulated,
+                    ),
+                ),
             )
             accumulated.update({f"text_{key}": value for key, value in text_result.items()})
 
@@ -316,11 +506,21 @@ def cmd_run_daily(_: argparse.Namespace) -> None:
             )
             accumulated.update(project_rank_result)
 
-            explain_result = _run_daily_step(
+            archive_result = _run_daily_step(
                 conn,
                 job_id,
                 steps,
                 6,
+                accumulated,
+                lambda: archive_zero_match_papers(conn, settings, selected_paper_ids),
+            )
+            accumulated.update(archive_result)
+
+            explain_result = _run_daily_step(
+                conn,
+                job_id,
+                steps,
+                7,
                 accumulated,
                 lambda: generate_missing_explanations(conn, settings),
             )
@@ -330,9 +530,14 @@ def cmd_run_daily(_: argparse.Namespace) -> None:
                 conn,
                 job_id,
                 steps,
-                7,
+                8,
                 accumulated,
-                lambda: generate_project_paper_reports(conn, settings),
+                lambda: generate_daily_report(
+                    conn,
+                    settings,
+                    stats=accumulated,
+                    paper_ids=selected_paper_ids,
+                ),
             )
             accumulated.update(report_result)
 

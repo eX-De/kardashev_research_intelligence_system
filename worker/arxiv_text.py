@@ -6,11 +6,14 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .config import Settings
 from .db import utc_now
 from .embeddings import ensure_missing_arxiv_chunk_embeddings
+
+PDF_429_RETRY_SECONDS = 20
+PDF_429_MAX_RETRIES = 1
 
 
 def safe_arxiv_filename(arxiv_id: str) -> str:
@@ -29,9 +32,16 @@ def download_pdf(url: str, destination: Path) -> None:
         url,
         headers={"User-Agent": "research-intelligence-system/0.1"},
     )
-    with urllib.request.urlopen(request, timeout=90) as response:
-        content_type = response.headers.get("content-type", "")
-        body = response.read()
+    for attempt in range(PDF_429_MAX_RETRIES + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=90) as response:
+                content_type = response.headers.get("content-type", "")
+                body = response.read()
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code != 429 or attempt >= PDF_429_MAX_RETRIES:
+                raise
+            time.sleep(PDF_429_RETRY_SECONDS)
     if len(body) < 1000 or "html" in content_type.lower():
         raise RuntimeError(f"Downloaded content does not look like a PDF: {content_type}")
     destination.write_bytes(body)
@@ -205,6 +215,7 @@ def cache_arxiv_full_texts(
     settings: Settings,
     limit: int | None = None,
     paper_ids: list[int] | tuple[int, ...] | set[int] | None = None,
+    progress_callback: Callable[[dict[str, int | str]], None] | None = None,
 ) -> dict[str, int]:
     if not settings.arxiv_cache_full_text:
         return {"papers_considered": 0, "pdfs_downloaded": 0, "texts_extracted": 0, "texts_failed": 0}
@@ -248,9 +259,28 @@ def cache_arxiv_full_texts(
     downloaded = 0
     extracted = 0
     failed = 0
+    total = len(rows)
+
+    def emit_progress(index: int, arxiv_id: str = "") -> None:
+        if not progress_callback:
+            return
+        progress_callback(
+            {
+                "stage": "cache_text",
+                "current": index,
+                "total": total,
+                "pdfs_downloaded": downloaded,
+                "texts_extracted": extracted,
+                "texts_failed": failed,
+                "current_arxiv_id": arxiv_id,
+            }
+        )
+
+    emit_progress(0)
     for index, row in enumerate(rows):
         if index > 0:
             time.sleep(settings.arxiv_request_interval_seconds)
+        emit_progress(index, str(row["arxiv_id"]))
         stem = safe_arxiv_filename(row["arxiv_id"])
         pdf_path = Path(row["pdf_path"]) if row["pdf_path"] else settings.arxiv_pdf_dir / f"{stem}.pdf"
         text_path = Path(row["text_path"]) if row["text_path"] else settings.arxiv_text_dir / f"{stem}.txt"
@@ -286,6 +316,7 @@ def cache_arxiv_full_texts(
             )
             failed += 1
         conn.commit()
+        emit_progress(index + 1, str(row["arxiv_id"]))
 
     chunk_result = ensure_arxiv_chunks(
         conn,

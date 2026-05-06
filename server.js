@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
-import { extname, join, normalize, resolve } from "node:path";
+import { extname, isAbsolute, join, normalize, relative, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -298,6 +298,126 @@ async function readRequestJson(req) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
+function execFileText(command, args) {
+  return new Promise((resolvePromise, reject) => {
+    execFile(command, args, { encoding: "utf8", maxBuffer: 1024 * 64 }, (error, stdout, stderr) => {
+      if (error) {
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
+        return;
+      }
+      resolvePromise(String(stdout || "").trim());
+    });
+  });
+}
+
+function pathDialogCancelled(error) {
+  const output = `${error.stderr || ""}\n${error.stdout || ""}\n${error.message || ""}`;
+  return /user canceled|cancelled|canceled/i.test(output) || error.code === 2 || error.exitCode === 2;
+}
+
+function localPathError(message, statusCode = 500) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
+function applescriptString(value) {
+  return `"${String(value).replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+}
+
+async function selectMacPath(mode, title) {
+  const prompt = applescriptString(title);
+  const picker = mode === "file" ? "choose file" : "choose folder";
+  return execFileText("osascript", ["-e", `POSIX path of (${picker} with prompt ${prompt})`]);
+}
+
+async function selectWindowsPath(mode, title) {
+  const quotedTitle = String(title).replaceAll("'", "''");
+  const script = mode === "file"
+    ? [
+        "Add-Type -AssemblyName System.Windows.Forms",
+        "$dialog = New-Object System.Windows.Forms.OpenFileDialog",
+        `$dialog.Title = '${quotedTitle}'`,
+        "$dialog.Filter = 'Markdown files (*.md)|*.md|All files (*.*)|*.*'",
+        "if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.FileName } else { exit 2 }"
+      ].join("; ")
+    : [
+        "Add-Type -AssemblyName System.Windows.Forms",
+        "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog",
+        `$dialog.Description = '${quotedTitle}'`,
+        "if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath } else { exit 2 }"
+      ].join("; ");
+  return execFileText("powershell.exe", ["-NoProfile", "-STA", "-Command", script]);
+}
+
+async function selectLinuxPath(mode, title) {
+  const zenityArgs = mode === "file"
+    ? ["--file-selection", "--title", title]
+    : ["--file-selection", "--directory", "--title", title];
+  try {
+    return await execFileText("zenity", zenityArgs);
+  } catch (error) {
+    if (pathDialogCancelled(error)) throw error;
+  }
+
+  const kdialogArgs = mode === "file"
+    ? ["--getopenfilename", ".", "*.md|Markdown files"]
+    : ["--getexistingdirectory", "."];
+  return execFileText("kdialog", ["--title", title, ...kdialogArgs]);
+}
+
+async function selectLocalPath({ mode = "directory", title = "选择路径" } = {}) {
+  const normalizedMode = mode === "file" ? "file" : "directory";
+  try {
+    if (process.platform === "darwin") {
+      return await selectMacPath(normalizedMode, title);
+    }
+    if (process.platform === "win32") {
+      return await selectWindowsPath(normalizedMode, title);
+    }
+    return await selectLinuxPath(normalizedMode, title);
+  } catch (error) {
+    if (pathDialogCancelled(error)) {
+      error.cancelled = true;
+      throw error;
+    }
+    throw localPathError(
+      `无法打开本地文件选择器：${String(error.stderr || error.message || error).trim()}`,
+      500
+    );
+  }
+}
+
+function isPathInside(child, root) {
+  const rel = relative(root, child);
+  return rel === "" || (!!rel && !rel.startsWith("..") && !isAbsolute(rel));
+}
+
+async function withOptionalRelativePath(selectedPath, body) {
+  const result = { ok: true, path: selectedPath };
+  if (body.relative_to !== "obsidian_vault") return result;
+
+  let vaultPath = String(body.base_path || "").trim();
+  if (!vaultPath) {
+    const settings = await readAppSettings();
+    vaultPath = String(settings.obsidian_vault_path || "").trim();
+  }
+  if (!vaultPath) {
+    throw localPathError("请先选择或填写 Obsidian vault 路径，再选择 vault 内部路径。", 400);
+  }
+
+  const vaultRoot = resolve(vaultPath);
+  const resolvedSelected = resolve(selectedPath);
+  if (!isPathInside(resolvedSelected, vaultRoot)) {
+    throw localPathError("选择的路径必须位于当前 Obsidian vault 内。", 400);
+  }
+
+  result.relative_path = relative(vaultRoot, resolvedSelected).replaceAll("\\", "/");
+  return result;
+}
+
 function sendJson(res, status, body) {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
@@ -424,6 +544,24 @@ async function routeApi(req, res, url) {
       }
     }
     sendJson(res, 200, { ...data, scheduler: schedulerStatus() });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/local-path/select") {
+    const body = await readRequestJson(req);
+    try {
+      const selectedPath = await selectLocalPath({
+        mode: body.mode,
+        title: body.title || "选择路径"
+      });
+      sendJson(res, 200, await withOptionalRelativePath(selectedPath, body));
+    } catch (error) {
+      if (error.cancelled) {
+        sendJson(res, 200, { ok: false, cancelled: true });
+        return;
+      }
+      throw error;
+    }
     return;
   }
 
