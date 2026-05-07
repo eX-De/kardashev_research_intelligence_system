@@ -49,20 +49,21 @@ def archive_zero_match_papers(
         WHERE p.id IN ({placeholders})
           {text_complete_condition}
           AND NOT EXISTS (
-            SELECT 1 FROM matches m
-            WHERE m.paper_id = p.id
-          )
-          AND NOT EXISTS (
-            SELECT 1 FROM project_paper_matches ppm
-            WHERE ppm.paper_id = p.id
-          )
-          AND NOT EXISTS (
             SELECT 1 FROM project_papers pp
             WHERE pp.paper_id = p.id
+              AND NOT (
+                pp.relation = 'candidate'
+                AND pp.note = 'auto_matched_by_project_context'
+              )
           )
           AND NOT EXISTS (
             SELECT 1 FROM user_feedback uf
             WHERE uf.paper_id = p.id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM project_paper_recommendations r
+            WHERE r.paper_id = p.id
+              AND r.state IN ('pending', 'accepted')
           )
         """,
         params,
@@ -136,7 +137,8 @@ def archive_zero_match_papers(
         for table in (
             "paper_prefilter_runs",
             "arxiv_paper_embeddings",
-            "llm_explanations",
+            "project_paper_recommendations",
+            "project_paper_judgments",
             "matches",
             "project_paper_matches",
             "project_papers",

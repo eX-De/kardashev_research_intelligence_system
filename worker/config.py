@@ -46,6 +46,10 @@ class Settings:
     obsidian_include_dirs: list[str]
     obsidian_include_tags: list[str]
     obsidian_project_center_tags: list[str]
+    obsidian_cli_command: str
+    obsidian_paper_repository_dir: str
+    obsidian_paper_attachment_dir: str
+    obsidian_project_paper_list_name: str
     arxiv_categories: list[str]
     arxiv_daily_lookback_days: int
     arxiv_max_results: int
@@ -130,6 +134,19 @@ def load_settings() -> Settings:
         obsidian_include_dirs=_csv("OBSIDIAN_INCLUDE_DIRS", "Research,Papers"),
         obsidian_include_tags=_tags("OBSIDIAN_INCLUDE_TAGS", "research,paper,direction"),
         obsidian_project_center_tags=_tags("OBSIDIAN_PROJECT_CENTER_TAGS", ""),
+        obsidian_cli_command=os.environ.get("OBSIDIAN_CLI_COMMAND", "obsidian").strip() or "obsidian",
+        obsidian_paper_repository_dir=os.environ.get(
+            "OBSIDIAN_PAPER_REPOSITORY_DIR",
+            "人工智能/论文仓库",
+        ).strip().replace("\\", "/").strip("/"),
+        obsidian_paper_attachment_dir=os.environ.get(
+            "OBSIDIAN_PAPER_ATTACHMENT_DIR",
+            "人工智能/论文仓库/附件",
+        ).strip().replace("\\", "/").strip("/"),
+        obsidian_project_paper_list_name=os.environ.get(
+            "OBSIDIAN_PROJECT_PAPER_LIST_NAME",
+            "论文列表.md",
+        ).strip() or "论文列表.md",
         arxiv_categories=_csv("ARXIV_CATEGORIES", "cs.AI,cs.CL,cs.IR"),
         arxiv_daily_lookback_days=int(os.environ.get("ARXIV_DAILY_LOOKBACK_DAYS", "1")),
         arxiv_max_results=int(os.environ.get("ARXIV_MAX_RESULTS", "50")),

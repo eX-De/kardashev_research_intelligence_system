@@ -1,84 +1,49 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import urllib.error
 import urllib.request
+from typing import Any
 
 from .config import Settings
-from .db import from_json, to_json, utc_now
+from .db import clean_unicode, from_json, to_json, utc_now
 
 
-EXPLANATION_REPORT_CONFIDENCE_THRESHOLD = 0.35
+PROJECT_JUDGMENT_PROMPT_VERSION = "project_judgment_v1"
+PROJECT_JUDGMENT_CANDIDATE_QUALITY_THRESHOLD = 0.40
+PROJECT_JUDGMENT_PER_PROJECT_LIMIT = 10
+PROJECT_JUDGMENT_REPORT_CONFIDENCE_THRESHOLD = 0.65
+PROJECT_JUDGMENT_REPORT_USEFULNESS_THRESHOLD = 0.60
+PROJECT_JUDGMENT_REPORT_RELATIONS = {"direct", "indirect"}
+PROJECT_JUDGMENT_ACTIONS = {"read", "read_later", "ignore"}
+PROJECT_JUDGMENT_RELATIONS = {"direct", "indirect", "weak", "none"}
 
 
-def _fallback_explanation(paper: sqlite3.Row, evidence: list[sqlite3.Row]) -> dict[str, object]:
-    top = evidence[0] if evidence else None
-    reason = "Evidence-only match. Configure an LLM provider to generate an explanation."
-    if top:
-        reason = f"Matches prior notes in {top['note_title']} through overlapping research terms and concepts."
-    confidence = float(top["score"]) if top else 0.0
-    action = "read" if confidence >= 0.75 else "read_later"
-    return {
-        "recommendation_reason": reason,
-        "relevant_points": [],
-        "evidence_refs": [int(row["chunk_id"]) for row in evidence],
-        "confidence": confidence,
-        "suggested_action": action,
-        "raw": {"mode": "fallback"},
-    }
+def _short(value: object, limit: int = 1200) -> str:
+    text = " ".join(clean_unicode(str(value or "")).split())
+    return text[:limit]
 
 
-def _prompt(paper: sqlite3.Row, evidence: list[sqlite3.Row]) -> str:
-    evidence_text = "\n\n".join(
-        "\n".join(
-            [
-                f"[obsidian:{row['chunk_id']}] {row['note_title']} ({row['note_path']}): {row['text'][:900]}",
-                f"[paper_chunk:{row['arxiv_chunk_id']}] pages {row['arxiv_page_start'] or '?'}-{row['arxiv_page_end'] or '?'}: {(row['arxiv_text'] or '')[:900]}",
-            ]
-        )
-        for row in evidence
-    )
-    return f"""
-只返回 JSON，不要 Markdown，不要额外解释。
-JSON keys must be exactly: recommendation_reason, relevant_points, evidence_refs, confidence, suggested_action.
-JSON 字段名保持英文，但所有可读文本字段值必须使用中文。
-recommendation_reason 必须是 1-3 句中文，说明这篇论文为什么对研究笔记/项目有用，或为什么证据不足。
-relevant_points 必须是中文短语数组，例如 ["检索规划", "证据选择"]。
-evidence_refs 必须是相关 obsidian chunk id 的数字数组。
-confidence 必须是 0 到 1 之间的 JSON number，例如 0.72；不要返回字符串或 low/medium/moderate/high。
-suggested_action 必须是 read, read_later, ignore 之一。
-当证据弱、泛泛相关或不可操作时，使用 suggested_action=ignore。
-confidence 低于 {EXPLANATION_REPORT_CONFIDENCE_THRESHOLD:.2f} 的论文会被日报过滤。
-
-Paper:
-Title: {paper['title']}
-Abstract: {paper['summary']}
-
-Matched Obsidian evidence and paper chunks:
-{evidence_text}
-""".strip()
-
-
-def _confidence_score(value: object, fallback: float = 0.0) -> float:
-    labels = {
-        "very low": 0.1,
-        "very_low": 0.1,
-        "low": 0.25,
-        "medium": 0.5,
-        "moderate": 0.5,
-        "mid": 0.5,
-        "high": 0.8,
-        "very high": 0.9,
-        "very_high": 0.9,
-    }
-    score = fallback
+def _score(value: object, fallback: float = 0.0) -> float:
     if isinstance(value, bool):
         score = 1.0 if value else 0.0
     elif isinstance(value, (int, float)):
         score = float(value)
     elif isinstance(value, str):
         text = value.strip().lower()
+        labels = {
+            "very low": 0.1,
+            "very_low": 0.1,
+            "low": 0.25,
+            "medium": 0.5,
+            "moderate": 0.5,
+            "mid": 0.5,
+            "high": 0.8,
+            "very high": 0.9,
+            "very_high": 0.9,
+        }
         if text in labels:
             score = labels[text]
         else:
@@ -88,27 +53,36 @@ def _confidence_score(value: object, fallback: float = 0.0) -> float:
                     score /= 100
             except ValueError:
                 score = fallback
+    else:
+        score = fallback
     return max(0.0, min(1.0, score))
 
 
+def _relation_type(value: object) -> str:
+    relation = str(value or "none").strip().lower()
+    return relation if relation in PROJECT_JUDGMENT_RELATIONS else "none"
+
+
 def _suggested_action(value: object) -> str:
-    action = str(value or "read_later").strip()
-    if action not in {"read", "read_later", "ignore"}:
-        return "read_later"
-    return action
+    action = str(value or "ignore").strip()
+    return action if action in PROJECT_JUDGMENT_ACTIONS else "ignore"
 
 
-def explanation_passes_report_filter(confidence: object, suggested_action: object) -> bool:
+def judgment_passes_report_filter(row_or_mapping: sqlite3.Row | dict[str, object]) -> bool:
+    relation = _relation_type(row_or_mapping["relation_type"])
+    action = _suggested_action(row_or_mapping["suggested_action"])
     return (
-        _suggested_action(suggested_action) != "ignore"
-        and _confidence_score(confidence) >= EXPLANATION_REPORT_CONFIDENCE_THRESHOLD
+        relation in PROJECT_JUDGMENT_REPORT_RELATIONS
+        and action != "ignore"
+        and _score(row_or_mapping["confidence"]) >= PROJECT_JUDGMENT_REPORT_CONFIDENCE_THRESHOLD
+        and _score(row_or_mapping["usefulness_score"]) >= PROJECT_JUDGMENT_REPORT_USEFULNESS_THRESHOLD
     )
 
 
 def call_chat_json(
     settings: Settings,
     prompt: str,
-    system: str = "You explain why arXiv papers are relevant to a researcher's notes.",
+    system: str = "You judge whether papers are useful for a specific research project.",
 ) -> dict[str, object] | None:
     provider = settings.chat_provider()
     if not provider or not provider.api_key or not provider.base_url or not settings.llm_chat_model:
@@ -119,7 +93,7 @@ def call_chat_json(
             {"role": "system", "content": system},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.2,
+        "temperature": 0.1,
         "response_format": {"type": "json_object"},
     }
     request = urllib.request.Request(
@@ -151,96 +125,243 @@ def _call_chat(settings: Settings, prompt: str) -> dict[str, object] | None:
     return call_chat_json(settings, prompt)
 
 
-def generate_missing_explanations(conn: sqlite3.Connection, settings: Settings) -> dict[str, int]:
-    papers = conn.execute(
-        """
-        SELECT DISTINCT p.*
-        FROM arxiv_papers p
-        LEFT JOIN llm_explanations e ON e.paper_id = p.id
-        WHERE e.paper_id IS NULL
-          AND (
-            EXISTS (SELECT 1 FROM matches m WHERE m.paper_id = p.id)
-            OR EXISTS (SELECT 1 FROM project_paper_matches ppm WHERE ppm.paper_id = p.id)
-          )
-        ORDER BY p.published_at DESC
-        """
+def _paper_filter_clause(paper_ids: list[int] | None) -> tuple[str, list[Any]]:
+    if paper_ids is None:
+        return "", []
+    if not paper_ids:
+        return "AND 1 = 0", []
+    placeholders = ", ".join("?" for _ in paper_ids)
+    return f"AND ppm.paper_id IN ({placeholders})", [*paper_ids]
+
+
+def _judgment_payload(row: sqlite3.Row) -> dict[str, object]:
+    evidence = from_json(row["evidence_json"], {})
+    return {
+        "project": {
+            "id": int(row["project_id"]),
+            "name": row["project_name"],
+            "status": row["project_status"],
+            "summary": _short(row["project_summary"], 900),
+            "goals": _short(row["project_goals"], 900),
+            "keywords": from_json(row["project_keywords_json"], []),
+            "note_path": row["note_path"],
+            "evidence_heading": row["obsidian_heading"],
+            "evidence_text": _short(row["obsidian_text"], 1200),
+        },
+        "paper": {
+            "id": int(row["paper_id"]),
+            "arxiv_id": row["arxiv_id"],
+            "title": row["paper_title"],
+            "link": row["link"],
+            "published_at": row["published_at"],
+            "categories": from_json(row["categories_json"], []),
+            "abstract": _short(row["summary"], 1200),
+            "evidence_text": _short(row["arxiv_text"], 1400),
+            "page_start": row["page_start"],
+            "page_end": row["page_end"],
+        },
+        "retrieval": {
+            "quality_score": round(_score(row["retrieval_quality"]), 4),
+            "rank_score": round(_score(row["rank_score"]), 4),
+            "match_type": row["match_type"],
+            "searchers": from_json(row["searchers_json"], []),
+            "evidence": evidence,
+        },
+    }
+
+
+def _input_hash(payload: dict[str, object]) -> str:
+    raw = to_json({"prompt_version": PROJECT_JUDGMENT_PROMPT_VERSION, "payload": payload})
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _project_judgment_prompt(payload: dict[str, object]) -> str:
+    return f"""
+只返回 JSON，不要 Markdown fence，不要额外解释。
+JSON keys must be exactly: relation_type, relevance_score, usefulness_score, confidence, suggested_action, reason, evidence_mapping, missing_evidence.
+JSON 字段名保持英文，但所有可读文本字段值必须使用中文。
+
+你是严格的科研项目论文筛选器。请判断下面这一篇论文是否对这个具体项目有用。
+
+relation_type 必须是 direct、indirect、weak、none 之一：
+- direct：论文里的具体机制、实验、数据或指标，直接对应项目正在解决的明确问题。
+- indirect：论文不是同一任务，但有明确可迁移的方法或评估设计，且项目证据能说明这个需求存在。
+- weak：只是共享 LLM、agent、RAG、embedding、evaluation、multi-agent、fine-tuning 等泛泛术语，或只有远期启发。
+- none：没有可靠项目关联。
+
+评分要求：
+- relevance_score、usefulness_score、confidence 都必须是 0 到 1 的 JSON number。
+- suggested_action 必须是 read、read_later、ignore 之一。
+- 如果 relation_type 是 weak 或 none，suggested_action 必须是 ignore，usefulness_score 不得高于 0.4。
+- 如果项目证据不能证明项目正在解决对应问题，必须降为 weak 或 none。
+- 如果论文证据没有具体方法、实验、数据或指标，必须降低 usefulness_score。
+- evidence_mapping 必须列出项目需求、论文机制和匹配理由；没有明确映射时返回空数组。
+- missing_evidence 用一句中文说明还缺什么证据；证据充分时返回空字符串。
+
+输入 JSON：
+{to_json(payload)}
+""".strip()
+
+
+def _normalize_judgment(response: dict[str, object], fallback_quality: float) -> dict[str, object]:
+    relation = _relation_type(response.get("relation_type"))
+    relevance = _score(response.get("relevance_score"), fallback_quality)
+    usefulness = _score(response.get("usefulness_score"), 0.0)
+    confidence = _score(response.get("confidence"), 0.0)
+    action = _suggested_action(response.get("suggested_action"))
+    if relation in {"weak", "none"}:
+        action = "ignore"
+        usefulness = min(usefulness, 0.4)
+    mapping = response.get("evidence_mapping", [])
+    if not isinstance(mapping, list):
+        mapping = []
+    return {
+        "relation_type": relation,
+        "relevance_score": relevance,
+        "usefulness_score": usefulness,
+        "confidence": confidence,
+        "suggested_action": action,
+        "reason": _short(response.get("reason"), 1200),
+        "evidence_mapping": clean_unicode(mapping),
+        "missing_evidence": _short(response.get("missing_evidence"), 900),
+        "raw": response,
+    }
+
+
+def _candidate_rows(
+    conn: sqlite3.Connection,
+    paper_ids: list[int] | None,
+    per_project_limit: int,
+) -> list[sqlite3.Row]:
+    paper_filter, paper_params = _paper_filter_clause(paper_ids)
+    rows = conn.execute(
+        f"""
+        SELECT
+          ppm.project_id,
+          ppm.paper_id,
+          COALESCE(NULLIF(ppm.quality_score, 0), ppm.score) AS retrieval_quality,
+          ppm.rank_score,
+          ppm.searchers_json,
+          ppm.evidence_json,
+          ppm.match_type,
+          p.arxiv_id,
+          p.title AS paper_title,
+          p.summary,
+          p.link,
+          p.published_at,
+          p.categories_json,
+          ac.page_start,
+          ac.page_end,
+          ac.text AS arxiv_text,
+          c.heading AS obsidian_heading,
+          c.text AS obsidian_text,
+          n.path AS note_path,
+          rp.name AS project_name,
+          rp.status AS project_status,
+          rp.summary AS project_summary,
+          rp.goals AS project_goals,
+          rp.keywords_json AS project_keywords_json,
+          j.input_hash AS existing_input_hash,
+          j.prompt_version AS existing_prompt_version
+        FROM project_paper_matches ppm
+        JOIN arxiv_papers p ON p.id = ppm.paper_id
+        JOIN research_projects rp ON rp.id = ppm.project_id
+        LEFT JOIN arxiv_text_chunks ac ON ac.id = ppm.best_arxiv_chunk_id
+        LEFT JOIN research_chunks c ON c.id = ppm.best_obsidian_chunk_id
+        LEFT JOIN obsidian_notes n ON n.id = c.note_id
+        LEFT JOIN project_paper_judgments j
+          ON j.project_id = ppm.project_id AND j.paper_id = ppm.paper_id
+        WHERE COALESCE(NULLIF(ppm.quality_score, 0), ppm.score) >= ?
+          {paper_filter}
+        ORDER BY ppm.project_id, retrieval_quality DESC, ppm.updated_at DESC
+        """,
+        (PROJECT_JUDGMENT_CANDIDATE_QUALITY_THRESHOLD, *paper_params),
     ).fetchall()
+    kept: list[sqlite3.Row] = []
+    per_project_counts: dict[int, int] = {}
+    for row in rows:
+        project_id = int(row["project_id"])
+        count = per_project_counts.get(project_id, 0)
+        if count >= per_project_limit:
+            continue
+        per_project_counts[project_id] = count + 1
+        kept.append(row)
+    return kept
+
+
+def generate_missing_project_judgments(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    paper_ids: list[int] | None = None,
+    per_project_limit: int = PROJECT_JUDGMENT_PER_PROJECT_LIMIT,
+) -> dict[str, int]:
+    candidates = _candidate_rows(conn, paper_ids, per_project_limit)
     created = 0
     filtered = 0
-    for paper in papers:
-        evidence = conn.execute(
-            """
-            SELECT *
-            FROM (
-              SELECT
-                m.chunk_id,
-                m.arxiv_chunk_id,
-                m.score,
-                m.searchers_json,
-                ac.page_start AS arxiv_page_start,
-                ac.page_end AS arxiv_page_end,
-                ac.text AS arxiv_text,
-                c.text,
-                n.title AS note_title,
-                n.path AS note_path
-              FROM matches m
-              JOIN research_chunks c ON c.id = m.chunk_id
-              JOIN obsidian_notes n ON n.id = c.note_id
-              LEFT JOIN arxiv_text_chunks ac ON ac.id = m.arxiv_chunk_id
-              WHERE m.paper_id = ?
-
-              UNION ALL
-
-              SELECT
-                ppm.best_obsidian_chunk_id AS chunk_id,
-                ppm.best_arxiv_chunk_id AS arxiv_chunk_id,
-                ppm.score,
-                ppm.searchers_json,
-                ac.page_start AS arxiv_page_start,
-                ac.page_end AS arxiv_page_end,
-                ac.text AS arxiv_text,
-                c.text,
-                n.title AS note_title,
-                n.path AS note_path
-              FROM project_paper_matches ppm
-              JOIN research_chunks c ON c.id = ppm.best_obsidian_chunk_id
-              JOIN obsidian_notes n ON n.id = c.note_id
-              LEFT JOIN arxiv_text_chunks ac ON ac.id = ppm.best_arxiv_chunk_id
-              WHERE ppm.paper_id = ?
-            )
-            ORDER BY score DESC
-            LIMIT ?
-            """,
-            (int(paper["id"]), int(paper["id"]), settings.rag_top_k),
-        ).fetchall()
-        explanation = _call_chat(settings, _prompt(paper, evidence))
-        if not explanation:
-            explanation = _fallback_explanation(paper, evidence)
-        fallback_confidence = float(evidence[0]["score"]) if evidence else 0.0
-        confidence = _confidence_score(explanation.get("confidence"), fallback_confidence)
-        suggested_action = _suggested_action(explanation.get("suggested_action"))
-        if not explanation_passes_report_filter(confidence, suggested_action):
+    skipped = 0
+    for row in candidates:
+        payload = _judgment_payload(row)
+        input_hash = _input_hash(payload)
+        if (
+            row["existing_input_hash"] == input_hash
+            and row["existing_prompt_version"] == PROJECT_JUDGMENT_PROMPT_VERSION
+        ):
+            skipped += 1
+            continue
+        response = _call_chat(settings, _project_judgment_prompt(payload))
+        if not isinstance(response, dict):
+            skipped += 1
+            continue
+        judgment = _normalize_judgment(response, _score(row["retrieval_quality"]))
+        passes = judgment_passes_report_filter(judgment)
+        if not passes:
             filtered += 1
         now = utc_now()
         conn.execute(
             """
-            INSERT OR REPLACE INTO llm_explanations(
-              paper_id, recommendation_reason, relevant_points_json, evidence_refs_json,
-              confidence, suggested_action, raw_json, created_at
+            INSERT INTO project_paper_judgments(
+              project_id, paper_id, relation_type, relevance_score, usefulness_score,
+              confidence, suggested_action, reason, evidence_mapping_json,
+              missing_evidence, input_hash, prompt_version, raw_json, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id, paper_id) DO UPDATE SET
+              relation_type = excluded.relation_type,
+              relevance_score = excluded.relevance_score,
+              usefulness_score = excluded.usefulness_score,
+              confidence = excluded.confidence,
+              suggested_action = excluded.suggested_action,
+              reason = excluded.reason,
+              evidence_mapping_json = excluded.evidence_mapping_json,
+              missing_evidence = excluded.missing_evidence,
+              input_hash = excluded.input_hash,
+              prompt_version = excluded.prompt_version,
+              raw_json = excluded.raw_json,
+              updated_at = excluded.updated_at
             """,
             (
-                int(paper["id"]),
-                str(explanation.get("recommendation_reason", "")),
-                to_json(explanation.get("relevant_points", [])),
-                to_json(explanation.get("evidence_refs", [])),
-                confidence,
-                suggested_action,
-                to_json(explanation.get("raw", explanation)),
+                int(row["project_id"]),
+                int(row["paper_id"]),
+                judgment["relation_type"],
+                float(judgment["relevance_score"]),
+                float(judgment["usefulness_score"]),
+                float(judgment["confidence"]),
+                judgment["suggested_action"],
+                judgment["reason"],
+                to_json(judgment["evidence_mapping"]),
+                judgment["missing_evidence"],
+                input_hash,
+                PROJECT_JUDGMENT_PROMPT_VERSION,
+                to_json(judgment["raw"]),
+                now,
                 now,
             ),
         )
         conn.commit()
         created += 1
-    return {"explanations_created": created, "explanations_filtered": filtered}
+    return {
+        "project_judgment_candidates": len(candidates),
+        "project_judgments_created": created,
+        "project_judgments_filtered": filtered,
+        "project_judgments_skipped": skipped,
+    }

@@ -17,6 +17,7 @@ from worker.api import (
     projects,
     save_project,
     unlink_project_paper,
+    update_paper_recommendation,
 )
 from worker.arxiv_archive import archive_zero_match_papers
 from worker.arxiv_client import fetch_arxiv
@@ -24,9 +25,10 @@ from worker.arxiv_text import cache_arxiv_full_texts, download_pdf, extract_pdf_
 from worker.cli import _daily_papers_for_run, _prefilter_daily_papers
 from worker.db import clean_unicode, init_db, to_json
 from worker.embeddings import ensure_arxiv_chunk_embedding
-from worker.llm import _prompt, generate_missing_explanations
+from worker.llm import _project_judgment_prompt, generate_missing_project_judgments
 from worker.obsidian import parse_note
 from worker.obsidian import sync_obsidian
+from worker.recommendations import sync_project_paper_recommendations
 from worker.reports import generate_daily_report
 from worker.search import hybrid_search, rank_project_papers, rank_unmatched_papers
 from worker.settings_store import apply_stored_settings, get_app_settings, save_app_settings
@@ -39,6 +41,10 @@ def test_settings() -> Settings:
         obsidian_include_dirs=[],
         obsidian_include_tags=[],
         obsidian_project_center_tags=[],
+        obsidian_cli_command="obsidian",
+        obsidian_paper_repository_dir="人工智能/论文仓库",
+        obsidian_paper_attachment_dir="人工智能/论文仓库/附件",
+        obsidian_project_paper_list_name="论文列表.md",
         arxiv_categories=["cs.AI"],
         arxiv_daily_lookback_days=1,
         arxiv_max_results=10,
@@ -313,16 +319,6 @@ class WorkerTests(unittest.TestCase):
             """,
             (completed_old_id, chunk_id),
         )
-        conn.execute(
-            """
-            INSERT INTO llm_explanations(
-              paper_id, recommendation_reason, relevant_points_json, evidence_refs_json,
-              confidence, suggested_action, raw_json, created_at
-            )
-            VALUES (?, 'done', '[]', '[]', 0.9, 'read', '{}', 'now')
-            """,
-            (completed_old_id,),
-        )
         conn.commit()
 
         papers, result = _daily_papers_for_run(conn, test_settings(), "current")
@@ -477,6 +473,303 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(result["zero_match_papers_archived"], 0)
         self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM arxiv_papers").fetchone()["count"], 1)
         self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM arxiv_paper_tombstones").fetchone()["count"], 0)
+
+    def test_archive_removes_auto_candidates_rejected_by_project_judgment(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        root = Path.cwd() / ".test-tmp" / "judgment-archive"
+        root.mkdir(parents=True, exist_ok=True)
+        pdf_path = root / "paper.pdf"
+        text_path = root / "paper.txt"
+        pdf_path.write_bytes(b"%PDF- rejected")
+        text_path.write_text("Rejected candidate.", encoding="utf-8")
+        conn.execute(
+            """
+            INSERT INTO research_projects(
+              name, status, keywords_json, obsidian_project_path, obsidian_output_dir,
+              obsidian_folder, obsidian_status_tag, discovery_source, source_tags_json,
+              arxiv_categories_json, automation_json, created_at, updated_at
+            )
+            VALUES (
+              'Agentic RAG', 'active', '[]', 'Research/Agentic RAG/Home.md',
+              'Research/Agentic RAG', 'Research/Agentic RAG', 'Status/进行中',
+              'obsidian', '["project"]', '[]', '{}', 'now', 'now'
+            )
+            """
+        )
+        project_id = conn.execute("SELECT id FROM research_projects").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO arxiv_papers(
+              arxiv_id, title, authors_json, summary, categories_json, published_at,
+              updated_at, link, pdf_link, pdf_path, text_path, text_status,
+              fetched_batch_id, created_at
+            )
+            VALUES (
+              '2605.00009', 'Weak Candidate', '[]', 'Abstract', '["cs.AI"]',
+              '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z',
+              'https://arxiv.org/abs/2605.00009', 'https://arxiv.org/pdf/2605.00009',
+              ?, ?, 'complete', 'batch', 'now'
+            )
+            """,
+            (str(pdf_path), str(text_path)),
+        )
+        paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO arxiv_text_chunks(paper_id, chunk_index, source, text, token_count, char_count, created_at)
+            VALUES (?, 0, 'full_text', 'Rejected candidate.', 2, 19, 'now')
+            """,
+            (paper_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO project_papers(project_id, paper_id, relation, note, created_at, updated_at)
+            VALUES (?, ?, 'candidate', 'auto_matched_by_project_context', 'now', 'now')
+            """,
+            (project_id, paper_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO project_paper_judgments(
+              project_id, paper_id, relation_type, relevance_score, usefulness_score,
+              confidence, suggested_action, reason, evidence_mapping_json,
+              missing_evidence, input_hash, prompt_version, raw_json, created_at, updated_at
+            )
+            VALUES (?, ?, 'weak', 0.2, 0.2, 0.9, 'ignore', '弱相关',
+              '[]', '', 'hash', 'test', '{}', 'now', 'now')
+            """,
+            (project_id, paper_id),
+        )
+        conn.commit()
+
+        result = archive_zero_match_papers(conn, test_settings(), [int(paper_id)])
+
+        self.assertEqual(result["zero_match_papers_archived"], 1)
+        self.assertFalse(pdf_path.exists())
+        self.assertFalse(text_path.exists())
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM arxiv_papers").fetchone()["count"], 0)
+
+    def test_archive_keeps_passing_project_judgment(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO research_projects(
+              name, status, keywords_json, obsidian_project_path, obsidian_output_dir,
+              obsidian_folder, obsidian_status_tag, discovery_source, source_tags_json,
+              arxiv_categories_json, automation_json, created_at, updated_at
+            )
+            VALUES (
+              'Agentic RAG', 'active', '[]', 'Research/Agentic RAG/Home.md',
+              'Research/Agentic RAG', 'Research/Agentic RAG', 'Status/进行中',
+              'obsidian', '["project"]', '[]', '{}', 'now', 'now'
+            )
+            """
+        )
+        project_id = conn.execute("SELECT id FROM research_projects").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO arxiv_papers(
+              arxiv_id, title, authors_json, summary, categories_json, published_at,
+              updated_at, link, pdf_link, text_status, fetched_batch_id, created_at
+            )
+            VALUES (
+              '2605.00010', 'Keep Candidate', '[]', 'Abstract', '["cs.AI"]',
+              '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z',
+              'https://arxiv.org/abs/2605.00010', 'https://arxiv.org/pdf/2605.00010',
+              'complete', 'batch', 'now'
+            )
+            """
+        )
+        paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO project_paper_judgments(
+              project_id, paper_id, relation_type, relevance_score, usefulness_score,
+              confidence, suggested_action, reason, evidence_mapping_json,
+              missing_evidence, input_hash, prompt_version, raw_json, created_at, updated_at
+            )
+            VALUES (?, ?, 'indirect', 0.7, 0.7, 0.8, 'read', '可用',
+              '[]', '', 'hash', 'test', '{}', 'now', 'now')
+            """,
+            (project_id, paper_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO project_paper_recommendations(
+              project_id, paper_id, state, importance, relation_type, reason,
+              source_judgment_hash, created_at, updated_at
+            )
+            VALUES (?, ?, 'pending', '', 'indirect', '可用', 'hash', 'now', 'now')
+            """,
+            (project_id, paper_id),
+        )
+        conn.commit()
+
+        result = archive_zero_match_papers(conn, test_settings(), [int(paper_id)])
+
+        self.assertEqual(result["zero_match_papers_archived"], 0)
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM arxiv_papers").fetchone()["count"], 1)
+
+    def test_project_judgment_creates_pending_recommendation_without_importance(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO research_projects(
+              name, status, keywords_json, obsidian_project_path, obsidian_output_dir,
+              obsidian_folder, obsidian_status_tag, discovery_source, source_tags_json,
+              arxiv_categories_json, automation_json, created_at, updated_at
+            )
+            VALUES (
+              'Deep Steering', 'active', '[]', '人工智能/个人研究/深度引导/中心页.md',
+              '人工智能/个人研究/深度引导', '人工智能/个人研究/深度引导',
+              'Status/进行中', 'obsidian', '["project"]', '[]', '{}', 'now', 'now'
+            )
+            """
+        )
+        project_id = conn.execute("SELECT id FROM research_projects").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO arxiv_papers(
+              arxiv_id, title, authors_json, summary, categories_json, published_at,
+              updated_at, link, pdf_link, text_status, fetched_batch_id, created_at
+            )
+            VALUES (
+              '2605.00011', 'Useful Steering Paper', '[]', 'Abstract', '["cs.AI"]',
+              '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z',
+              'https://arxiv.org/abs/2605.00011', 'https://arxiv.org/pdf/2605.00011',
+              'complete', 'batch', 'now'
+            )
+            """
+        )
+        paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO project_paper_judgments(
+              project_id, paper_id, relation_type, relevance_score, usefulness_score,
+              confidence, suggested_action, reason, evidence_mapping_json,
+              missing_evidence, input_hash, prompt_version, raw_json, created_at, updated_at
+            )
+            VALUES (?, ?, 'direct', 0.9, 0.8, 0.9, 'read', '项目直接需要该机制。',
+              '[]', '', 'hash-direct', 'test', '{}', 'now', 'now')
+            """,
+            (project_id, paper_id),
+        )
+        conn.commit()
+
+        result = sync_project_paper_recommendations(conn, [int(paper_id)])
+
+        self.assertEqual(result["paper_recommendations_created"], 1)
+        recommendation = conn.execute("SELECT * FROM project_paper_recommendations").fetchone()
+        self.assertEqual(recommendation["state"], "pending")
+        self.assertEqual(recommendation["importance"], "")
+        self.assertEqual(recommendation["relation_type"], "direct")
+
+    def test_accept_recommendation_writes_paper_library_and_project_list(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        vault = Path.cwd() / ".test-tmp" / "recommendation-vault"
+        project_folder = vault / "人工智能" / "个人研究" / "深度引导"
+        project_folder.mkdir(parents=True, exist_ok=True)
+        (project_folder / "中心页.md").write_text("# 深度引导\n", encoding="utf-8")
+        pdf_dir = Path.cwd() / ".test-tmp" / "recommendation-pdfs"
+        pdf_dir.mkdir(parents=True, exist_ok=True)
+        pdf_path = pdf_dir / "2605.00012.pdf"
+        pdf_path.write_bytes(b"%PDF- recommendation")
+        conn.execute(
+            """
+            INSERT INTO research_projects(
+              name, status, keywords_json, obsidian_project_path, obsidian_output_dir,
+              obsidian_folder, obsidian_status_tag, discovery_source, source_tags_json,
+              arxiv_categories_json, automation_json, created_at, updated_at
+            )
+            VALUES (
+              '深度引导', 'active', '[]', '人工智能/个人研究/深度引导/中心页.md',
+              '人工智能/个人研究/深度引导', '人工智能/个人研究/深度引导',
+              'Status/进行中', 'obsidian', '["project"]', '[]', '{}', 'now', 'now'
+            )
+            """
+        )
+        selected_project_id = conn.execute("SELECT id FROM research_projects").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO research_projects(
+              name, status, keywords_json, obsidian_project_path, obsidian_output_dir,
+              obsidian_folder, obsidian_status_tag, discovery_source, source_tags_json,
+              arxiv_categories_json, automation_json, created_at, updated_at
+            )
+            VALUES (
+              '新的论文检索范式', 'active', '[]', '人工智能/个人研究/新的论文检索范式/中心页.md',
+              '人工智能/个人研究/新的论文检索范式', '人工智能/个人研究/新的论文检索范式',
+              'Status/进行中', 'obsidian', '["project"]', '[]', '{}', 'now', 'now'
+            )
+            """
+        )
+        discarded_project_id = conn.execute(
+            "SELECT id FROM research_projects WHERE name = '新的论文检索范式'"
+        ).fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO arxiv_papers(
+              arxiv_id, title, authors_json, summary, categories_json, published_at,
+              updated_at, link, pdf_link, pdf_path, text_status, fetched_batch_id, created_at
+            )
+            VALUES (
+              '2605.00012', 'Useful Control Paper', '[]', 'This paper helps control.',
+              '["cs.AI"]', '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z',
+              'https://arxiv.org/abs/2605.00012', 'https://arxiv.org/pdf/2605.00012',
+              ?, 'complete', 'batch', 'now'
+            )
+            """,
+            (str(pdf_path),),
+        )
+        paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
+        for project_id, relation in ((selected_project_id, "direct"), (discarded_project_id, "indirect")):
+            conn.execute(
+                """
+                INSERT INTO project_paper_recommendations(
+                  project_id, paper_id, state, importance, relation_type, reason,
+                  source_judgment_hash, created_at, updated_at
+                )
+                VALUES (?, ?, 'pending', '', ?, '推荐理由', 'hash', 'now', 'now')
+                """,
+                (project_id, paper_id, relation),
+            )
+        conn.commit()
+
+        settings = Settings(**{**test_settings().__dict__, "obsidian_vault_path": vault})
+        result = update_paper_recommendation(
+            conn,
+            settings,
+            int(paper_id),
+            {"action": "accept", "importance": "high", "project_ids": [int(selected_project_id)]},
+        )
+
+        self.assertTrue(result["ok"])
+        note_path = vault / "人工智能" / "论文仓库" / "Useful Control Paper.md"
+        self.assertTrue(note_path.exists())
+        note_text = note_path.read_text(encoding="utf-8")
+        self.assertIn("Importance/高", note_text)
+        self.assertIn("[[人工智能/个人研究/深度引导/中心页|深度引导]]：direct", note_text)
+        self.assertNotIn("新的论文检索范式", note_text)
+        self.assertTrue((vault / "人工智能" / "论文仓库" / "附件" / "2605.00012.pdf").exists())
+        project_list = project_folder / "论文列表.md"
+        self.assertTrue(project_list.exists())
+        self.assertIn("[[人工智能/论文仓库/Useful Control Paper\\|Useful Control Paper]]", project_list.read_text(encoding="utf-8"))
+        relation = conn.execute("SELECT relation FROM project_papers").fetchone()["relation"]
+        self.assertEqual(relation, "reading")
+        states = {
+            int(row["project_id"]): row["state"]
+            for row in conn.execute("SELECT project_id, state FROM project_paper_recommendations")
+        }
+        self.assertEqual(states[int(selected_project_id)], "accepted")
+        self.assertEqual(states[int(discarded_project_id)], "discarded")
 
     def test_parse_note_frontmatter_and_tags(self) -> None:
         vault = Path.cwd() / ".test-tmp" / "vault"
@@ -842,10 +1135,25 @@ class WorkerTests(unittest.TestCase):
         self.assertIsNotNone(match["arxiv_chunk_id"])
         self.assertIn("arxiv_text", match["evidence_json"])
 
-    def test_generate_explanations_normalizes_label_confidence(self) -> None:
+    def test_generate_project_judgments_normalizes_label_confidence(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO research_projects(
+              name, status, keywords_json, obsidian_project_path, obsidian_output_dir,
+              obsidian_folder, obsidian_status_tag, discovery_source, source_tags_json,
+              arxiv_categories_json, automation_json, created_at, updated_at
+            )
+            VALUES (
+              'Agentic RAG', 'active', '["retrieval"]', 'Research/Agentic RAG/Home.md',
+              'Research/Agentic RAG', 'Research/Agentic RAG', 'Status/进行中',
+              'obsidian', '["project"]', '[]', '{}', 'now', 'now'
+            )
+            """
+        )
+        project_id = conn.execute("SELECT id FROM research_projects").fetchone()["id"]
         conn.execute(
             """
             INSERT INTO obsidian_notes(path, title, frontmatter_json, tags_json, sha256, mtime, indexed_at)
@@ -861,6 +1169,13 @@ class WorkerTests(unittest.TestCase):
             (note_id,),
         )
         chunk_id = conn.execute("SELECT id FROM research_chunks").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO project_notes(project_id, note_id, relation, note, created_at, updated_at)
+            VALUES (?, ?, 'folder_member', '', 'now', 'now')
+            """,
+            (project_id, note_id),
+        )
         conn.execute(
             """
             INSERT INTO arxiv_papers(
@@ -884,54 +1199,56 @@ class WorkerTests(unittest.TestCase):
         arxiv_chunk_id = conn.execute("SELECT id FROM arxiv_text_chunks").fetchone()["id"]
         conn.execute(
             """
-            INSERT INTO matches(paper_id, arxiv_chunk_id, chunk_id, score, searchers_json, evidence_json, created_at)
-            VALUES (?, ?, ?, 0.77, '[]', '{}', 'now')
+            INSERT INTO project_paper_matches(
+              project_id, paper_id, score, rank_score, quality_score,
+              best_arxiv_chunk_id, best_obsidian_chunk_id,
+              searchers_json, evidence_json, match_type, created_at, updated_at
+            )
+            VALUES (?, ?, 0.77, 1.0, 0.77, ?, ?, '[]', '{}', 'project_context', 'now', 'now')
             """,
-            (paper_id, arxiv_chunk_id, chunk_id),
+            (project_id, paper_id, arxiv_chunk_id, chunk_id),
         )
         conn.commit()
 
         with patch(
             "worker.llm._call_chat",
             return_value={
-                "recommendation_reason": "Relevant to current notes.",
-                "relevant_points": ["retrieval"],
-                "evidence_refs": [int(chunk_id)],
+                "relation_type": "direct",
+                "relevance_score": 0.8,
+                "usefulness_score": 0.7,
                 "confidence": "moderate",
                 "suggested_action": "read",
+                "reason": "项目需要检索证据，论文提供对应机制。",
+                "evidence_mapping": [
+                    {
+                        "project_need": "检索证据",
+                        "paper_mechanism": "retrieval evidence",
+                        "why_it_matches": "机制直接对应",
+                    }
+                ],
+                "missing_evidence": "",
             },
         ):
-            result = generate_missing_explanations(conn, test_settings())
+            result = generate_missing_project_judgments(conn, test_settings())
 
-        self.assertEqual(result["explanations_created"], 1)
-        self.assertEqual(result["explanations_filtered"], 0)
-        explanation = conn.execute("SELECT confidence, suggested_action FROM llm_explanations").fetchone()
-        self.assertAlmostEqual(float(explanation["confidence"]), 0.5)
-        self.assertEqual(explanation["suggested_action"], "read")
+        self.assertEqual(result["project_judgments_created"], 1)
+        self.assertEqual(result["project_judgments_filtered"], 1)
+        judgment = conn.execute("SELECT confidence, suggested_action FROM project_paper_judgments").fetchone()
+        self.assertAlmostEqual(float(judgment["confidence"]), 0.5)
+        self.assertEqual(judgment["suggested_action"], "read")
 
-    def test_explanation_prompt_requires_chinese_values(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        init_db(conn)
-        conn.execute(
-            """
-            INSERT INTO arxiv_papers(
-              arxiv_id, title, authors_json, summary, categories_json, published_at,
-              updated_at, link, pdf_link, fetched_batch_id, created_at
-            )
-            VALUES ('2605.00008', 'Chinese prompt', '[]', 'Abstract', '["cs.AI"]',
-              '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z',
-              'https://arxiv.org/abs/2605.00008', 'https://arxiv.org/pdf/2605.00008',
-              'batch', 'now')
-            """
+    def test_project_judgment_prompt_requires_chinese_values(self) -> None:
+        prompt = _project_judgment_prompt(
+            {
+                "project": {"name": "Agentic RAG", "evidence_text": "needs retrieval evidence"},
+                "paper": {"title": "Chinese prompt", "abstract": "Abstract"},
+                "retrieval": {"quality_score": 0.7},
+            }
         )
-        paper = conn.execute("SELECT * FROM arxiv_papers").fetchone()
-
-        prompt = _prompt(paper, [])
 
         self.assertIn("所有可读文本字段值必须使用中文", prompt)
-        self.assertIn("recommendation_reason 必须是 1-3 句中文", prompt)
-        self.assertIn("relevant_points 必须是中文短语数组", prompt)
+        self.assertIn("relation_type 必须是 direct、indirect、weak、none", prompt)
+        self.assertIn("suggested_action 必须是 read、read_later、ignore", prompt)
         self.assertIn("JSON 字段名保持英文", prompt)
 
     def test_project_rank_uses_project_folder_chunks(self) -> None:
@@ -1007,6 +1324,20 @@ class WorkerTests(unittest.TestCase):
         detail = project_detail(conn, int(project_id))
         self.assertEqual(detail["project_matches"][0]["paper_id"], paper_id)
         self.assertEqual(detail["papers"][0]["project_score"], match["score"])
+        conn.execute(
+            """
+            INSERT INTO project_paper_judgments(
+              project_id, paper_id, relation_type, relevance_score, usefulness_score,
+              confidence, suggested_action, reason, evidence_mapping_json,
+              missing_evidence, input_hash, prompt_version, raw_json, created_at, updated_at
+            )
+            VALUES (?, ?, 'direct', 0.82, 0.78, 0.8, 'read',
+              '这篇论文直接讨论 agentic retrieval planning，可用于项目的 evidence selection 设计。',
+              '[]', '', 'hash', 'test', '{}', 'now', 'now')
+            """,
+            (project_id, paper_id),
+        )
+        conn.commit()
 
         vault = Path.cwd() / ".test-tmp" / "report-vault"
         (vault / "Research" / "Agentic RAG").mkdir(parents=True, exist_ok=True)
@@ -1050,7 +1381,7 @@ class WorkerTests(unittest.TestCase):
         ).fetchone()["count"]
         self.assertEqual(artifact_count, 0)
 
-    def test_daily_report_filters_by_explanation_and_writes_project_paragraphs(self) -> None:
+    def test_daily_report_filters_by_project_judgment_and_writes_project_paragraphs(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_db(conn)
@@ -1127,26 +1458,35 @@ class WorkerTests(unittest.TestCase):
                 (project_id, paper_id, arxiv_chunk_id, obsidian_chunk_id),
             )
 
-        conn.execute(
-            """
-            INSERT INTO llm_explanations(
-              paper_id, recommendation_reason, relevant_points_json, evidence_refs_json,
-              confidence, suggested_action, raw_json, created_at
+        for paper_id, relation_type, usefulness, confidence, action, reason in [
+            (
+                paper_ids[0],
+                "direct",
+                0.82,
+                0.82,
+                "read",
+                "这篇论文直接讨论 retrieval planner state，可用于当前 Agentic RAG 设计。",
+            ),
+            (
+                paper_ids[1],
+                "weak",
+                0.2,
+                0.9,
+                "ignore",
+                "只是泛泛共享检索词，不值得进入日报。",
+            ),
+        ]:
+            conn.execute(
+                """
+                INSERT INTO project_paper_judgments(
+                  project_id, paper_id, relation_type, relevance_score, usefulness_score,
+                  confidence, suggested_action, reason, evidence_mapping_json,
+                  missing_evidence, input_hash, prompt_version, raw_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, 0.8, ?, ?, ?, ?, '[]', '', ?, 'test', '{}', 'now', 'now')
+                """,
+                (project_id, paper_id, relation_type, usefulness, confidence, action, reason, f"hash-{paper_id}"),
             )
-            VALUES (?, '这篇论文直接讨论 retrieval planner state，可用于当前 Agentic RAG 设计。', '["planner state", "evidence selection"]', '[]', 0.82, 'read', '{}', 'now')
-            """,
-            (paper_ids[0],),
-        )
-        conn.execute(
-            """
-            INSERT INTO llm_explanations(
-              paper_id, recommendation_reason, relevant_points_json, evidence_refs_json,
-              confidence, suggested_action, raw_json, created_at
-            )
-            VALUES (?, '泛泛相关，不值得进入日报。', '[]', '[]', 0.9, 'ignore', '{}', 'now')
-            """,
-            (paper_ids[1],),
-        )
         conn.commit()
 
         vault = Path.cwd() / ".test-tmp" / "report-filter-vault"
@@ -1161,7 +1501,7 @@ class WorkerTests(unittest.TestCase):
                         "",
                         "## 今日结论",
                         "",
-                        "只保留通过解释筛选的候选。",
+                        "只保留通过项目级判定的候选。",
                         "",
                         "## 按项目候选论文",
                         "",
@@ -1171,7 +1511,7 @@ class WorkerTests(unittest.TestCase):
                         "",
                         "## 流程状态",
                         "",
-                        "- 解释筛掉 1",
+                        "- 项目级判定筛掉 1",
                     ]
                 )
             },
@@ -1179,7 +1519,7 @@ class WorkerTests(unittest.TestCase):
             result = generate_daily_report(
                 conn,
                 report_settings,
-                stats={"explanations_created": 2, "explanations_filtered": 1},
+                stats={"project_judgments_created": 2, "project_judgments_filtered": 1},
                 paper_ids=paper_ids,
             )
 
@@ -1193,7 +1533,7 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("### [[Agentic RAG]]", report_text)
         self.assertIn("**[2605.01001](https://arxiv.org/abs/2605.01001)《Keep Planner Paper》**", report_text)
         self.assertIn("这篇论文直接讨论 retrieval planner state", report_text)
-        self.assertIn("解释筛掉 1", report_text)
+        self.assertIn("项目级判定筛掉 1", report_text)
         self.assertNotIn("Ignored Generic Paper", report_text)
 
     def test_daily_report_uses_llm_generated_markdown_when_available(self) -> None:
@@ -1228,7 +1568,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(result["daily_report_mode"], "llm")
         call_chat.assert_called_once()
         prompt = call_chat.call_args.args[1]
-        self.assertIn("为什么它和项目相关", prompt)
+        self.assertIn("项目级判定认为它为什么相关", prompt)
         self.assertIn("120-220 个中文字符", prompt)
         report_path = vault / "Research Intelligence" / "Daily" / f"{date.today().isoformat()}.md"
         report_text = report_path.read_text(encoding="utf-8")

@@ -6,8 +6,13 @@ from pathlib import Path
 
 from .db import clean_unicode, from_json, to_json, utc_now
 from .config import Settings
-from .llm import EXPLANATION_REPORT_CONFIDENCE_THRESHOLD
 from .obsidian import status_tag_for_project_status, update_markdown_status_tag
+from .obsidian_library import sync_accepted_paper_to_obsidian
+from .recommendations import (
+    accept_recommendations_for_paper,
+    discard_recommendations_for_paper,
+    sync_project_paper_recommendations,
+)
 
 
 VALID_FEEDBACK = {"relevant", "not_relevant", "read_later", "read", "favorite"}
@@ -140,7 +145,7 @@ def project_detail(conn: sqlite3.Connection, project_id: int) -> dict[str, objec
           pp.relation,
           pp.note,
           pp.updated_at,
-          ppm.score AS project_score
+          COALESCE(NULLIF(ppm.quality_score, 0), ppm.score) AS project_score
         FROM project_papers pp
         JOIN arxiv_papers p ON p.id = pp.paper_id
         LEFT JOIN project_paper_matches ppm
@@ -210,6 +215,8 @@ def project_detail(conn: sqlite3.Connection, project_id: int) -> dict[str, objec
         SELECT
           ppm.paper_id,
           ppm.score,
+          ppm.rank_score,
+          COALESCE(NULLIF(ppm.quality_score, 0), ppm.score) AS quality_score,
           ppm.best_arxiv_chunk_id,
           ppm.best_obsidian_chunk_id,
           ppm.searchers_json,
@@ -228,14 +235,25 @@ def project_detail(conn: sqlite3.Connection, project_id: int) -> dict[str, objec
           c.heading AS obsidian_heading,
           c.text AS obsidian_text,
           n.title AS note_title,
-          n.path AS note_path
+          n.path AS note_path,
+          j.relation_type,
+          j.relevance_score,
+          j.usefulness_score,
+          j.confidence AS judgment_confidence,
+          j.suggested_action,
+          j.reason AS judgment_reason,
+          j.evidence_mapping_json,
+          j.missing_evidence,
+          j.updated_at AS judgment_updated_at
         FROM project_paper_matches ppm
         JOIN arxiv_papers p ON p.id = ppm.paper_id
         LEFT JOIN arxiv_text_chunks ac ON ac.id = ppm.best_arxiv_chunk_id
         LEFT JOIN research_chunks c ON c.id = ppm.best_obsidian_chunk_id
         LEFT JOIN obsidian_notes n ON n.id = c.note_id
+        LEFT JOIN project_paper_judgments j
+          ON j.project_id = ppm.project_id AND j.paper_id = ppm.paper_id
         WHERE ppm.project_id = ?
-        ORDER BY ppm.score DESC, ppm.updated_at DESC
+        ORDER BY quality_score DESC, ppm.updated_at DESC
         LIMIT 80
         """,
         (project_id,),
@@ -326,6 +344,21 @@ def project_detail(conn: sqlite3.Connection, project_id: int) -> dict[str, objec
                 "obsidian_text": match["obsidian_text"],
                 "note_title": match["note_title"],
                 "note_path": match["note_path"],
+                "rank_score": float(match["rank_score"] or 0),
+                "quality_score": float(match["quality_score"] or 0),
+                "judgment": None
+                if match["relation_type"] is None
+                else {
+                    "relation_type": match["relation_type"],
+                    "relevance_score": float(match["relevance_score"] or 0),
+                    "usefulness_score": float(match["usefulness_score"] or 0),
+                    "confidence": float(match["judgment_confidence"] or 0),
+                    "suggested_action": match["suggested_action"],
+                    "reason": match["judgment_reason"],
+                    "evidence_mapping": from_json(match["evidence_mapping_json"], []),
+                    "missing_evidence": match["missing_evidence"],
+                    "updated_at": match["judgment_updated_at"],
+                },
             }
             for match in project_matches
         ],
@@ -645,8 +678,22 @@ def unlink_project_note(conn: sqlite3.Connection, project_id: int, note_id: int)
 
 
 def inbox(conn: sqlite3.Connection) -> dict[str, object]:
+    sync_project_paper_recommendations(conn)
     rows = conn.execute(
         """
+        WITH pending_recommendations AS (
+          SELECT
+            r.*,
+            COUNT(*) OVER (PARTITION BY r.paper_id) AS project_count,
+            ROW_NUMBER() OVER (
+              PARTITION BY r.paper_id
+              ORDER BY
+                CASE r.relation_type WHEN 'direct' THEN 0 ELSE 1 END,
+                r.updated_at DESC
+            ) AS rn
+          FROM project_paper_recommendations r
+          WHERE r.state = 'pending'
+        )
         SELECT
           p.id,
           p.arxiv_id,
@@ -655,20 +702,25 @@ def inbox(conn: sqlite3.Connection) -> dict[str, object]:
           p.categories_json,
           p.published_at,
           p.link,
-          MAX(m.score) AS score,
-          e.recommendation_reason,
-          GROUP_CONCAT(DISTINCT f.status) AS feedback_status
+          r.project_id,
+          rp.name AS project_name,
+          r.relation_type,
+          r.reason,
+          r.project_count,
+          j.usefulness_score,
+          j.confidence
         FROM arxiv_papers p
-        JOIN matches m ON m.paper_id = p.id
-        LEFT JOIN llm_explanations e ON e.paper_id = p.id
-        LEFT JOIN user_feedback f ON f.paper_id = p.id
-        WHERE e.paper_id IS NULL
-           OR (e.suggested_action != 'ignore' AND e.confidence >= ?)
-        GROUP BY p.id
-        ORDER BY score DESC, p.published_at DESC
+        JOIN pending_recommendations r ON r.paper_id = p.id AND r.rn = 1
+        JOIN research_projects rp ON rp.id = r.project_id
+        LEFT JOIN project_paper_judgments j
+          ON j.project_id = r.project_id AND j.paper_id = r.paper_id
+        ORDER BY
+          CASE r.relation_type WHEN 'direct' THEN 0 ELSE 1 END,
+          COALESCE(j.usefulness_score, 0) DESC,
+          j.confidence DESC,
+          p.published_at DESC
         LIMIT 100
         """,
-        (EXPLANATION_REPORT_CONFIDENCE_THRESHOLD,),
     ).fetchall()
     items = []
     for row in rows:
@@ -681,22 +733,24 @@ def inbox(conn: sqlite3.Connection) -> dict[str, object]:
                 "categories": from_json(row["categories_json"], []),
                 "published_at": row["published_at"],
                 "link": row["link"],
-                "score": float(row["score"] or 0),
-                "recommendation_reason": row["recommendation_reason"],
-                "feedback_status": row["feedback_status"],
+                "score": float(row["usefulness_score"] or 0),
+                "project_id": int(row["project_id"]),
+                "project_name": row["project_name"],
+                "relation_type": row["relation_type"],
+                "confidence": float(row["confidence"] or 0),
+                "reason": row["reason"],
+                "project_count": int(row["project_count"] or 1),
+                "feedback_status": "",
             }
         )
     return {"items": items}
 
 
 def paper_detail(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
+    sync_project_paper_recommendations(conn, [paper_id])
     paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
     if not paper:
         raise RuntimeError(f"Paper not found: {paper_id}")
-    explanation = conn.execute(
-        "SELECT * FROM llm_explanations WHERE paper_id = ?",
-        (paper_id,),
-    ).fetchone()
     evidence_rows = conn.execute(
         """
         SELECT
@@ -723,8 +777,64 @@ def paper_detail(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
         """,
         (paper_id,),
     ).fetchall()
+    judgment_rows = conn.execute(
+        """
+        SELECT
+          j.project_id,
+          rp.name AS project_name,
+          j.relation_type,
+          j.relevance_score,
+          j.usefulness_score,
+          j.confidence,
+          j.suggested_action,
+          j.reason,
+          j.evidence_mapping_json,
+          j.missing_evidence,
+          j.updated_at
+        FROM project_paper_judgments j
+        JOIN research_projects rp ON rp.id = j.project_id
+        WHERE j.paper_id = ?
+        ORDER BY
+          CASE j.relation_type WHEN 'direct' THEN 0 WHEN 'indirect' THEN 1 WHEN 'weak' THEN 2 ELSE 3 END,
+          j.usefulness_score DESC,
+          j.confidence DESC
+        """,
+        (paper_id,),
+    ).fetchall()
     feedback = conn.execute(
         "SELECT status, note, updated_at FROM user_feedback WHERE paper_id = ? ORDER BY updated_at DESC",
+        (paper_id,),
+    ).fetchall()
+    recommendation_rows = conn.execute(
+        """
+        SELECT
+          r.project_id,
+          rp.name AS project_name,
+          rp.obsidian_project_path,
+          rp.obsidian_folder,
+          r.state,
+          r.importance,
+          r.relation_type,
+          r.reason,
+          r.obsidian_path,
+          r.attachment_path,
+          r.source_judgment_hash,
+          r.synced_at,
+          r.updated_at,
+          j.relevance_score,
+          j.usefulness_score,
+          j.confidence
+        FROM project_paper_recommendations r
+        JOIN research_projects rp ON rp.id = r.project_id
+        LEFT JOIN project_paper_judgments j
+          ON j.project_id = r.project_id AND j.paper_id = r.paper_id
+        WHERE r.paper_id = ?
+        ORDER BY
+          CASE r.state WHEN 'pending' THEN 0 WHEN 'accepted' THEN 1 ELSE 2 END,
+          CASE r.relation_type WHEN 'direct' THEN 0 ELSE 1 END,
+          COALESCE(j.usefulness_score, 0) DESC,
+          rp.name
+        """,
         (paper_id,),
     ).fetchall()
     return {
@@ -746,15 +856,44 @@ def paper_detail(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
             "text_error": paper["text_error"],
             "text_char_count": int(paper["text_char_count"] or 0),
         },
-        "explanation": None
-        if not explanation
-        else {
-            "recommendation_reason": explanation["recommendation_reason"],
-            "relevant_points": from_json(explanation["relevant_points_json"], []),
-            "evidence_refs": from_json(explanation["evidence_refs_json"], []),
-            "confidence": float(explanation["confidence"]),
-            "suggested_action": explanation["suggested_action"],
-        },
+        "explanation": None,
+        "project_judgments": [
+            {
+                "project_id": int(row["project_id"]),
+                "project_name": row["project_name"],
+                "relation_type": row["relation_type"],
+                "relevance_score": float(row["relevance_score"] or 0),
+                "usefulness_score": float(row["usefulness_score"] or 0),
+                "confidence": float(row["confidence"] or 0),
+                "suggested_action": row["suggested_action"],
+                "reason": row["reason"],
+                "evidence_mapping": from_json(row["evidence_mapping_json"], []),
+                "missing_evidence": row["missing_evidence"],
+                "updated_at": row["updated_at"],
+            }
+            for row in judgment_rows
+        ],
+        "project_recommendations": [
+            {
+                "project_id": int(row["project_id"]),
+                "project_name": row["project_name"],
+                "obsidian_project_path": row["obsidian_project_path"],
+                "obsidian_folder": row["obsidian_folder"],
+                "state": row["state"],
+                "importance": row["importance"],
+                "relation_type": row["relation_type"],
+                "reason": row["reason"],
+                "obsidian_path": row["obsidian_path"],
+                "attachment_path": row["attachment_path"],
+                "source_judgment_hash": row["source_judgment_hash"],
+                "synced_at": row["synced_at"],
+                "updated_at": row["updated_at"],
+                "relevance_score": float(row["relevance_score"] or 0),
+                "usefulness_score": float(row["usefulness_score"] or 0),
+                "confidence": float(row["confidence"] or 0),
+            }
+            for row in recommendation_rows
+        ],
         "evidence": [
             {
                 "chunk_id": int(row["chunk_id"]),
@@ -799,6 +938,34 @@ def save_feedback(conn: sqlite3.Connection, paper_id: int, status: str, note: st
     )
     conn.commit()
     return {"ok": True, "paper_id": paper_id, "status": status}
+
+
+def update_paper_recommendation(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    paper_id: int,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    sync_project_paper_recommendations(conn, [paper_id])
+    action = str(payload.get("action") or "").strip().lower()
+    if action == "accept":
+        raw_project_ids = payload.get("project_ids", [])
+        project_ids = [int(project_id) for project_id in raw_project_ids] if isinstance(raw_project_ids, list) else []
+        importance = str(payload.get("importance") or "").strip().lower()
+        accept_recommendations_for_paper(conn, paper_id, project_ids, importance)
+        sync_result = sync_accepted_paper_to_obsidian(conn, settings, paper_id)
+        conn.commit()
+        detail = paper_detail(conn, paper_id)
+        detail["ok"] = True
+        detail["sync"] = sync_result
+        return detail
+    if action == "discard":
+        raw_project_ids = payload.get("project_ids")
+        project_ids = [int(project_id) for project_id in raw_project_ids] if isinstance(raw_project_ids, list) else None
+        discard_recommendations_for_paper(conn, paper_id, project_ids)
+        conn.commit()
+        return {"ok": True, "paper_id": paper_id, "action": "discard"}
+    raise RuntimeError("action must be accept or discard")
 
 
 def job_history(conn: sqlite3.Connection, limit: int = 20) -> dict[str, object]:
@@ -852,6 +1019,9 @@ def health(conn: sqlite3.Connection, settings: Settings) -> dict[str, object]:
             "path": vault_path,
             "exists": vault_exists,
             "status": "ok" if vault_exists else "missing" if vault else "not_configured",
+            "cli_command": settings.obsidian_cli_command,
+            "paper_repository_dir": settings.obsidian_paper_repository_dir,
+            "paper_attachment_dir": settings.obsidian_paper_attachment_dir,
         },
         "llm": {
             "configured": any(provider.api_key for provider in settings.llm_providers),
@@ -876,6 +1046,8 @@ def health(conn: sqlite3.Connection, settings: Settings) -> dict[str, object]:
             "projects": count("research_projects"),
             "project_artifacts": count("project_artifacts"),
             "project_paper_matches": count("project_paper_matches"),
+            "project_paper_judgments": count("project_paper_judgments"),
+            "project_paper_recommendations": count("project_paper_recommendations"),
             "chunks": count("research_chunks"),
             "papers": count("arxiv_papers"),
             "paper_embeddings": count("arxiv_paper_embeddings"),
@@ -888,7 +1060,6 @@ def health(conn: sqlite3.Connection, settings: Settings) -> dict[str, object]:
             "paper_chunk_embeddings": count("arxiv_chunk_embeddings"),
             "prefilter_runs": count("paper_prefilter_runs"),
             "matches": count("matches"),
-            "explanations": count("llm_explanations"),
             "feedback": count("user_feedback"),
         },
         "latest_job": None

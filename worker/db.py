@@ -132,17 +132,6 @@ CREATE TABLE IF NOT EXISTS matches (
   UNIQUE(paper_id, chunk_id)
 );
 
-CREATE TABLE IF NOT EXISTS llm_explanations (
-  paper_id INTEGER PRIMARY KEY REFERENCES arxiv_papers(id) ON DELETE CASCADE,
-  recommendation_reason TEXT NOT NULL,
-  relevant_points_json TEXT NOT NULL DEFAULT '[]',
-  evidence_refs_json TEXT NOT NULL DEFAULT '[]',
-  confidence REAL NOT NULL DEFAULT 0,
-  suggested_action TEXT NOT NULL DEFAULT 'read_later',
-  raw_json TEXT NOT NULL DEFAULT '{}',
-  created_at TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS user_feedback (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   paper_id INTEGER NOT NULL REFERENCES arxiv_papers(id) ON DELETE CASCADE,
@@ -203,6 +192,8 @@ CREATE TABLE IF NOT EXISTS project_paper_matches (
   project_id INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
   paper_id INTEGER NOT NULL REFERENCES arxiv_papers(id) ON DELETE CASCADE,
   score REAL NOT NULL,
+  rank_score REAL NOT NULL DEFAULT 0,
+  quality_score REAL NOT NULL DEFAULT 0,
   best_arxiv_chunk_id INTEGER REFERENCES arxiv_text_chunks(id) ON DELETE SET NULL,
   best_obsidian_chunk_id INTEGER REFERENCES research_chunks(id) ON DELETE SET NULL,
   searchers_json TEXT NOT NULL DEFAULT '[]',
@@ -210,6 +201,41 @@ CREATE TABLE IF NOT EXISTS project_paper_matches (
   match_type TEXT NOT NULL DEFAULT 'project_context',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
+  PRIMARY KEY(project_id, paper_id)
+);
+
+CREATE TABLE IF NOT EXISTS project_paper_judgments (
+  project_id INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+  paper_id INTEGER NOT NULL REFERENCES arxiv_papers(id) ON DELETE CASCADE,
+  relation_type TEXT NOT NULL DEFAULT 'none',
+  relevance_score REAL NOT NULL DEFAULT 0,
+  usefulness_score REAL NOT NULL DEFAULT 0,
+  confidence REAL NOT NULL DEFAULT 0,
+  suggested_action TEXT NOT NULL DEFAULT 'ignore',
+  reason TEXT NOT NULL DEFAULT '',
+  evidence_mapping_json TEXT NOT NULL DEFAULT '[]',
+  missing_evidence TEXT NOT NULL DEFAULT '',
+  input_hash TEXT NOT NULL DEFAULT '',
+  prompt_version TEXT NOT NULL DEFAULT '',
+  raw_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(project_id, paper_id)
+);
+
+CREATE TABLE IF NOT EXISTS project_paper_recommendations (
+  project_id INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+  paper_id INTEGER NOT NULL REFERENCES arxiv_papers(id) ON DELETE CASCADE,
+  state TEXT NOT NULL DEFAULT 'pending',
+  importance TEXT NOT NULL DEFAULT '',
+  relation_type TEXT NOT NULL DEFAULT 'indirect',
+  reason TEXT NOT NULL DEFAULT '',
+  obsidian_path TEXT NOT NULL DEFAULT '',
+  attachment_path TEXT NOT NULL DEFAULT '',
+  source_judgment_hash TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  synced_at TEXT,
   PRIMARY KEY(project_id, paper_id)
 );
 
@@ -245,6 +271,10 @@ CREATE INDEX IF NOT EXISTS idx_matches_paper_score ON matches(paper_id, score DE
 CREATE INDEX IF NOT EXISTS idx_research_projects_status ON research_projects(status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_project_paper_matches_project_score ON project_paper_matches(project_id, score DESC);
 CREATE INDEX IF NOT EXISTS idx_project_paper_matches_paper ON project_paper_matches(paper_id);
+CREATE INDEX IF NOT EXISTS idx_project_paper_judgments_project_action ON project_paper_judgments(project_id, suggested_action, confidence DESC);
+CREATE INDEX IF NOT EXISTS idx_project_paper_judgments_paper ON project_paper_judgments(paper_id);
+CREATE INDEX IF NOT EXISTS idx_project_paper_recommendations_state ON project_paper_recommendations(state, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_project_paper_recommendations_paper ON project_paper_recommendations(paper_id);
 CREATE INDEX IF NOT EXISTS idx_project_artifacts_project ON project_artifacts(project_id, updated_at DESC);
 """
 
@@ -329,6 +359,21 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError as exc:
             if "duplicate column name" not in str(exc).lower():
                 raise
+    project_match_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(project_paper_matches)").fetchall()
+    }
+    project_match_migrations = {
+        "rank_score": "ALTER TABLE project_paper_matches ADD COLUMN rank_score REAL NOT NULL DEFAULT 0",
+        "quality_score": "ALTER TABLE project_paper_matches ADD COLUMN quality_score REAL NOT NULL DEFAULT 0",
+    }
+    for column, sql in project_match_migrations.items():
+        if column not in project_match_columns:
+            try:
+                conn.execute(sql)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
     project_columns = {
         row["name"]
         for row in conn.execute("PRAGMA table_info(research_projects)").fetchall()
@@ -354,6 +399,52 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_research_projects_obsidian_note ON research_projects(obsidian_note_id)"
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS project_paper_recommendations (
+          project_id INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+          paper_id INTEGER NOT NULL REFERENCES arxiv_papers(id) ON DELETE CASCADE,
+          state TEXT NOT NULL DEFAULT 'pending',
+          importance TEXT NOT NULL DEFAULT '',
+          relation_type TEXT NOT NULL DEFAULT 'indirect',
+          reason TEXT NOT NULL DEFAULT '',
+          obsidian_path TEXT NOT NULL DEFAULT '',
+          attachment_path TEXT NOT NULL DEFAULT '',
+          source_judgment_hash TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          synced_at TEXT,
+          PRIMARY KEY(project_id, paper_id)
+        )
+        """
+    )
+    rec_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(project_paper_recommendations)").fetchall()
+    }
+    rec_migrations = {
+        "importance": "ALTER TABLE project_paper_recommendations ADD COLUMN importance TEXT NOT NULL DEFAULT ''",
+        "relation_type": "ALTER TABLE project_paper_recommendations ADD COLUMN relation_type TEXT NOT NULL DEFAULT 'indirect'",
+        "reason": "ALTER TABLE project_paper_recommendations ADD COLUMN reason TEXT NOT NULL DEFAULT ''",
+        "obsidian_path": "ALTER TABLE project_paper_recommendations ADD COLUMN obsidian_path TEXT NOT NULL DEFAULT ''",
+        "attachment_path": "ALTER TABLE project_paper_recommendations ADD COLUMN attachment_path TEXT NOT NULL DEFAULT ''",
+        "source_judgment_hash": "ALTER TABLE project_paper_recommendations ADD COLUMN source_judgment_hash TEXT NOT NULL DEFAULT ''",
+        "synced_at": "ALTER TABLE project_paper_recommendations ADD COLUMN synced_at TEXT",
+    }
+    for column, sql in rec_migrations.items():
+        if column not in rec_columns:
+            try:
+                conn.execute(sql)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_project_paper_recommendations_state ON project_paper_recommendations(state, updated_at DESC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_project_paper_recommendations_paper ON project_paper_recommendations(paper_id)"
+    )
+    conn.execute("DROP TABLE IF EXISTS llm_explanations")
 
 
 def update_job_meta(

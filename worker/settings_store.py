@@ -38,6 +38,10 @@ FLOAT_FIELDS = {
 
 STRING_FIELDS = {
     "obsidian_vault_path",
+    "obsidian_cli_command",
+    "obsidian_paper_repository_dir",
+    "obsidian_paper_attachment_dir",
+    "obsidian_project_paper_list_name",
     "arxiv_pdf_dir",
     "arxiv_text_dir",
     "vector_index_backend",
@@ -137,6 +141,10 @@ def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, An
         "obsidian_include_dirs": settings.obsidian_include_dirs,
         "obsidian_include_tags": settings.obsidian_include_tags,
         "obsidian_project_center_tags": settings.obsidian_project_center_tags,
+        "obsidian_cli_command": settings.obsidian_cli_command,
+        "obsidian_paper_repository_dir": settings.obsidian_paper_repository_dir,
+        "obsidian_paper_attachment_dir": settings.obsidian_paper_attachment_dir,
+        "obsidian_project_paper_list_name": settings.obsidian_project_paper_list_name,
         "arxiv_categories": settings.arxiv_categories,
         "arxiv_daily_lookback_days": settings.arxiv_daily_lookback_days,
         "arxiv_max_results": settings.arxiv_max_results,

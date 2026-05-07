@@ -631,6 +631,17 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  const paperRecommendationMatch = url.pathname.match(/^\/api\/papers\/(\d+)\/recommendation$/);
+  if (req.method === "POST" && paperRecommendationMatch) {
+    const body = await readRequestJson(req);
+    const data = await jsonFromWorker([
+      "api-paper-recommendation",
+      paperRecommendationMatch[1]
+    ], JSON.stringify(body));
+    sendJson(res, 200, data);
+    return;
+  }
+
   const jobMap = {
     "/api/jobs/sync-obsidian": "sync-obsidian",
     "/api/jobs/fetch-arxiv": "fetch-arxiv",

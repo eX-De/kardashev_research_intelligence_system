@@ -38,6 +38,16 @@ STOPWORDS = {
     "will",
 }
 
+GENERIC_PROJECT_HEADINGS = {
+    "title",
+    "标题",
+    "总览",
+    "overview",
+    "基本假设",
+    "参考文献",
+    "references",
+}
+
 
 @dataclass
 class SearchHit:
@@ -189,7 +199,10 @@ def hybrid_search_with_embedding(
     return [
         {
             "chunk_id": chunk_id,
-            "score": fused_score / max_score,
+            "score": _retrieval_quality_score(details[chunk_id]),
+            "rank_score": fused_score / max_score,
+            "quality_score": _retrieval_quality_score(details[chunk_id]),
+            "raw_rrf_score": fused_score,
             "searchers": sorted({detail["searcher"] for detail in details[chunk_id]}),
             "details": details[chunk_id],
         }
@@ -210,10 +223,67 @@ def _project_chunk_ids(conn: sqlite3.Connection, project_id: int) -> set[int]:
     return {int(row["id"]) for row in rows}
 
 
+def _project_chunks_by_id(conn: sqlite3.Connection, project_id: int) -> dict[int, sqlite3.Row]:
+    rows = conn.execute(
+        """
+        SELECT c.id, c.heading, c.text, n.title AS note_title, n.path AS note_path
+        FROM project_notes pn
+        JOIN research_chunks c ON c.note_id = pn.note_id
+        JOIN obsidian_notes n ON n.id = c.note_id
+        WHERE pn.project_id = ?
+        """,
+        (project_id,),
+    ).fetchall()
+    return {int(row["id"]): row for row in rows}
+
+
+def _retrieval_quality_score(details: list[dict[str, object]]) -> float:
+    best_embedding = 0.0
+    best_lexical = 0.0
+    searchers: set[str] = set()
+    for detail in details:
+        searcher = str(detail.get("searcher") or "")
+        searchers.add(searcher)
+        raw_score = float(detail.get("raw_score") or 0)
+        if searcher == "embedding_search":
+            best_embedding = max(best_embedding, raw_score)
+        elif searcher in {"keyword_search", "front_page_search"}:
+            best_lexical = max(best_lexical, raw_score)
+    if best_embedding > 0:
+        score = (0.75 * best_embedding) + (0.15 * best_lexical)
+    else:
+        score = 0.85 * best_lexical
+    score += min(0.10, max(0, len(searchers) - 1) * 0.05)
+    return max(0.0, min(1.0, score))
+
+
+def _generic_project_chunk_penalty(chunk: sqlite3.Row | None) -> float:
+    if not chunk:
+        return 0.0
+    heading = str(chunk["heading"] or "").strip().lower()
+    note_path = str(chunk["note_path"] or "").strip().lower()
+    note_title = str(chunk["note_title"] or "").strip().lower()
+    text = str(chunk["text"] or "").strip()
+    penalty = 0.0
+    if heading in GENERIC_PROJECT_HEADINGS:
+        penalty += 0.12
+    if any(part in note_path or part in note_title for part in ("中心页", "home", "index", "reference", "参考文献")):
+        penalty += 0.08
+    if any(part in heading or part in note_path for part in ("api", "环境变量", "log", "日志")):
+        penalty += 0.10
+    if len(text) < 80:
+        penalty += 0.05
+    return min(0.25, penalty)
+
+
 def _project_match_evidence(hit: dict[str, object]) -> dict[str, object]:
     return {
         "search_details": hit["details"],
         "top_project_hits": hit.get("top_project_hits", []),
+        "rank_score": hit.get("rank_score", 0),
+        "quality_score": hit.get("quality_score", hit.get("score", 0)),
+        "raw_quality_score": hit.get("raw_quality_score", hit.get("quality_score", hit.get("score", 0))),
+        "generic_chunk_penalty": hit.get("generic_chunk_penalty", 0),
         "arxiv_chunk_index": hit["arxiv_chunk_index"],
         "arxiv_chunk_source": hit["arxiv_chunk_source"],
         "arxiv_page_start": hit["arxiv_page_start"],
@@ -496,7 +566,8 @@ def rank_project_papers(
     for project in projects:
         projects_considered += 1
         project_id = int(project["id"])
-        project_chunk_ids = _project_chunk_ids(conn, project_id)
+        project_chunks = _project_chunks_by_id(conn, project_id)
+        project_chunk_ids = set(project_chunks)
         if not project_chunk_ids:
             continue
         projects_with_context += 1
@@ -529,14 +600,21 @@ def rank_project_papers(
                     project_chunk_ids,
                 )
                 for hit in hits:
-                    if float(hit["score"]) < settings.rag_score_threshold:
-                        continue
                     obsidian_chunk_id = int(hit["chunk_id"])
+                    raw_quality_score = float(hit.get("quality_score") or hit.get("score") or 0)
+                    generic_penalty = _generic_project_chunk_penalty(project_chunks.get(obsidian_chunk_id))
+                    quality_score = max(0.0, raw_quality_score - generic_penalty)
+                    if quality_score < settings.rag_score_threshold:
+                        continue
                     previous = best_by_obsidian_chunk.get(obsidian_chunk_id)
-                    if previous and float(previous["score"]) >= float(hit["score"]):
+                    if previous and float(previous["quality_score"]) >= quality_score:
                         continue
                     best_by_obsidian_chunk[obsidian_chunk_id] = {
                         **hit,
+                        "score": quality_score,
+                        "quality_score": quality_score,
+                        "raw_quality_score": raw_quality_score,
+                        "generic_chunk_penalty": generic_penalty,
                         "arxiv_chunk_id": int(arxiv_chunk["id"]),
                         "arxiv_chunk_index": int(arxiv_chunk["chunk_index"]),
                         "arxiv_chunk_source": arxiv_chunk["source"],
@@ -546,19 +624,27 @@ def rank_project_papers(
                     }
             ranked_hits = sorted(
                 best_by_obsidian_chunk.values(),
-                key=lambda hit: float(hit["score"]),
+                key=lambda hit: (float(hit["quality_score"]), float(hit.get("rank_score") or 0)),
                 reverse=True,
             )[: settings.rag_top_k]
             if not ranked_hits:
                 continue
             best = ranked_hits[0]
-            top_scores = [float(hit["score"]) for hit in ranked_hits[:3]]
-            score = (float(best["score"]) * 0.7) + ((sum(top_scores) / len(top_scores)) * 0.3)
+            top_quality_scores = [float(hit["quality_score"]) for hit in ranked_hits[:3]]
+            quality_score = (float(best["quality_score"]) * 0.7) + (
+                (sum(top_quality_scores) / len(top_quality_scores)) * 0.3
+            )
+            top_rank_scores = [float(hit.get("rank_score") or 0) for hit in ranked_hits[:3]]
+            rank_score = (float(best.get("rank_score") or 0) * 0.7) + (
+                (sum(top_rank_scores) / len(top_rank_scores)) * 0.3
+            )
             best["top_project_hits"] = [
                 {
                     "chunk_id": int(hit["chunk_id"]),
                     "arxiv_chunk_id": int(hit["arxiv_chunk_id"]),
-                    "score": round(float(hit["score"]), 6),
+                    "score": round(float(hit["quality_score"]), 6),
+                    "rank_score": round(float(hit.get("rank_score") or 0), 6),
+                    "quality_score": round(float(hit["quality_score"]), 6),
                     "searchers": hit["searchers"],
                 }
                 for hit in ranked_hits
@@ -570,6 +656,8 @@ def rank_project_papers(
                   project_id,
                   paper_id,
                   score,
+                  rank_score,
+                  quality_score,
                   best_arxiv_chunk_id,
                   best_obsidian_chunk_id,
                   searchers_json,
@@ -578,21 +666,25 @@ def rank_project_papers(
                   created_at,
                   updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'project_context', ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'project_context', ?, ?)
                 ON CONFLICT(project_id, paper_id) DO UPDATE SET
                   score = excluded.score,
+                  rank_score = excluded.rank_score,
+                  quality_score = excluded.quality_score,
                   best_arxiv_chunk_id = excluded.best_arxiv_chunk_id,
                   best_obsidian_chunk_id = excluded.best_obsidian_chunk_id,
                   searchers_json = excluded.searchers_json,
                   evidence_json = excluded.evidence_json,
                   match_type = excluded.match_type,
                   updated_at = excluded.updated_at
-                WHERE excluded.score > project_paper_matches.score
+                WHERE excluded.quality_score > project_paper_matches.quality_score
                 """,
                 (
                     project_id,
                     int(paper["id"]),
-                    float(score),
+                    float(quality_score),
+                    float(rank_score),
+                    float(quality_score),
                     int(best["arxiv_chunk_id"]),
                     int(best["chunk_id"]),
                     to_json(best["searchers"]),

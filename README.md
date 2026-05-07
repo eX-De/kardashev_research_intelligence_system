@@ -149,9 +149,9 @@ PDF 正文提取依赖 PyMuPDF，依赖写在 `requirements.txt`。提取出的 
 
 arXiv 正文会切成 `arxiv_text_chunks` 后逐段匹配 Obsidian 的 `research_chunks`。`matches` 表会记录最佳命中的 `arxiv_chunk_id` 和 Obsidian `chunk_id`，因此 dashboard 可以展示“论文哪一段/哪一页”匹配到了“哪条个人研究笔记”。
 
-项目级论文匹配会把检索范围限制在该项目自动关联的 Obsidian 笔记 chunk 中，结果写入 `project_paper_matches`，并把高相关论文作为 `candidate` 关联到项目。项目详情页会显示项目候选论文、命中分数和论文/项目证据片段。
+项目级论文匹配会把检索范围限制在该项目自动关联的 Obsidian 笔记 chunk 中，结果写入 `project_paper_matches`。RRF 分数只用于证据排序，`quality_score` 用于便宜过滤；随后系统对通过过滤的 `项目 × 论文` 生成项目级判定，写入 `project_paper_judgments`。项目详情页会显示项目候选论文、命中分数、论文/项目证据片段和判定结果。
 
-每日流程最后会生成一篇每日总报告，写入 `Research Intelligence/Daily/YYYY-MM-DD.md`。报告汇总当天流程指标、项目候选论文、全局推荐论文、风险/不确定点和下一步动作；不再为每个“项目 × 论文”生成单篇用途报告。
+每日流程最后会生成一篇每日总报告，写入 `Research Intelligence/Daily/YYYY-MM-DD.md`。报告只读取通过项目级判定的项目候选论文，汇总当天流程指标、风险/不确定点和下一步动作；不再为每个“项目 × 论文”生成单篇用途报告。
 
 如果配置了 embedding provider 和 embedding model，系统会为 arXiv 正文段生成 embedding，并写入 `arxiv_chunk_embeddings`。后续重跑 ranking 时会优先复用缓存，避免对同一个 arXiv chunk 重复请求 embedding API。
 

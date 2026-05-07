@@ -18,6 +18,7 @@ from .api import (
     projects,
     save_feedback,
     save_project,
+    update_paper_recommendation,
     unlink_project_note,
     unlink_project_paper,
 )
@@ -26,8 +27,9 @@ from .arxiv_client import fetch_arxiv
 from .arxiv_text import cache_arxiv_full_texts
 from .config import load_settings
 from .db import clean_unicode, connect, init_db, job_run, update_job_meta, utc_now
-from .llm import generate_missing_explanations
+from .llm import generate_missing_project_judgments
 from .obsidian import sync_obsidian
+from .recommendations import sync_project_paper_recommendations
 from .reports import generate_daily_report
 from .search import prefilter_papers, rank_project_papers, rank_unmatched_papers
 from .settings_store import apply_stored_settings, get_app_settings, save_app_settings
@@ -68,8 +70,9 @@ DAILY_STEPS = [
     ("cache_text", "缓存 PDF/TXT"),
     ("rank_global", "全局论文匹配"),
     ("rank_project", "项目论文匹配"),
-    ("archive_zero_match", "归档 0 命中论文"),
-    ("explain", "生成解释"),
+    ("judge_project_papers", "项目级判定"),
+    ("paper_recommendations", "生成论文推荐"),
+    ("archive_zero_match", "归档未通过论文"),
     ("reports", "生成每日总报告"),
 ]
 DAILY_RETRY_PAPER_LIMIT = 50
@@ -104,8 +107,10 @@ def _step_summary(result: dict[str, Any]) -> str:
         ("matched_papers", "matched papers"),
         ("project_paper_matches_created", "project matches"),
         ("zero_match_papers_archived", "zero-match archived"),
-        ("explanations_created", "explanations"),
-        ("explanations_filtered", "filtered by explanations"),
+        ("project_judgments_created", "project judgments"),
+        ("project_judgments_filtered", "filtered by judgments"),
+        ("paper_recommendations_created", "paper recommendations"),
+        ("paper_recommendations_refreshed", "recommendations refreshed"),
         ("reports_created", "daily reports"),
         ("reports_failed", "report failures"),
     ]
@@ -206,7 +211,7 @@ def _daily_papers_for_run(conn, settings, batch_id: str) -> tuple[list[Any], dic
         "daily_retry_text_papers": 0,
         "daily_retry_global_match_papers": 0,
         "daily_retry_project_match_papers": 0,
-        "daily_retry_explanation_papers": 0,
+        "daily_retry_judgment_papers": 0,
     }
 
     def add_retry_papers(rows: list[Any], count_key: str) -> None:
@@ -284,21 +289,22 @@ def _daily_papers_for_run(conn, settings, batch_id: str) -> tuple[list[Any], dic
         ).fetchall(), "daily_retry_project_match_papers")
         add_retry_papers(conn.execute(
             """
-            SELECT DISTINCT p.*
-            FROM arxiv_papers p
-            JOIN matches m ON m.paper_id = p.id
-            LEFT JOIN llm_explanations e ON e.paper_id = p.id
-            WHERE p.fetched_batch_id != ?
-              AND NOT EXISTS (
-                SELECT 1 FROM arxiv_paper_tombstones t
-                WHERE t.arxiv_id = p.arxiv_id
-              )
-              AND e.paper_id IS NULL
-            ORDER BY p.published_at DESC
-            LIMIT ?
-            """,
+                SELECT DISTINCT p.*
+                FROM arxiv_papers p
+                JOIN project_paper_matches ppm ON ppm.paper_id = p.id
+                LEFT JOIN project_paper_judgments j
+                  ON j.project_id = ppm.project_id AND j.paper_id = ppm.paper_id
+                WHERE p.fetched_batch_id != ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM arxiv_paper_tombstones t
+                    WHERE t.arxiv_id = p.arxiv_id
+                  )
+                  AND j.paper_id IS NULL
+                ORDER BY p.published_at DESC
+                LIMIT ?
+                """,
             (batch_id, retry_limit),
-        ).fetchall(), "daily_retry_explanation_papers")
+        ).fetchall(), "daily_retry_judgment_papers")
 
     seen_ids: set[int] = set()
     papers: list[Any] = []
@@ -395,7 +401,8 @@ def cmd_rank(_: argparse.Namespace) -> None:
         with job_run(conn, "rank-papers") as job_id:
             result = rank_unmatched_papers(conn, settings)
             result.update(rank_project_papers(conn, settings))
-            result.update(generate_missing_explanations(conn, settings))
+            result.update(generate_missing_project_judgments(conn, settings))
+            result.update(sync_project_paper_recommendations(conn))
             update_job_meta(conn, job_id, "Ranking completed", result)
         return result
 
@@ -506,31 +513,45 @@ def cmd_run_daily(_: argparse.Namespace) -> None:
             )
             accumulated.update(project_rank_result)
 
-            archive_result = _run_daily_step(
+            explain_result = _run_daily_step(
                 conn,
                 job_id,
                 steps,
                 6,
                 accumulated,
-                lambda: archive_zero_match_papers(conn, settings, selected_paper_ids),
+                lambda: generate_missing_project_judgments(
+                    conn,
+                    settings,
+                    paper_ids=selected_paper_ids,
+                ),
             )
-            accumulated.update(archive_result)
+            accumulated.update(explain_result)
 
-            explain_result = _run_daily_step(
+            recommendation_result = _run_daily_step(
                 conn,
                 job_id,
                 steps,
                 7,
                 accumulated,
-                lambda: generate_missing_explanations(conn, settings),
+                lambda: sync_project_paper_recommendations(conn, selected_paper_ids),
             )
-            accumulated.update(explain_result)
+            accumulated.update(recommendation_result)
+
+            archive_result = _run_daily_step(
+                conn,
+                job_id,
+                steps,
+                8,
+                accumulated,
+                lambda: archive_zero_match_papers(conn, settings, selected_paper_ids),
+            )
+            accumulated.update(archive_result)
 
             report_result = _run_daily_step(
                 conn,
                 job_id,
                 steps,
-                8,
+                9,
                 accumulated,
                 lambda: generate_daily_report(
                     conn,
@@ -565,6 +586,14 @@ def cmd_api_paper(args: argparse.Namespace) -> None:
 def cmd_api_feedback(args: argparse.Namespace) -> None:
     result = _with_db(
         lambda conn, settings: save_feedback(conn, int(args.paper_id), args.status, args.note)
+    )
+    _print_json(result)
+
+
+def cmd_api_paper_recommendation(args: argparse.Namespace) -> None:
+    payload = _read_json_stdin("paper recommendation")
+    result = _with_db(
+        lambda conn, settings: update_paper_recommendation(conn, settings, int(args.paper_id), payload)
     )
     _print_json(result)
 
@@ -682,6 +711,10 @@ def build_parser() -> argparse.ArgumentParser:
     api_feedback.add_argument("--status", required=True)
     api_feedback.add_argument("--note", default="")
     api_feedback.set_defaults(func=cmd_api_feedback)
+
+    api_paper_recommendation = sub.add_parser("api-paper-recommendation")
+    api_paper_recommendation.add_argument("paper_id")
+    api_paper_recommendation.set_defaults(func=cmd_api_paper_recommendation)
 
     api_projects = sub.add_parser("api-projects")
     api_projects.set_defaults(func=cmd_api_projects)

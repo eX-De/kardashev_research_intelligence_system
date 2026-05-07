@@ -8,7 +8,11 @@ from typing import Any
 
 from .config import Settings
 from .db import clean_unicode, from_json, to_json, utc_now
-from .llm import EXPLANATION_REPORT_CONFIDENCE_THRESHOLD, call_chat_json
+from .llm import (
+    PROJECT_JUDGMENT_REPORT_CONFIDENCE_THRESHOLD,
+    PROJECT_JUDGMENT_REPORT_USEFULNESS_THRESHOLD,
+    call_chat_json,
+)
 
 
 DAILY_REPORT_DIR = Path("Research Intelligence") / "Daily"
@@ -51,10 +55,12 @@ def _paper_filter(
     return "WHERE " + " AND ".join(conditions), [*paper_ids, *params]
 
 
-def _report_explanation_condition(alias: str = "e") -> str:
+def _report_judgment_condition(alias: str = "j") -> str:
     return (
-        f"({alias}.paper_id IS NULL OR "
-        f"({alias}.suggested_action != 'ignore' AND {alias}.confidence >= ?))"
+        f"{alias}.relation_type IN ('direct', 'indirect') "
+        f"AND {alias}.suggested_action != 'ignore' "
+        f"AND {alias}.confidence >= ? "
+        f"AND {alias}.usefulness_score >= ?"
     )
 
 
@@ -81,8 +87,8 @@ def _project_match_rows(
     where, params = _paper_filter(
         paper_ids,
         "p",
-        [_report_explanation_condition("e")],
-        [EXPLANATION_REPORT_CONFIDENCE_THRESHOLD],
+        [_report_judgment_condition("j")],
+        [PROJECT_JUDGMENT_REPORT_CONFIDENCE_THRESHOLD, PROJECT_JUDGMENT_REPORT_USEFULNESS_THRESHOLD],
     )
     return conn.execute(
         f"""
@@ -90,6 +96,8 @@ def _project_match_rows(
           ppm.project_id,
           ppm.paper_id,
           ppm.score,
+          ppm.rank_score,
+          COALESCE(NULLIF(ppm.quality_score, 0), ppm.score) AS quality_score,
           ppm.updated_at AS match_updated_at,
           p.arxiv_id,
           p.title AS paper_title,
@@ -109,19 +117,29 @@ def _project_match_rows(
           rp.status AS project_status,
           rp.obsidian_project_path,
           rp.obsidian_folder,
-          e.recommendation_reason,
-          e.relevant_points_json,
-          e.suggested_action,
-          e.confidence
+          j.relation_type,
+          j.relevance_score,
+          j.usefulness_score,
+          j.confidence,
+          j.suggested_action,
+          j.reason AS judgment_reason,
+          j.evidence_mapping_json,
+          j.missing_evidence
         FROM project_paper_matches ppm
         JOIN arxiv_papers p ON p.id = ppm.paper_id
         JOIN research_projects rp ON rp.id = ppm.project_id
         LEFT JOIN arxiv_text_chunks ac ON ac.id = ppm.best_arxiv_chunk_id
         LEFT JOIN research_chunks c ON c.id = ppm.best_obsidian_chunk_id
         LEFT JOIN obsidian_notes n ON n.id = c.note_id
-        LEFT JOIN llm_explanations e ON e.paper_id = p.id
+        JOIN project_paper_judgments j
+          ON j.project_id = ppm.project_id AND j.paper_id = p.id
         {where}
-        ORDER BY ppm.score DESC, ppm.updated_at DESC
+        ORDER BY
+          CASE j.relation_type WHEN 'direct' THEN 0 ELSE 1 END,
+          j.usefulness_score DESC,
+          j.confidence DESC,
+          quality_score DESC,
+          ppm.updated_at DESC
         LIMIT ?
         """,
         (*params, limit),
@@ -133,37 +151,7 @@ def _global_match_rows(
     paper_ids: list[int] | None,
     limit: int,
 ) -> list[sqlite3.Row]:
-    where, params = _paper_filter(
-        paper_ids,
-        "p",
-        [_report_explanation_condition("e")],
-        [EXPLANATION_REPORT_CONFIDENCE_THRESHOLD],
-    )
-    return conn.execute(
-        f"""
-        SELECT
-          p.id AS paper_id,
-          p.arxiv_id,
-          p.title AS paper_title,
-          p.summary,
-          p.link,
-          p.published_at,
-          p.categories_json,
-          p.text_status,
-          MAX(m.score) AS score,
-          e.recommendation_reason,
-          e.suggested_action,
-          e.confidence
-        FROM arxiv_papers p
-        JOIN matches m ON m.paper_id = p.id
-        LEFT JOIN llm_explanations e ON e.paper_id = p.id
-        {where}
-        GROUP BY p.id
-        ORDER BY score DESC, p.published_at DESC
-        LIMIT ?
-        """,
-        (*params, limit),
-    ).fetchall()
+    return []
 
 
 def _frontmatter(report_date: str) -> str:
@@ -221,11 +209,16 @@ def _project_payload(row: sqlite3.Row) -> dict[str, object]:
         "title": row["paper_title"],
         "link": row["link"],
         "published_at": row["published_at"],
-        "match_score": round(_float(row["score"]), 4),
-        "explanation_confidence": round(_float(row["confidence"]), 4),
+        "retrieval_quality": round(_float(row["quality_score"]), 4),
+        "rank_score": round(_float(row["rank_score"]), 4),
+        "relation_type": row["relation_type"],
+        "relevance_score": round(_float(row["relevance_score"]), 4),
+        "usefulness_score": round(_float(row["usefulness_score"]), 4),
+        "judgment_confidence": round(_float(row["confidence"]), 4),
         "suggested_action": row["suggested_action"] or "read_later",
-        "recommendation_reason": _short(row["recommendation_reason"], 700),
-        "relevant_points": from_json(row["relevant_points_json"], []),
+        "judgment_reason": _short(row["judgment_reason"], 900),
+        "evidence_mapping": from_json(row["evidence_mapping_json"], []),
+        "missing_evidence": _short(row["missing_evidence"], 700),
         "paper_evidence": _short(row["arxiv_text"], 700),
         "project_evidence": _short(row["obsidian_text"], 700),
         "project_note_path": row["note_path"],
@@ -240,9 +233,6 @@ def _global_payload(row: sqlite3.Row) -> dict[str, object]:
         "published_at": row["published_at"],
         "categories": from_json(row["categories_json"], []),
         "match_score": round(_float(row["score"]), 4),
-        "explanation_confidence": round(_float(row["confidence"]), 4),
-        "suggested_action": row["suggested_action"] or "read_later",
-        "recommendation_reason": _short(row["recommendation_reason"], 700),
     }
 
 
@@ -277,7 +267,7 @@ def _llm_report_prompt(payload: dict[str, object]) -> str:
 只返回 JSON，不要 Markdown fence，不要额外解释。
 JSON schema: {{"markdown": "...完整 Markdown 正文..."}}
 
-你是科研情报编辑，也是研究助理。请基于下面所有候选论文解读、项目证据、论文证据和流程指标，生成一篇中文科研情报日报。
+你是科研情报编辑，也是研究助理。请基于下面已经通过项目级 LLM 判定的候选论文、项目证据、论文证据和流程指标，生成一篇中文科研情报日报。
 目标不是列清单，而是让读者快速理解：今天有哪些论文值得投入注意力、为什么和现有项目有关、具体能怎么用、还需要验证什么。
 
 硬性要求：
@@ -286,16 +276,17 @@ JSON schema: {{"markdown": "...完整 Markdown 正文..."}}
 - 事实只能来自输入 JSON；不要编造 arXiv ID、链接、项目名、分数或不存在的论文。
 - 保留每篇论文的 arXiv 链接，格式可用 [arXivID](URL)。
 - 按项目组织“项目候选论文”；每个项目下，每篇候选论文写成一个自然段，不要用脚本式字段堆砌。
-- 每篇项目候选论文都必须解释清楚 5 件事：一句话结论、为什么它和项目相关、论文里具体可借鉴的机制/方法/实验、可以落到项目里的下一步动作、主要不确定性或需要复核的证据。
+- 项目候选论文已经由 project_paper_judgments 判定通过；不得把 relation_type、confidence、usefulness_score 改写成更强的结论。
+- 每篇项目候选论文都必须解释清楚 5 件事：一句话结论、项目级判定认为它为什么相关、论文里具体可借鉴的机制/方法/实验、可以落到项目里的下一步动作、主要不确定性或 missing_evidence。
 - 每篇项目候选论文段落建议 120-220 个中文字符；候选很多时可以压缩，但不能只写标题、分数或一句“值得关注”。
-- 不要直接复述 recommendation_reason；要综合 recommendation_reason、relevant_points、paper_evidence、project_evidence，写成读者能理解的判断。
+- 不要直接复述 judgment_reason；要综合 judgment_reason、evidence_mapping、paper_evidence、project_evidence，写成读者能理解的判断。
 - 如果 paper_evidence 或 project_evidence 不足，要明确说“证据不足在哪里”，不要用确定语气。
 - 对已归入项目的论文，不要在“全局推荐”里重复展开。
-- 全局推荐只写没有明确项目归属但值得注意的论文；每篇也要用 2-3 句说明主题、潜在价值和为什么暂时没有明确项目归属。
+- 全局推荐只写输入 JSON 中 global_recommendations 提供的论文；没有输入时说明本次不做全局补充。
 - 如果候选很多，仍要覆盖输入中的项目候选；可以用更紧凑的自然段，但不要只给标题列表。
 - 把流程指标放在靠后的“流程状态”部分，不能压过正文。
 - “重点优先级”不要只排序，要解释优先级原因：项目相关度、可行动性、证据强度、时间敏感性。
-- “今日忽略/过滤情况”要用通俗语言说明哪些论文/解释被筛掉，以及筛掉依据；没有相关输入时简短说明即可。
+- “今日忽略/过滤情况”要用通俗语言说明低于项目级判定阈值的论文不会进入日报；没有相关输入时简短说明即可。
 - “下一步动作”要具体到可执行动作，例如阅读哪篇的哪些部分、把哪条想法写入哪个项目、需要补充什么验证。
 - 术语可以保留英文，但第一次出现时尽量用中文解释其作用。
 - 避免重复模板句、空泛判断和机械字段名；不要写“该论文具有重要意义”这类无信息量句子。

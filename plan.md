@@ -89,7 +89,7 @@
       - arxiv_papers
       - chunk_embeddings
       - matches
-      - llm_explanations
+      - project_paper_judgments
       - user_feedback
       - job_runs
   - Node API：

@@ -175,6 +175,10 @@ export function SettingsForm({ settings, providers, onSettingChange, onProviderC
       <TextField label="扫描文件夹" name="obsidian_include_dirs" placeholder="Research,Papers" value={settings.obsidian_include_dirs} onChange={onSettingChange} />
       <TextField label="纳入标签" name="obsidian_include_tags" placeholder="research,paper,direction" value={settings.obsidian_include_tags} onChange={onSettingChange} />
       <TextField label="项目中心页标签组合" name="obsidian_project_center_tags" placeholder="project,center" value={settings.obsidian_project_center_tags} onChange={onSettingChange} />
+      <TextField label="Obsidian CLI 命令" name="obsidian_cli_command" placeholder="obsidian" value={settings.obsidian_cli_command} onChange={onSettingChange} />
+      <PathField label="论文仓库目录" name="obsidian_paper_repository_dir" placeholder="人工智能/论文仓库" relativeTo="obsidian_vault" value={settings.obsidian_paper_repository_dir} onChange={onSettingChange} onPickPath={onPickPath} />
+      <PathField label="论文附件目录" name="obsidian_paper_attachment_dir" placeholder="人工智能/论文仓库/附件" relativeTo="obsidian_vault" value={settings.obsidian_paper_attachment_dir} onChange={onSettingChange} onPickPath={onPickPath} />
+      <TextField label="项目论文列表文件名" name="obsidian_project_paper_list_name" placeholder="论文列表.md" value={settings.obsidian_project_paper_list_name} onChange={onSettingChange} />
 
       <FormSubhead title="arXiv">抓取 Atom feed，并可下载 PDF 后用 PyMuPDF 提取 TXT。</FormSubhead>
       <TextField label="arXiv 分类" name="arxiv_categories" placeholder="cs.AI,cs.CL,cs.IR" value={settings.arxiv_categories} onChange={onSettingChange} />

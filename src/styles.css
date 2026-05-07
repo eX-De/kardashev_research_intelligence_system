@@ -1022,24 +1022,41 @@ h2 {
   gap: 8px;
 }
 
-.detail-actions button[data-status="relevant"] {
-  border-color: #bddfce;
-  color: var(--accent);
-}
-
-.detail-actions button[data-status="not_relevant"] {
+.detail-actions .danger,
+button.danger {
   border-color: #e5bcbc;
   color: var(--red);
 }
 
-.detail-actions button[data-status="read_later"] {
-  border-color: #dfcd9f;
-  color: var(--gold);
+.recommendation-control {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
 }
 
-.detail-actions button[data-status="favorite"] {
-  border-color: #b8cbe6;
-  color: var(--blue);
+.importance-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.importance-row button.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.project-checkbox-list {
+  display: grid;
+  gap: 8px;
+}
+
+.project-checkbox {
+  align-items: flex-start;
+  color: var(--ink);
 }
 
 .summary {

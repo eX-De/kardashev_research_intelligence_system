@@ -86,11 +86,11 @@ function ProjectReminders({ activities, scheduler }) {
     const newPapers = metaNumber(meta, ["arxiv_papers_inserted", "papers_inserted"]);
     const projectMatches = metaNumber(meta, ["project_paper_matches_created", "daily_report_project_matches"]);
     const archived = metaNumber(meta, ["zero_match_papers_archived"]);
-    const filtered = metaNumber(meta, ["explanations_filtered"]);
+    const filtered = metaNumber(meta, ["project_judgments_filtered"]);
     if (newPapers) parts.push(`${newPapers} 篇新论文`);
     if (projectMatches) parts.push(`${projectMatches} 条项目候选`);
     if (archived) parts.push(`${archived} 篇 0 命中归档`);
-    if (filtered) parts.push(`${filtered} 篇解释筛掉`);
+    if (filtered) parts.push(`${filtered} 条项目判定筛掉`);
     if (meta.daily_report_path) parts.push(`日报 ${meta.daily_report_path}`);
     reminders.push(
       <Reminder

@@ -11,6 +11,9 @@ function PaperList({ papers, activePaperId, onSelect }) {
       <h2>{paper.title}</h2>
       <div className="card-meta">
         <span className="pill score">{fmtScore(paper.score)}</span>
+        {paper.project_name ? <span className="pill">{paper.project_name}</span> : null}
+        {paper.project_count > 1 ? <span className="pill">{paper.project_count} projects</span> : null}
+        {paper.relation_type ? <span className="pill">{paper.relation_type}</span> : null}
         <span className="pill">{(paper.categories || []).slice(0, 2).join(", ") || "arXiv"}</span>
         {paper.feedback_status ? <span className="pill">{paper.feedback_status}</span> : null}
       </div>
@@ -18,18 +21,48 @@ function PaperList({ papers, activePaperId, onSelect }) {
   ));
 }
 
-function PaperDetail({ detail, onFeedback }) {
+function PaperDetail({ detail, onRecommendation }) {
+  const [selectedProjectIds, setSelectedProjectIds] = useState([]);
+  const [importance, setImportance] = useState("");
+
+  useEffect(() => {
+    const recommendations = detail?.project_recommendations || [];
+    setSelectedProjectIds(
+      recommendations
+        .filter((recommendation) => recommendation.state === "pending")
+        .map((recommendation) => recommendation.project_id)
+    );
+    setImportance("");
+  }, [detail?.paper?.id, detail?.project_recommendations]);
+
   if (!detail?.paper) {
     return (
       <div className="empty-detail">
         <h2>选择一篇论文</h2>
-        <p>摘要、证据片段和标注操作会显示在这里。</p>
+        <p>摘要、项目关联和处理操作会显示在这里。</p>
       </div>
     );
   }
   const paper = detail.paper;
-  const explanation = detail.explanation || {};
+  const recommendations = detail.project_recommendations || [];
+  const pendingRecommendations = recommendations.filter((recommendation) => recommendation.state === "pending");
+  const judgments = detail.project_judgments || [];
   const evidence = detail.evidence || [];
+  const importanceOptions = [
+    ["high", "高"],
+    ["medium", "中"],
+    ["low", "低"]
+  ];
+  const canAccept = Boolean(importance) && selectedProjectIds.length > 0 && pendingRecommendations.length > 0;
+
+  function toggleProject(projectId) {
+    setSelectedProjectIds((current) => (
+      current.includes(projectId)
+        ? current.filter((id) => id !== projectId)
+        : [...current, projectId]
+    ));
+  }
+
   return (
     <div className="detail-card">
       <div className="detail-main">
@@ -47,16 +80,59 @@ function PaperDetail({ detail, onFeedback }) {
           </p>
         </div>
 
-        <div className="detail-actions">
-          {["relevant", "not_relevant", "read_later", "read", "favorite"].map((status) => (
-            <button data-status={status} key={status} onClick={() => onFeedback(status)} type="button">{status}</button>
-          ))}
-        </div>
+        {pendingRecommendations.length ? (
+          <div className="recommendation-control">
+            <div className="importance-row" role="group" aria-label="重要性">
+              {importanceOptions.map(([value, label]) => (
+                <button className={importance === value ? "active" : ""} key={value} onClick={() => setImportance(value)} type="button">{label}</button>
+              ))}
+            </div>
+            <div className="project-checkbox-list">
+              {pendingRecommendations.map((recommendation) => (
+                <label className="checkbox-line project-checkbox" key={recommendation.project_id}>
+                  <input
+                    checked={selectedProjectIds.includes(recommendation.project_id)}
+                    onChange={() => toggleProject(recommendation.project_id)}
+                    type="checkbox"
+                  />
+                  <span>{recommendation.project_name} · {recommendation.relation_type} · {fmtScore(recommendation.usefulness_score)}</span>
+                </label>
+              ))}
+            </div>
+            <div className="detail-actions">
+              <button className="primary" disabled={!canAccept} onClick={() => onRecommendation({ action: "accept", importance, project_ids: selectedProjectIds })} type="button">加入论文仓库</button>
+              <button className="danger" onClick={() => onRecommendation({ action: "discard" })} type="button">遗弃</button>
+            </div>
+          </div>
+        ) : null}
 
         <div className="section">
-          <h3>Recommendation</h3>
-          <p className="summary">{explanation.recommendation_reason || "No explanation generated yet."}</p>
+          <h3>项目关联</h3>
+          <div className="evidence-list">
+            {recommendations.length ? recommendations.map((recommendation) => (
+              <article className="evidence" key={`${recommendation.project_id}-${recommendation.state}`}>
+                <strong>{recommendation.project_name} · {recommendation.relation_type} · {recommendation.state}</strong>
+                <p>{recommendation.reason || "暂无推荐理由。"}</p>
+                {recommendation.obsidian_path ? <p className="muted">{recommendation.obsidian_path}</p> : null}
+              </article>
+            )) : <p className="summary">暂无项目级推荐。</p>}
+          </div>
         </div>
+
+        {judgments.length ? (
+          <div className="section">
+            <h3>项目判定</h3>
+            <div className="evidence-list">
+              {judgments.map((judgment) => (
+                <article className="evidence" key={`${judgment.project_id}-${judgment.relation_type}`}>
+                  <strong>{judgment.project_name} · {judgment.relation_type} · {fmtScore(judgment.usefulness_score)}</strong>
+                  <p>{judgment.reason || "No judgment reason."}</p>
+                  {judgment.missing_evidence ? <p className="muted">{judgment.missing_evidence}</p> : null}
+                </article>
+              ))}
+            </div>
+          </div>
+        ) : null}
 
         <div className="section">
           <h3>Abstract</h3>
@@ -110,11 +186,11 @@ export function InboxView({ setStatusMessage }) {
     loadInbox().catch((error) => setStatusMessage(error.message));
   }, [loadInbox, setStatusMessage]);
 
-  async function markFeedback(status) {
+  async function updateRecommendation(payload) {
     if (!activePaperId) return;
     try {
-      await postJson(`/api/papers/${activePaperId}/feedback`, { status });
-      setStatusMessage(`Marked ${status}`);
+      await postJson(`/api/papers/${activePaperId}/recommendation`, payload);
+      setStatusMessage(payload.action === "discard" ? "已遗弃推荐" : "已加入论文仓库");
       await loadInbox();
     } catch (error) {
       setStatusMessage(error.message);
@@ -139,7 +215,7 @@ export function InboxView({ setStatusMessage }) {
       </section>
 
       <section className="detail-panel" aria-label="论文详情">
-        <PaperDetail detail={detail} onFeedback={markFeedback} />
+        <PaperDetail detail={detail} onRecommendation={updateRecommendation} />
       </section>
     </section>
   );
