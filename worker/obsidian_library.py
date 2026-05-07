@@ -13,6 +13,8 @@ PROJECTS_START = "<!-- research-intelligence:projects:start -->"
 PROJECTS_END = "<!-- research-intelligence:projects:end -->"
 PAPERS_START = "<!-- research-intelligence:papers:start -->"
 PAPERS_END = "<!-- research-intelligence:papers:end -->"
+READING_REPORT_START = "<!-- research-intelligence:reading-report:start -->"
+READING_REPORT_END = "<!-- research-intelligence:reading-report:end -->"
 
 IMPORTANCE_LABELS = {
     "high": "高",
@@ -243,7 +245,17 @@ def _project_block(rows: list[sqlite3.Row]) -> str:
     return "\n".join(lines)
 
 
-def _paper_body(paper: sqlite3.Row, existing_body: str, rows: list[sqlite3.Row]) -> str:
+def _reading_report_block(markdown: str) -> str:
+    body = clean_unicode(str(markdown or "")).strip()
+    return "\n".join([READING_REPORT_START, body, READING_REPORT_END])
+
+
+def _paper_body(
+    paper: sqlite3.Row,
+    existing_body: str,
+    rows: list[sqlite3.Row],
+    report_markdown: str = "",
+) -> str:
     body = existing_body.strip()
     if not body:
         body = "\n\n".join(
@@ -252,7 +264,16 @@ def _paper_body(paper: sqlite3.Row, existing_body: str, rows: list[sqlite3.Row])
                 clean_unicode(str(paper["summary"] or "")).strip() or "暂无摘要。",
             ]
         )
-    return _replace_block(body, PROJECTS_START, PROJECTS_END, _project_block(rows), "项目关联")
+    body = _replace_block(body, PROJECTS_START, PROJECTS_END, _project_block(rows), "项目关联")
+    if clean_unicode(str(report_markdown or "")).strip():
+        body = _replace_block(
+            body,
+            READING_REPORT_START,
+            READING_REPORT_END,
+            _reading_report_block(report_markdown),
+            "全文报告",
+        )
+    return body
 
 
 def _update_frontmatter(
@@ -314,6 +335,19 @@ def _accepted_rows_for_paper(conn: sqlite3.Connection, paper_id: int) -> list[sq
         """,
         (paper_id,),
     ).fetchall()
+
+
+def _reading_report_for_paper(conn: sqlite3.Connection, paper_id: int) -> str:
+    row = conn.execute(
+        """
+        SELECT report_markdown
+        FROM paper_reading_reports
+        WHERE paper_id = ?
+          AND status = 'done'
+        """,
+        (paper_id,),
+    ).fetchone()
+    return clean_unicode(str(row["report_markdown"] or "")).strip() if row else ""
 
 
 def _accepted_rows_for_project(conn: sqlite3.Connection, project_id: int) -> list[sqlite3.Row]:
@@ -423,7 +457,7 @@ def sync_accepted_paper_to_obsidian(
     frontmatter, body = _split_frontmatter(text)
     repo_rel = _clean_rel(settings.obsidian_paper_repository_dir)
     frontmatter = _update_frontmatter(frontmatter, paper, rows, attachment_rel, repo_rel)
-    body = _paper_body(paper, body, rows)
+    body = _paper_body(paper, body, rows, _reading_report_for_paper(conn, paper_id))
     _write_markdown(note_path, frontmatter, body)
 
     now = utc_now()

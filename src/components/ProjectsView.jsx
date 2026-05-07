@@ -1,22 +1,26 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { PanelTitle } from "./PanelTitle.jsx";
-import { api, fmtDate, jobTitle, metaNumber, statusLabel } from "../lib/dashboard.js";
+import { api, fmtDate, statusLabel } from "../lib/dashboard.js";
 
 function sumProject(projects, field) {
   return projects.reduce((total, project) => total + Number(project[field] || 0), 0);
 }
 
-function Reminder({ state, title, detail }) {
+function Reminder({ item }) {
   return (
-    <article className={`reminder ${state}`}>
-      <strong>{title}</strong>
-      <p>{detail}</p>
+    <article className={`reminder ${item.severity || "neutral"}`}>
+      <strong>{item.title}</strong>
+      <p>
+        {item.detail}
+        {item.created_at ? ` · ${fmtDate(item.created_at)}` : ""}
+      </p>
     </article>
   );
 }
 
-function DailyProgressReminder({ job, progress }) {
+function DailyProgressReminder({ item }) {
+  const progress = item.progress || {};
   const steps = progress.steps || [];
   const total = Number(progress.total || steps.length || 1);
   const completed = Number(progress.completed || steps.filter((step) => step.status === "completed").length);
@@ -26,14 +30,15 @@ function DailyProgressReminder({ job, progress }) {
   const cacheTotal = Number(cacheProgress?.total || 0);
   const cacheCurrent = Number(cacheProgress?.current || 0);
   const cachePercent = cacheTotal ? Math.max(0, Math.min(100, Math.round((cacheCurrent / cacheTotal) * 100))) : 0;
+  const startedAt = item.source?.started_at || item.created_at;
 
   return (
     <article className="reminder info daily-progress-card">
       <div className="daily-progress-head">
-        <strong>每日流程运行中</strong>
+        <strong>{item.title || "每日流程运行中"}</strong>
         <span>{completed}/{total}</span>
       </div>
-      <p>{current} · started {fmtDate(job.started_at)}</p>
+      <p>{current}{startedAt ? ` · started ${fmtDate(startedAt)}` : ""}</p>
       <div className="daily-progress-bar" aria-label="每日流程进度">
         <span style={{ width: `${percent}%` }} />
       </div>
@@ -64,89 +69,37 @@ function DailyProgressReminder({ job, progress }) {
   );
 }
 
-function ProjectReminders({ activities, scheduler }) {
-  const reminders = [];
-  const running = scheduler?.current_job;
-  const runningDaily = activities.find((item) => item.job_type === "run-daily" && item.status === "running");
-  const dailyProgress = runningDaily?.meta?.daily_progress;
-  if (dailyProgress) {
-    reminders.push(<DailyProgressReminder job={runningDaily} progress={dailyProgress} key="daily" />);
-  } else if (running) {
-    reminders.push(<Reminder state="info" title="任务运行中" detail={`${jobTitle(running.command)} · started ${fmtDate(running.started_at)}`} key="running" />);
-  }
-
-  const failed = activities.find((item) => item.status === "failed");
-  if (failed) reminders.push(<Reminder state="bad" title="任务失败" detail={`${jobTitle(failed.job_type)} · ${failed.message || fmtDate(failed.finished_at)}`} key="failed" />);
-
-  const completed = (predicate) => activities.find((item) => item.status === "completed" && predicate(item.meta || {}, item));
-  const completedDaily = completed((meta, item) => item.job_type === "run-daily");
-  if (completedDaily) {
-    const meta = completedDaily.meta || {};
-    const parts = [];
-    const newPapers = metaNumber(meta, ["arxiv_papers_inserted", "papers_inserted"]);
-    const projectMatches = metaNumber(meta, ["project_paper_matches_created", "daily_report_project_matches"]);
-    const archived = metaNumber(meta, ["zero_match_papers_archived"]);
-    const filtered = metaNumber(meta, ["project_judgments_filtered"]);
-    if (newPapers) parts.push(`${newPapers} 篇新论文`);
-    if (projectMatches) parts.push(`${projectMatches} 条项目候选`);
-    if (archived) parts.push(`${archived} 篇 0 命中归档`);
-    if (filtered) parts.push(`${filtered} 条项目判定筛掉`);
-    if (meta.daily_report_path) parts.push(`日报 ${meta.daily_report_path}`);
-    reminders.push(
-      <Reminder
-        state="ok"
-        title="每日流程已完成"
-        detail={`${parts.length ? parts.join("，") : completedDaily.message || "流程已完成"} · ${fmtDate(completedDaily.finished_at)}`}
-        key="daily-completed"
-      />
-    );
-  }
-
-  const paperJob = completed((meta) => metaNumber(meta, ["arxiv_papers_inserted", "papers_inserted"]) > 0);
-  if (paperJob) {
-    reminders.push(<Reminder state="info" title="新论文到了" detail={`${metaNumber(paperJob.meta, ["arxiv_papers_inserted", "papers_inserted"])} 篇新 arXiv 论文已入库 · ${fmtDate(paperJob.finished_at)}`} key="papers" />);
-  }
-
-  const syncJob = completed((meta, item) => metaNumber(meta, ["sync_indexed", "indexed"]) > 0 || item.job_type === "sync-obsidian");
-  if (syncJob) {
-    const indexed = metaNumber(syncJob.meta, ["sync_indexed", "indexed"]);
-    const chunks = metaNumber(syncJob.meta, ["sync_chunks_created", "chunks_created"]);
-    reminders.push(<Reminder state="ok" title="Obsidian 已同步" detail={indexed ? `${indexed} 篇笔记更新，${chunks} 个 chunk 入库 · ${fmtDate(syncJob.finished_at)}` : `Obsidian 同步完成 · ${fmtDate(syncJob.finished_at)}`} key="sync" />);
-  }
-
-  const textJob = completed((meta) => metaNumber(meta, ["text_pdfs_downloaded", "pdfs_downloaded", "text_texts_extracted", "texts_extracted"]) > 0);
-  if (textJob) {
-    const parts = [];
-    const pdfCount = metaNumber(textJob.meta, ["text_pdfs_downloaded", "pdfs_downloaded"]);
-    const textCount = metaNumber(textJob.meta, ["text_texts_extracted", "texts_extracted"]);
-    const failedCount = metaNumber(textJob.meta, ["text_texts_failed", "texts_failed"]);
-    if (pdfCount) parts.push(`${pdfCount} 个 PDF 已缓存`);
-    if (textCount) parts.push(`${textCount} 篇已转 TXT`);
-    if (failedCount) parts.push(`${failedCount} 篇失败`);
-    reminders.push(<Reminder state="ok" title="论文正文已缓存" detail={`${parts.join("，")} · ${fmtDate(textJob.finished_at)}`} key="text" />);
-  }
-
-  const rankJob = completed((meta) => metaNumber(meta, ["matched_papers"]) > 0 || metaNumber(meta, ["project_paper_matches_created"]) > 0);
-  if (rankJob) reminders.push(<Reminder state="info" title="论文匹配完成" detail={`${metaNumber(rankJob.meta, ["matched_papers", "project_paper_matches_created"])} 条匹配结果 · ${fmtDate(rankJob.finished_at)}`} key="rank" />);
-
-  if (!reminders.length) reminders.push(<Reminder state="neutral" title="暂无新提醒" detail="没有新的任务完成、论文到达或实验同步事件。" key="empty" />);
-  return <div className="project-reminders">{reminders.slice(0, 5)}</div>;
+function ProjectReminders({ reminders }) {
+  const items = reminders.length ? reminders : [
+    {
+      id: "empty",
+      severity: "neutral",
+      title: "暂无新提醒",
+      detail: "没有新的任务完成、论文到达或实验同步事件。"
+    }
+  ];
+  return (
+    <div className="project-reminders">
+      {items.slice(0, 5).map((item) => (
+        item.progress
+          ? <DailyProgressReminder item={item} key={item.id} />
+          : <Reminder item={item} key={item.id} />
+      ))}
+    </div>
+  );
 }
 
 export function ProjectsView({ onOpenProject, onNewProject, setStatusMessage }) {
   const [projects, setProjects] = useState([]);
-  const [activities, setActivities] = useState([]);
-  const [scheduler, setScheduler] = useState({});
+  const [reminders, setReminders] = useState([]);
 
   const loadProjects = useCallback(async () => {
-    const [data, history, status] = await Promise.all([
+    const [data, reminderData] = await Promise.all([
       api("/api/projects"),
-      api("/api/jobs/history?limit=12"),
-      api("/api/jobs/status")
+      api("/api/reminders?limit=5")
     ]);
     setProjects(data.items || []);
-    setActivities(history.items || []);
-    setScheduler(status.scheduler || {});
+    setReminders(reminderData.items || []);
   }, []);
 
   useEffect(() => {
@@ -195,7 +148,7 @@ export function ProjectsView({ onOpenProject, onNewProject, setStatusMessage }) 
 
         <section className="project-reminders-panel" aria-label="项目提醒">
           <PanelTitle title="提醒" subtitle="全局任务、论文缓存和同步状态。" />
-          <ProjectReminders activities={activities} scheduler={scheduler} />
+          <ProjectReminders reminders={reminders} />
         </section>
 
         <section className="project-list-panel" aria-label="项目列表">

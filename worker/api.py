@@ -8,11 +8,19 @@ from .db import clean_unicode, from_json, to_json, utc_now
 from .config import Settings
 from .obsidian import status_tag_for_project_status, update_markdown_status_tag
 from .obsidian_library import sync_accepted_paper_to_obsidian
+from .paper_reports import (
+    ensure_paper_reports_for_recommendations,
+    ensure_report_ready_for_paper,
+    paper_report_payload,
+    process_paper_report_queue,
+    queue_paper_report,
+)
 from .recommendations import (
     accept_recommendations_for_paper,
     discard_recommendations_for_paper,
     sync_project_paper_recommendations,
 )
+from .reminders import reminders
 
 
 VALID_FEEDBACK = {"relevant", "not_relevant", "read_later", "read", "favorite"}
@@ -679,6 +687,7 @@ def unlink_project_note(conn: sqlite3.Connection, project_id: int, note_id: int)
 
 def inbox(conn: sqlite3.Connection) -> dict[str, object]:
     sync_project_paper_recommendations(conn)
+    ensure_paper_reports_for_recommendations(conn)
     rows = conn.execute(
         """
         WITH pending_recommendations AS (
@@ -708,12 +717,16 @@ def inbox(conn: sqlite3.Connection) -> dict[str, object]:
           r.reason,
           r.project_count,
           j.usefulness_score,
-          j.confidence
+          j.confidence,
+          rr.status AS report_status,
+          rr.error_message AS report_error,
+          rr.updated_at AS report_updated_at
         FROM arxiv_papers p
         JOIN pending_recommendations r ON r.paper_id = p.id AND r.rn = 1
         JOIN research_projects rp ON rp.id = r.project_id
         LEFT JOIN project_paper_judgments j
           ON j.project_id = r.project_id AND j.paper_id = r.paper_id
+        LEFT JOIN paper_reading_reports rr ON rr.paper_id = p.id
         ORDER BY
           CASE r.relation_type WHEN 'direct' THEN 0 ELSE 1 END,
           COALESCE(j.usefulness_score, 0) DESC,
@@ -740,14 +753,116 @@ def inbox(conn: sqlite3.Connection) -> dict[str, object]:
                 "confidence": float(row["confidence"] or 0),
                 "reason": row["reason"],
                 "project_count": int(row["project_count"] or 1),
+                "report_status": row["report_status"] or "",
+                "report_error": row["report_error"] or "",
+                "report_updated_at": row["report_updated_at"],
                 "feedback_status": "",
             }
         )
     return {"items": items}
 
 
+def paper_reports_queue(conn: sqlite3.Connection, limit: int = 300) -> dict[str, object]:
+    sync_project_paper_recommendations(conn)
+    ensure_paper_reports_for_recommendations(conn)
+    stats = {"queued": 0, "processing": 0, "done": 0, "failed": 0, "total": 0}
+    for row in conn.execute(
+        "SELECT status, COUNT(*) AS count FROM paper_reading_reports GROUP BY status"
+    ).fetchall():
+        status = str(row["status"] or "")
+        count = int(row["count"] or 0)
+        stats[status] = count
+        stats["total"] += count
+    row_limit = max(1, min(int(limit or 300), 1000))
+    rows = conn.execute(
+        """
+        WITH rec_projects AS (
+          SELECT
+            r.paper_id,
+            COUNT(*) AS project_count,
+            group_concat(DISTINCT rp.name) AS project_names,
+            group_concat(DISTINCT r.relation_type) AS relation_types
+          FROM project_paper_recommendations r
+          JOIN research_projects rp ON rp.id = r.project_id
+          WHERE r.state IN ('pending', 'accepted')
+          GROUP BY r.paper_id
+        )
+        SELECT
+          rr.paper_id,
+          rr.status,
+          rr.model_provider_id,
+          rr.model,
+          rr.report_markdown,
+          rr.error_message,
+          rr.created_at,
+          rr.updated_at,
+          rr.started_at,
+          rr.finished_at,
+          p.arxiv_id,
+          p.title,
+          p.authors_json,
+          p.categories_json,
+          p.published_at,
+          p.link,
+          p.text_status,
+          COALESCE(rp.project_count, 0) AS project_count,
+          COALESCE(rp.project_names, '') AS project_names,
+          COALESCE(rp.relation_types, '') AS relation_types
+        FROM paper_reading_reports rr
+        JOIN arxiv_papers p ON p.id = rr.paper_id
+        LEFT JOIN rec_projects rp ON rp.paper_id = rr.paper_id
+        ORDER BY
+          CASE rr.status
+            WHEN 'processing' THEN 0
+            WHEN 'queued' THEN 1
+            WHEN 'failed' THEN 2
+            WHEN 'done' THEN 3
+            ELSE 4
+          END,
+          rr.updated_at DESC,
+          p.published_at DESC
+        LIMIT ?
+        """,
+        (row_limit,),
+    ).fetchall()
+    return {
+        "stats": stats,
+        "items": [
+            {
+                "paper_id": int(row["paper_id"]),
+                "id": int(row["paper_id"]),
+                "status": row["status"],
+                "title": row["title"],
+                "arxiv_id": row["arxiv_id"],
+                "authors": from_json(row["authors_json"], []),
+                "categories": from_json(row["categories_json"], []),
+                "published_at": row["published_at"],
+                "link": row["link"],
+                "text_status": row["text_status"],
+                "project_count": int(row["project_count"] or 0),
+                "project_names": [
+                    name for name in str(row["project_names"] or "").split(",") if name
+                ],
+                "relation_types": [
+                    relation for relation in str(row["relation_types"] or "").split(",") if relation
+                ],
+                "model_provider_id": row["model_provider_id"],
+                "model": row["model"],
+                "error_message": row["error_message"],
+                "report_excerpt": clean_unicode(str(row["report_markdown"] or "")).strip()[:500],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "started_at": row["started_at"],
+                "finished_at": row["finished_at"],
+            }
+            for row in rows
+        ],
+    }
+
+
 def paper_detail(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
     sync_project_paper_recommendations(conn, [paper_id])
+    ensure_paper_reports_for_recommendations(conn, [paper_id])
     paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
     if not paper:
         raise RuntimeError(f"Paper not found: {paper_id}")
@@ -894,6 +1009,7 @@ def paper_detail(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
             }
             for row in recommendation_rows
         ],
+        "paper_report": paper_report_payload(conn, paper_id),
         "evidence": [
             {
                 "chunk_id": int(row["chunk_id"]),
@@ -952,6 +1068,7 @@ def update_paper_recommendation(
         raw_project_ids = payload.get("project_ids", [])
         project_ids = [int(project_id) for project_id in raw_project_ids] if isinstance(raw_project_ids, list) else []
         importance = str(payload.get("importance") or "").strip().lower()
+        ensure_report_ready_for_paper(conn, settings, paper_id)
         accept_recommendations_for_paper(conn, paper_id, project_ids, importance)
         sync_result = sync_accepted_paper_to_obsidian(conn, settings, paper_id)
         conn.commit()
@@ -966,6 +1083,21 @@ def update_paper_recommendation(
         conn.commit()
         return {"ok": True, "paper_id": paper_id, "action": "discard"}
     raise RuntimeError("action must be accept or discard")
+
+
+def generate_paper_reading_report(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    paper_id: int,
+    payload: dict[str, object] | None = None,
+) -> dict[str, object]:
+    payload = payload or {}
+    queue_paper_report(conn, paper_id, force=bool(payload.get("force")))
+    result = process_paper_report_queue(conn, settings, [paper_id])
+    detail = paper_detail(conn, paper_id)
+    detail["ok"] = True
+    detail["paper_report_result"] = result
+    return detail
 
 
 def job_history(conn: sqlite3.Connection, limit: int = 20) -> dict[str, object]:
@@ -1048,6 +1180,7 @@ def health(conn: sqlite3.Connection, settings: Settings) -> dict[str, object]:
             "project_paper_matches": count("project_paper_matches"),
             "project_paper_judgments": count("project_paper_judgments"),
             "project_paper_recommendations": count("project_paper_recommendations"),
+            "paper_reading_reports": count("paper_reading_reports"),
             "chunks": count("research_chunks"),
             "papers": count("arxiv_papers"),
             "paper_embeddings": count("arxiv_paper_embeddings"),

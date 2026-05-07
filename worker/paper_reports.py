@@ -1,0 +1,465 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import sqlite3
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+from .arxiv_text import (
+    download_pdf,
+    extract_pdf_text_to_file,
+    pdf_url,
+    replace_arxiv_chunks_for_paper,
+    safe_arxiv_filename,
+)
+from .config import Settings
+from .db import clean_unicode, from_json, to_json, utc_now
+
+
+PAPER_READER_DEFAULT_PROMPT = """请阅读这篇论文 PDF，输出结构化解读：
+
+1. 研究问题和背景
+2. 方法和实验设计
+3. 主要发现
+4. 局限性
+5. 对后续研究或应用的启发
+
+请尽量使用中文，保留关键英文术语。"""
+
+PAPER_READER_ANALYSIS_SYSTEM = (
+    "You are a research paper reading assistant. Read the supplied full PDF text and answer accurately from it."
+)
+
+VALID_REPORT_STATUSES = {"queued", "processing", "done", "failed"}
+
+
+def _paper_filter(
+    alias: str,
+    paper_ids: list[int] | tuple[int, ...] | set[int] | None,
+) -> tuple[str, list[Any]]:
+    if paper_ids is None:
+        return "", []
+    ids = sorted({int(paper_id) for paper_id in paper_ids})
+    if not ids:
+        return "AND 1 = 0", []
+    placeholders = ", ".join("?" for _ in ids)
+    return f"AND {alias}.paper_id IN ({placeholders})", ids
+
+
+def _source_projects_for_recommended_papers(
+    conn: sqlite3.Connection,
+    paper_ids: list[int] | tuple[int, ...] | set[int] | None = None,
+) -> dict[int, list[int]]:
+    paper_clause, paper_params = _paper_filter("r", paper_ids)
+    rows = conn.execute(
+        f"""
+        SELECT r.paper_id, r.project_id
+        FROM project_paper_recommendations r
+        WHERE r.state IN ('pending', 'accepted')
+          {paper_clause}
+        ORDER BY r.paper_id, r.project_id
+        """,
+        paper_params,
+    ).fetchall()
+    projects_by_paper: dict[int, list[int]] = {}
+    for row in rows:
+        projects_by_paper.setdefault(int(row["paper_id"]), []).append(int(row["project_id"]))
+    return projects_by_paper
+
+
+def ensure_paper_reports_for_recommendations(
+    conn: sqlite3.Connection,
+    paper_ids: list[int] | tuple[int, ...] | set[int] | None = None,
+) -> dict[str, int]:
+    projects_by_paper = _source_projects_for_recommended_papers(conn, paper_ids)
+    now = utc_now()
+    created = 0
+    refreshed = 0
+    preserved = 0
+    for paper_id, project_ids in projects_by_paper.items():
+        source_project_ids_json = to_json(project_ids)
+        existing = conn.execute(
+            "SELECT source_project_ids_json FROM paper_reading_reports WHERE paper_id = ?",
+            (paper_id,),
+        ).fetchone()
+        if not existing:
+            conn.execute(
+                """
+                INSERT INTO paper_reading_reports(
+                  paper_id, status, prompt, system_prompt, source_project_ids_json,
+                  created_at, updated_at
+                )
+                VALUES (?, 'queued', ?, ?, ?, ?, ?)
+                """,
+                (
+                    paper_id,
+                    PAPER_READER_DEFAULT_PROMPT,
+                    PAPER_READER_ANALYSIS_SYSTEM,
+                    source_project_ids_json,
+                    now,
+                    now,
+                ),
+            )
+            created += 1
+            continue
+        if from_json(existing["source_project_ids_json"], []) != project_ids:
+            conn.execute(
+                """
+                UPDATE paper_reading_reports
+                SET source_project_ids_json = ?,
+                    prompt = CASE WHEN prompt = '' THEN ? ELSE prompt END,
+                    system_prompt = CASE WHEN system_prompt = '' THEN ? ELSE system_prompt END,
+                    updated_at = ?
+                WHERE paper_id = ?
+                """,
+                (
+                    source_project_ids_json,
+                    PAPER_READER_DEFAULT_PROMPT,
+                    PAPER_READER_ANALYSIS_SYSTEM,
+                    now,
+                    paper_id,
+                ),
+            )
+            refreshed += 1
+        else:
+            preserved += 1
+    conn.commit()
+    return {
+        "paper_reports_candidates": len(projects_by_paper),
+        "paper_reports_queued": created,
+        "paper_reports_refreshed": refreshed,
+        "paper_reports_preserved": preserved,
+    }
+
+
+def queue_paper_report(
+    conn: sqlite3.Connection,
+    paper_id: int,
+    *,
+    force: bool = False,
+) -> dict[str, int]:
+    if not conn.execute("SELECT id FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone():
+        raise RuntimeError(f"Paper not found: {paper_id}")
+    ensure_paper_reports_for_recommendations(conn, [paper_id])
+    existing = conn.execute(
+        "SELECT paper_id FROM paper_reading_reports WHERE paper_id = ?",
+        (paper_id,),
+    ).fetchone()
+    now = utc_now()
+    if not existing:
+        conn.execute(
+            """
+            INSERT INTO paper_reading_reports(
+              paper_id, status, prompt, system_prompt, source_project_ids_json,
+              created_at, updated_at
+            )
+            VALUES (?, 'queued', ?, ?, '[]', ?, ?)
+            """,
+            (paper_id, PAPER_READER_DEFAULT_PROMPT, PAPER_READER_ANALYSIS_SYSTEM, now, now),
+        )
+        conn.commit()
+        return {"paper_reports_queued": 1}
+    if force:
+        conn.execute(
+            """
+            UPDATE paper_reading_reports
+            SET status = 'queued',
+                prompt = ?,
+                system_prompt = ?,
+                report_markdown = '',
+                error_message = '',
+                started_at = NULL,
+                finished_at = NULL,
+                updated_at = ?
+            WHERE paper_id = ?
+            """,
+            (PAPER_READER_DEFAULT_PROMPT, PAPER_READER_ANALYSIS_SYSTEM, now, paper_id),
+        )
+        conn.commit()
+        return {"paper_reports_requeued": 1}
+    return {"paper_reports_queued": 0}
+
+
+def paper_report_payload(conn: sqlite3.Connection, paper_id: int) -> dict[str, object] | None:
+    row = conn.execute(
+        """
+        SELECT paper_id, status, prompt, system_prompt, model_provider_id, model,
+               source_project_ids_json, report_markdown, error_message,
+               created_at, updated_at, started_at, finished_at
+        FROM paper_reading_reports
+        WHERE paper_id = ?
+        """,
+        (paper_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "paper_id": int(row["paper_id"]),
+        "status": row["status"],
+        "prompt": row["prompt"],
+        "system_prompt": row["system_prompt"],
+        "model_provider_id": row["model_provider_id"],
+        "model": row["model"],
+        "source_project_ids": from_json(row["source_project_ids_json"], []),
+        "report_markdown": row["report_markdown"],
+        "error_message": row["error_message"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
+    }
+
+
+def _read_existing_text(paper: sqlite3.Row) -> str:
+    path_text = str(paper["text_path"] or "").strip()
+    if not path_text:
+        return ""
+    path = Path(path_text)
+    if not path.exists() or not path.is_file():
+        return ""
+    return clean_unicode(path.read_text(encoding="utf-8", errors="ignore")).strip()
+
+
+def _ensure_full_text(conn: sqlite3.Connection, settings: Settings, paper_id: int) -> str:
+    paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
+    if not paper:
+        raise RuntimeError(f"Paper not found: {paper_id}")
+    existing_text = _read_existing_text(paper)
+    if existing_text:
+        return existing_text
+
+    stem = safe_arxiv_filename(str(paper["arxiv_id"]))
+    pdf_path = Path(str(paper["pdf_path"] or "").strip() or settings.arxiv_pdf_dir / f"{stem}.pdf")
+    text_path = Path(str(paper["text_path"] or "").strip() or settings.arxiv_text_dir / f"{stem}.txt")
+    if not pdf_path.exists():
+        download_pdf(pdf_url(paper), pdf_path)
+    char_count = extract_pdf_text_to_file(pdf_path, text_path)
+    conn.execute(
+        """
+        UPDATE arxiv_papers
+        SET pdf_path = ?,
+            text_path = ?,
+            text_extracted_at = ?,
+            text_status = 'complete',
+            text_error = '',
+            text_char_count = ?
+        WHERE id = ?
+        """,
+        (str(pdf_path), str(text_path), utc_now(), char_count, paper_id),
+    )
+    refreshed = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
+    text = _read_existing_text(refreshed)
+    replace_arxiv_chunks_for_paper(conn, refreshed, text)
+    conn.commit()
+    return text
+
+
+def _analysis_messages(paper_text: str, prompt: str) -> list[dict[str, str]]:
+    user_message = (
+        "下面是 PyMuPDF 从论文 PDF 中解析出的完整文本，按页保留。"
+        "请基于这份文本完成用户要求；不要声称无法读取正文，除非文本本身确实缺失。\n\n"
+        "<paper_text>\n"
+        f"{paper_text}\n"
+        "</paper_text>\n\n"
+        "用户要求：\n"
+        f"{prompt}"
+    )
+    return [
+        {"role": "system", "content": PAPER_READER_ANALYSIS_SYSTEM},
+        {"role": "user", "content": user_message},
+    ]
+
+
+def _call_chat_text(settings: Settings, messages: list[dict[str, str]]) -> str:
+    provider = settings.chat_provider()
+    if not provider or not provider.api_key or not provider.base_url or not settings.llm_chat_model:
+        raise RuntimeError("LLM chat provider is not fully configured; full paper report generation requires LLM output")
+    payload = {
+        "model": settings.llm_chat_model,
+        "messages": messages,
+        "temperature": 0.1,
+    }
+    request = urllib.request.Request(
+        f"{provider.base_url}/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {provider.api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=180) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Full paper report LLM request failed: {exc}") from exc
+    content = (
+        body.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content", "")
+    )
+    text = clean_unicode(str(content or "")).strip()
+    if not text:
+        raise RuntimeError("Full paper report LLM request failed: empty response")
+    return text
+
+
+def _claim_queued_report(
+    conn: sqlite3.Connection,
+    paper_ids: list[int] | tuple[int, ...] | set[int] | None,
+) -> int | None:
+    paper_clause, paper_params = _paper_filter("r", paper_ids)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+    except sqlite3.OperationalError as exc:
+        if "within a transaction" in str(exc).lower():
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+        else:
+            raise
+    row = conn.execute(
+        f"""
+        SELECT r.paper_id
+        FROM paper_reading_reports r
+        JOIN arxiv_papers p ON p.id = r.paper_id
+        WHERE r.status = 'queued'
+          {paper_clause}
+        ORDER BY r.updated_at, p.published_at DESC
+        LIMIT 1
+        """,
+        paper_params,
+    ).fetchone()
+    if not row:
+        conn.commit()
+        return None
+    paper_id = int(row["paper_id"])
+    now = utc_now()
+    conn.execute(
+        """
+        UPDATE paper_reading_reports
+        SET status = 'processing',
+            error_message = '',
+            started_at = ?,
+            updated_at = ?
+        WHERE paper_id = ?
+          AND status = 'queued'
+        """,
+        (now, now, paper_id),
+    )
+    conn.commit()
+    return paper_id
+
+
+def _queued_rows(
+    conn: sqlite3.Connection,
+    paper_ids: list[int] | tuple[int, ...] | set[int] | None,
+    limit: int | None,
+) -> list[sqlite3.Row]:
+    paper_clause, paper_params = _paper_filter("r", paper_ids)
+    sql = f"""
+        SELECT r.paper_id
+        FROM paper_reading_reports r
+        JOIN arxiv_papers p ON p.id = r.paper_id
+        WHERE r.status = 'queued'
+          {paper_clause}
+        ORDER BY r.updated_at, p.published_at DESC
+    """
+    params: list[Any] = [*paper_params]
+    if limit:
+        sql += " LIMIT ?"
+        params.append(int(limit))
+    return conn.execute(sql, params).fetchall()
+
+
+def process_paper_report_queue(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    paper_ids: list[int] | tuple[int, ...] | set[int] | None = None,
+    limit: int | None = None,
+) -> dict[str, int]:
+    target = max(1, int(limit)) if limit else None
+    considered = 0
+    done = 0
+    failed = 0
+    while target is None or considered < target:
+        paper_id = _claim_queued_report(conn, paper_ids)
+        if paper_id is None:
+            break
+        considered += 1
+        try:
+            paper_text = _ensure_full_text(conn, settings, paper_id)
+            if not paper_text:
+                raise RuntimeError("Full paper text is missing")
+            text_hash = hashlib.sha256(paper_text.encode("utf-8", "replace")).hexdigest()
+            messages = _analysis_messages(paper_text, PAPER_READER_DEFAULT_PROMPT)
+            markdown = _call_chat_text(settings, messages)
+            finished = utc_now()
+            conn.execute(
+                """
+                UPDATE paper_reading_reports
+                SET status = 'done',
+                    prompt = ?,
+                    system_prompt = ?,
+                    model_provider_id = ?,
+                    model = ?,
+                    source_text_hash = ?,
+                    report_markdown = ?,
+                    error_message = '',
+                    finished_at = ?,
+                    updated_at = ?
+                WHERE paper_id = ?
+                """,
+                (
+                    PAPER_READER_DEFAULT_PROMPT,
+                    PAPER_READER_ANALYSIS_SYSTEM,
+                    settings.llm_chat_provider_id,
+                    settings.llm_chat_model,
+                    text_hash,
+                    markdown,
+                    finished,
+                    finished,
+                    paper_id,
+                ),
+            )
+            conn.commit()
+            done += 1
+        except Exception as exc:
+            finished = utc_now()
+            conn.execute(
+                """
+                UPDATE paper_reading_reports
+                SET status = 'failed',
+                    error_message = ?,
+                    finished_at = ?,
+                    updated_at = ?
+                WHERE paper_id = ?
+                """,
+                (str(exc)[:2000], finished, finished, paper_id),
+            )
+            conn.commit()
+            failed += 1
+    return {
+        "paper_reports_considered": considered,
+        "paper_reports_done": done,
+        "paper_reports_failed": failed,
+    }
+
+
+def ensure_report_ready_for_paper(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    paper_id: int,
+) -> dict[str, object]:
+    queue_paper_report(conn, paper_id)
+    report = paper_report_payload(conn, paper_id)
+    if report and report.get("status") == "done" and str(report.get("report_markdown") or "").strip():
+        return report
+    result = process_paper_report_queue(conn, settings, [paper_id])
+    report = paper_report_payload(conn, paper_id)
+    if report and report.get("status") == "done" and str(report.get("report_markdown") or "").strip():
+        return report
+    error = str(report.get("error_message") if report else "") if report else ""
+    raise RuntimeError(error or f"Full paper report is not ready for paper {paper_id}")

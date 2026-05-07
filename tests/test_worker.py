@@ -13,6 +13,7 @@ from worker.api import (
     export_project_to_obsidian,
     link_project_note,
     link_project_paper,
+    paper_reports_queue,
     project_detail,
     projects,
     save_project,
@@ -28,6 +29,12 @@ from worker.embeddings import ensure_arxiv_chunk_embedding
 from worker.llm import _project_judgment_prompt, generate_missing_project_judgments
 from worker.obsidian import parse_note
 from worker.obsidian import sync_obsidian
+from worker.paper_reports import (
+    PAPER_READER_DEFAULT_PROMPT,
+    ensure_paper_reports_for_recommendations,
+    process_paper_report_queue,
+)
+from worker.reminders import reminders
 from worker.recommendations import sync_project_paper_recommendations
 from worker.reports import generate_daily_report
 from worker.search import hybrid_search, rank_project_papers, rank_unmatched_papers
@@ -670,6 +677,204 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(recommendation["importance"], "")
         self.assertEqual(recommendation["relation_type"], "direct")
 
+    def test_paper_report_queue_uses_paper_reader_prompt_and_full_text(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        text_dir = Path.cwd() / ".test-tmp" / "paper-report-text"
+        text_dir.mkdir(parents=True, exist_ok=True)
+        text_path = text_dir / "2605.00013.txt"
+        text_path.write_text("--- page 1 ---\nFull paper body for report.", encoding="utf-8")
+        conn.execute(
+            """
+            INSERT INTO research_projects(
+              name, status, keywords_json, obsidian_project_path, obsidian_output_dir,
+              obsidian_folder, obsidian_status_tag, discovery_source, source_tags_json,
+              arxiv_categories_json, automation_json, created_at, updated_at
+            )
+            VALUES (
+              'Paper Reports', 'active', '[]', 'Research/Paper Reports/中心页.md',
+              'Research/Paper Reports', 'Research/Paper Reports', 'Status/进行中',
+              'manual', '[]', '[]', '{}', 'now', 'now'
+            )
+            """
+        )
+        project_id = conn.execute("SELECT id FROM research_projects").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO arxiv_papers(
+              arxiv_id, title, authors_json, summary, categories_json, published_at,
+              updated_at, link, pdf_link, text_path, text_status, fetched_batch_id, created_at
+            )
+            VALUES (
+              '2605.00013', 'Full Report Paper', '[]', 'Abstract', '["cs.AI"]',
+              '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z',
+              'https://arxiv.org/abs/2605.00013', 'https://arxiv.org/pdf/2605.00013',
+              ?, 'complete', 'batch', 'now'
+            )
+            """,
+            (str(text_path),),
+        )
+        paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO project_paper_judgments(
+              project_id, paper_id, relation_type, relevance_score, usefulness_score,
+              confidence, suggested_action, reason, evidence_mapping_json,
+              missing_evidence, input_hash, prompt_version, raw_json, created_at, updated_at
+            )
+            VALUES (?, ?, 'direct', 0.9, 0.8, 0.9, 'read', '需要阅读。',
+              '[]', '', 'hash-report', 'test', '{}', 'now', 'now')
+            """,
+            (project_id, paper_id),
+        )
+        conn.commit()
+        sync_project_paper_recommendations(conn, [int(paper_id)])
+
+        result = ensure_paper_reports_for_recommendations(conn, [int(paper_id)])
+
+        self.assertEqual(result["paper_reports_queued"], 1)
+        captured: dict[str, object] = {}
+
+        def fake_chat(_: Settings, messages: list[dict[str, str]]) -> str:
+            captured["messages"] = messages
+            return "# 全文报告\n\n完整报告内容"
+
+        with patch("worker.paper_reports._call_chat_text", side_effect=fake_chat):
+            process_result = process_paper_report_queue(conn, chat_settings(test_settings()), [int(paper_id)])
+
+        self.assertEqual(process_result["paper_reports_done"], 1)
+        report = conn.execute("SELECT * FROM paper_reading_reports WHERE paper_id = ?", (paper_id,)).fetchone()
+        self.assertEqual(report["status"], "done")
+        self.assertEqual(report["prompt"], PAPER_READER_DEFAULT_PROMPT)
+        messages = captured["messages"]
+        self.assertEqual(messages[0]["content"], "You are a research paper reading assistant. Read the supplied full PDF text and answer accurately from it.")
+        self.assertIn("--- page 1 ---\nFull paper body for report.", messages[1]["content"])
+        self.assertTrue(messages[1]["content"].endswith(PAPER_READER_DEFAULT_PROMPT))
+
+    def test_paper_reports_queue_api_lists_statuses(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO arxiv_papers(
+              arxiv_id, title, authors_json, summary, categories_json, published_at,
+              updated_at, link, pdf_link, text_status, fetched_batch_id, created_at
+            )
+            VALUES (
+              '2605.00014', 'Queued Report Paper', '["A"]', 'Abstract', '["cs.AI"]',
+              '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z',
+              'https://arxiv.org/abs/2605.00014', 'https://arxiv.org/pdf/2605.00014',
+              'complete', 'batch', 'now'
+            )
+            """
+        )
+        paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO paper_reading_reports(
+              paper_id, status, prompt, system_prompt, report_markdown,
+              error_message, created_at, updated_at, finished_at
+            )
+            VALUES (?, 'done', ?, 'system', '# 全文报告\n\n队列报告内容', '', 'now', 'now', 'now')
+            """,
+            (paper_id, PAPER_READER_DEFAULT_PROMPT),
+        )
+        conn.commit()
+
+        result = paper_reports_queue(conn)
+
+        self.assertEqual(result["stats"]["done"], 1)
+        self.assertEqual(result["stats"]["total"], 1)
+        self.assertEqual(result["items"][0]["paper_id"], paper_id)
+        self.assertEqual(result["items"][0]["status"], "done")
+        self.assertIn("队列报告内容", result["items"][0]["report_excerpt"])
+
+    def test_reminder_registry_includes_paper_report_queue_events(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO arxiv_papers(
+              arxiv_id, title, authors_json, summary, categories_json, published_at,
+              updated_at, link, pdf_link, text_status, fetched_batch_id, created_at
+            )
+            VALUES (
+              '2605.00015', 'Reminder Report Paper', '[]', 'Abstract', '["cs.AI"]',
+              '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z',
+              'https://arxiv.org/abs/2605.00015', 'https://arxiv.org/pdf/2605.00015',
+              'complete', 'batch', 'now'
+            )
+            """
+        )
+        paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO paper_reading_reports(
+              paper_id, status, prompt, system_prompt, report_markdown,
+              error_message, created_at, updated_at
+            )
+            VALUES (?, 'queued', ?, 'system', '', '', 'now', 'now')
+            """,
+            (paper_id, PAPER_READER_DEFAULT_PROMPT),
+        )
+        conn.commit()
+
+        result = reminders(conn, limit=10)
+
+        registered = {event["type"] for event in result["registered_events"]}
+        item_types = {item["type"] for item in result["items"]}
+        self.assertIn("daily_run_completed", registered)
+        self.assertIn("paper_report_queue_backlog", registered)
+        self.assertIn("paper_report_queue_backlog", item_types)
+
+    def test_reminders_hide_superseded_failure_and_sort_by_latest_event(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO job_runs(job_type, status, started_at, finished_at, message, meta_json)
+            VALUES ('run-daily', 'failed', ?, ?, ?, '{}')
+            """,
+            (
+                "2026-05-07T05:30:00+00:00",
+                "2026-05-07T05:35:20+00:00",
+                "OBSIDIAN_VAULT_PATH does not exist",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO job_runs(job_type, status, started_at, finished_at, message, meta_json)
+            VALUES ('run-daily', 'completed', ?, ?, '', '{}')
+            """,
+            (
+                "2026-05-07T05:40:00+00:00",
+                "2026-05-07T05:56:19+00:00",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO job_runs(job_type, status, started_at, finished_at, message, meta_json)
+            VALUES ('generate-paper-reports', 'completed', ?, ?, '', ?)
+            """,
+            (
+                "2026-05-07T15:30:00+00:00",
+                "2026-05-07T15:32:11+00:00",
+                to_json({"paper_reports_done": 1}),
+            ),
+        )
+        conn.commit()
+
+        result = reminders(conn, limit=5)
+        item_types = [item["type"] for item in result["items"]]
+
+        self.assertEqual(item_types[0], "paper_report_completed")
+        self.assertIn("daily_run_completed", item_types)
+        self.assertNotIn("job_failed", item_types)
+
     def test_accept_recommendation_writes_paper_library_and_project_list(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -741,6 +946,21 @@ class WorkerTests(unittest.TestCase):
                 """,
                 (project_id, paper_id, relation),
             )
+        conn.execute(
+            """
+            INSERT INTO paper_reading_reports(
+              paper_id, status, prompt, system_prompt, model_provider_id, model,
+              source_text_hash, source_project_ids_json, report_markdown,
+              error_message, created_at, updated_at, finished_at
+            )
+            VALUES (
+              ?, 'done', ?, 'system', 'test-chat', 'test-model',
+              'hash', '[]', '# 全文报告\n\n完整报告内容',
+              '', 'now', 'now', 'now'
+            )
+            """,
+            (paper_id, PAPER_READER_DEFAULT_PROMPT),
+        )
         conn.commit()
 
         settings = Settings(**{**test_settings().__dict__, "obsidian_vault_path": vault})
@@ -757,6 +977,7 @@ class WorkerTests(unittest.TestCase):
         note_text = note_path.read_text(encoding="utf-8")
         self.assertIn("Importance/高", note_text)
         self.assertIn("[[人工智能/个人研究/深度引导/中心页|深度引导]]：direct", note_text)
+        self.assertIn("完整报告内容", note_text)
         self.assertNotIn("新的论文检索范式", note_text)
         self.assertTrue((vault / "人工智能" / "论文仓库" / "附件" / "2605.00012.pdf").exists())
         project_list = project_folder / "论文列表.md"
@@ -877,6 +1098,16 @@ class WorkerTests(unittest.TestCase):
         payload = get_app_settings(conn, test_settings())["settings"]
         self.assertTrue(payload["scheduler_enabled"])
         self.assertFalse(payload["run_daily_on_startup_enabled"])
+
+    def test_paper_report_queue_concurrency_is_configurable(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+
+        save_app_settings(conn, {"paper_report_queue_concurrency": 3})
+        payload = get_app_settings(conn, test_settings())["settings"]
+
+        self.assertEqual(payload["paper_report_queue_concurrency"], 3)
 
     def test_stored_path_settings_remain_paths(self) -> None:
         conn = sqlite3.connect(":memory:")

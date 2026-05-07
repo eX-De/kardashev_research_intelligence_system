@@ -13,6 +13,11 @@ const PORT = Number(process.env.PORT || 3000);
 const PYTHON_BIN = process.env.PYTHON_BIN || "python";
 const DIST_DIR = join(__dirname, "dist");
 const PUBLIC_DIR = existsSync(DIST_DIR) ? DIST_DIR : join(__dirname, "public");
+const PAPER_REPORT_QUEUE_INTERVAL_MS = Math.max(2000, Number(process.env.PAPER_REPORT_QUEUE_INTERVAL_MS || 5000));
+const PAPER_REPORT_QUEUE_DEFAULT_CONCURRENCY = Math.max(
+  1,
+  Number(process.env.PAPER_REPORT_QUEUE_CONCURRENCY || process.env.PAPER_REPORT_QUEUE_LIMIT || 1)
+);
 
 const jobRuntime = {
   currentJob: null,
@@ -31,6 +36,18 @@ const startupDailyRuntime = {
   lastCheckAt: null,
   lastRunAt: null,
   lastSkipReason: null
+};
+
+const paperReportQueueRuntime = {
+  enabled: true,
+  timer: null,
+  active: 0,
+  activeJobs: [],
+  concurrency: PAPER_REPORT_QUEUE_DEFAULT_CONCURRENCY,
+  lastCheckAt: null,
+  lastRunAt: null,
+  lastSkipReason: null,
+  lastError: null
 };
 
 const MIME_TYPES = {
@@ -122,6 +139,11 @@ function computeNextRun(settings) {
   return next;
 }
 
+function paperReportQueueConcurrency(settings = {}) {
+  const value = Number(settings.paper_report_queue_concurrency || PAPER_REPORT_QUEUE_DEFAULT_CONCURRENCY);
+  return Math.max(1, Math.min(8, Number.isFinite(value) ? Math.floor(value) : PAPER_REPORT_QUEUE_DEFAULT_CONCURRENCY));
+}
+
 function schedulerStatus() {
   return {
     enabled: schedulerRuntime.enabled,
@@ -134,6 +156,16 @@ function schedulerStatus() {
       last_check_at: startupDailyRuntime.lastCheckAt,
       last_run_at: startupDailyRuntime.lastRunAt,
       last_skip_reason: startupDailyRuntime.lastSkipReason
+    },
+    paper_report_queue: {
+      enabled: paperReportQueueRuntime.enabled,
+      active: paperReportQueueRuntime.active,
+      active_jobs: paperReportQueueRuntime.activeJobs,
+      concurrency: paperReportQueueRuntime.concurrency,
+      last_check_at: paperReportQueueRuntime.lastCheckAt,
+      last_run_at: paperReportQueueRuntime.lastRunAt,
+      last_skip_reason: paperReportQueueRuntime.lastSkipReason,
+      last_error: paperReportQueueRuntime.lastError
     }
   };
 }
@@ -193,20 +225,26 @@ async function stopScheduler({ persist = true } = {}) {
   return schedulerStatus();
 }
 
-async function runManagedJob(command, source = "manual") {
+async function runManagedJob(command, source = "manual", args = []) {
   if (jobRuntime.currentJob) {
     const err = new Error(`Another job is already running: ${jobRuntime.currentJob.command}`);
     err.statusCode = 409;
     throw err;
   }
+  if (source !== "paper-report-queue" && paperReportQueueRuntime.active > 0) {
+    const err = new Error(`Paper report queue is running: ${paperReportQueueRuntime.active} active`);
+    err.statusCode = 409;
+    throw err;
+  }
   const startedAt = new Date().toISOString();
-  jobRuntime.currentJob = { command, source, started_at: startedAt };
+  jobRuntime.currentJob = { command, source, args, started_at: startedAt };
   try {
-    const data = await jsonFromWorker([command]);
+    const data = await jsonFromWorker([command, ...args]);
     const finishedAt = new Date().toISOString();
     jobRuntime.lastJob = {
       command,
       source,
+      args,
       status: "completed",
       started_at: startedAt,
       finished_at: finishedAt,
@@ -219,16 +257,105 @@ async function runManagedJob(command, source = "manual") {
     jobRuntime.lastJob = {
       command,
       source,
+      args,
       status: "failed",
       started_at: startedAt,
       finished_at: finishedAt,
       message: error.message
     };
-    schedulerRuntime.lastError = { message: error.message, at: finishedAt };
+    if (source === "paper-report-queue") {
+      paperReportQueueRuntime.lastError = { message: error.message, at: finishedAt };
+    } else {
+      schedulerRuntime.lastError = { message: error.message, at: finishedAt };
+    }
     throw error;
   } finally {
     jobRuntime.currentJob = null;
   }
+}
+
+function schedulePaperReportQueue(delay = PAPER_REPORT_QUEUE_INTERVAL_MS) {
+  if (!paperReportQueueRuntime.enabled) return;
+  if (paperReportQueueRuntime.timer) clearTimeout(paperReportQueueRuntime.timer);
+  paperReportQueueRuntime.timer = setTimeout(() => {
+    runPaperReportQueueOnce().catch((error) => {
+      paperReportQueueRuntime.lastError = {
+        message: error.message,
+        at: new Date().toISOString()
+      };
+      schedulePaperReportQueue();
+    });
+  }, delay);
+}
+
+async function runPaperReportWorker(workerId) {
+  const startedAt = new Date().toISOString();
+  const activeJob = {
+    id: workerId,
+    command: "generate-paper-reports",
+    source: "paper-report-queue",
+    args: ["--limit", "1"],
+    started_at: startedAt
+  };
+  paperReportQueueRuntime.active += 1;
+  paperReportQueueRuntime.activeJobs = [...paperReportQueueRuntime.activeJobs, activeJob];
+  try {
+    const data = await jsonFromWorker(["generate-paper-reports", "--limit", "1"]);
+    paperReportQueueRuntime.lastRunAt = new Date().toISOString();
+    paperReportQueueRuntime.lastError = null;
+    return data;
+  } catch (error) {
+    paperReportQueueRuntime.lastError = {
+      message: error.message,
+      at: new Date().toISOString()
+    };
+    return null;
+  } finally {
+    paperReportQueueRuntime.active = Math.max(0, paperReportQueueRuntime.active - 1);
+    paperReportQueueRuntime.activeJobs = paperReportQueueRuntime.activeJobs.filter((job) => job.id !== workerId);
+    schedulePaperReportQueue(1000);
+  }
+}
+
+async function runPaperReportQueueOnce() {
+  paperReportQueueRuntime.lastCheckAt = new Date().toISOString();
+  paperReportQueueRuntime.lastSkipReason = null;
+  if (jobRuntime.currentJob) {
+    paperReportQueueRuntime.lastSkipReason = `busy:${jobRuntime.currentJob.command}`;
+    schedulePaperReportQueue();
+    return schedulerStatus();
+  }
+
+  const settings = await readAppSettings();
+  const concurrency = paperReportQueueConcurrency(settings);
+  paperReportQueueRuntime.concurrency = concurrency;
+  if (paperReportQueueRuntime.active >= concurrency) {
+    paperReportQueueRuntime.lastSkipReason = `active:${paperReportQueueRuntime.active}/${concurrency}`;
+    schedulePaperReportQueue();
+    return schedulerStatus();
+  }
+
+  const data = await jsonFromWorker(["api-paper-reports", "--limit", String(concurrency)]);
+  const queued = Number(data?.stats?.queued || 0);
+  if (!queued) {
+    paperReportQueueRuntime.lastSkipReason = "empty";
+    schedulePaperReportQueue();
+    return schedulerStatus();
+  }
+
+  const available = Math.max(0, concurrency - paperReportQueueRuntime.active);
+  const launchCount = Math.min(queued, available);
+  for (let index = 0; index < launchCount; index += 1) {
+    runPaperReportWorker(`${Date.now()}-${index}`).catch((error) => {
+      paperReportQueueRuntime.lastError = {
+        message: error.message,
+        at: new Date().toISOString()
+      };
+    });
+  }
+  paperReportQueueRuntime.lastSkipReason = `launched:${launchCount}`;
+  schedulePaperReportQueue(1000);
+  return schedulerStatus();
 }
 
 async function runScheduledDaily() {
@@ -534,6 +661,8 @@ async function routeApi(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/settings") {
     const body = await readRequestJson(req);
     const data = await saveAppSettings(body);
+    paperReportQueueRuntime.concurrency = paperReportQueueConcurrency(data.settings || {});
+    schedulePaperReportQueue(1000);
     if (data.settings?.scheduler_enabled) {
       await startScheduler({ persist: false, settings: data.settings });
     } else {
@@ -583,6 +712,13 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/api/reminders") {
+    const limit = url.searchParams.get("limit") || "5";
+    const data = await jsonFromWorker(["api-reminders", "--limit", limit]);
+    sendJson(res, 200, data);
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/api/jobs/scheduler/start") {
     const scheduler = await startScheduler({ persist: true });
     sendJson(res, 200, { ok: true, scheduler });
@@ -603,6 +739,13 @@ async function routeApi(req, res, url) {
 
   if (req.method === "GET" && url.pathname === "/api/inbox") {
     const data = await jsonFromWorker(["api-inbox"]);
+    sendJson(res, 200, data);
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/paper-reports") {
+    const limit = url.searchParams.get("limit") || "300";
+    const data = await jsonFromWorker(["api-paper-reports", "--limit", limit]);
     sendJson(res, 200, data);
     return;
   }
@@ -642,10 +785,22 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  const paperReportMatch = url.pathname.match(/^\/api\/papers\/(\d+)\/report$/);
+  if (req.method === "POST" && paperReportMatch) {
+    const body = await readRequestJson(req);
+    const data = await jsonFromWorker([
+      "api-paper-report",
+      paperReportMatch[1]
+    ], JSON.stringify(body));
+    sendJson(res, 200, data);
+    return;
+  }
+
   const jobMap = {
     "/api/jobs/sync-obsidian": "sync-obsidian",
     "/api/jobs/fetch-arxiv": "fetch-arxiv",
     "/api/jobs/cache-arxiv-text": "cache-arxiv-text",
+    "/api/jobs/generate-paper-reports": "generate-paper-reports",
     "/api/jobs/generate-reports": "generate-reports",
     "/api/jobs/run-daily": "run-daily"
   };
@@ -674,6 +829,7 @@ const server = createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`Research Intelligence dashboard listening on http://localhost:${PORT}`);
+  schedulePaperReportQueue(1000);
   readAppSettings()
     .then(async (settings) => {
       if (settings.scheduler_enabled) {

@@ -239,6 +239,23 @@ CREATE TABLE IF NOT EXISTS project_paper_recommendations (
   PRIMARY KEY(project_id, paper_id)
 );
 
+CREATE TABLE IF NOT EXISTS paper_reading_reports (
+  paper_id INTEGER PRIMARY KEY REFERENCES arxiv_papers(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'queued',
+  prompt TEXT NOT NULL DEFAULT '',
+  system_prompt TEXT NOT NULL DEFAULT '',
+  model_provider_id TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  source_text_hash TEXT NOT NULL DEFAULT '',
+  source_project_ids_json TEXT NOT NULL DEFAULT '[]',
+  report_markdown TEXT NOT NULL DEFAULT '',
+  error_message TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  started_at TEXT,
+  finished_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS project_notes (
   project_id INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
   note_id INTEGER NOT NULL REFERENCES obsidian_notes(id) ON DELETE CASCADE,
@@ -275,6 +292,7 @@ CREATE INDEX IF NOT EXISTS idx_project_paper_judgments_project_action ON project
 CREATE INDEX IF NOT EXISTS idx_project_paper_judgments_paper ON project_paper_judgments(paper_id);
 CREATE INDEX IF NOT EXISTS idx_project_paper_recommendations_state ON project_paper_recommendations(state, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_project_paper_recommendations_paper ON project_paper_recommendations(paper_id);
+CREATE INDEX IF NOT EXISTS idx_paper_reading_reports_status ON paper_reading_reports(status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_project_artifacts_project ON project_artifacts(project_id, updated_at DESC);
 """
 
@@ -443,6 +461,52 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_project_paper_recommendations_paper ON project_paper_recommendations(paper_id)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS paper_reading_reports (
+          paper_id INTEGER PRIMARY KEY REFERENCES arxiv_papers(id) ON DELETE CASCADE,
+          status TEXT NOT NULL DEFAULT 'queued',
+          prompt TEXT NOT NULL DEFAULT '',
+          system_prompt TEXT NOT NULL DEFAULT '',
+          model_provider_id TEXT NOT NULL DEFAULT '',
+          model TEXT NOT NULL DEFAULT '',
+          source_text_hash TEXT NOT NULL DEFAULT '',
+          source_project_ids_json TEXT NOT NULL DEFAULT '[]',
+          report_markdown TEXT NOT NULL DEFAULT '',
+          error_message TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          started_at TEXT,
+          finished_at TEXT
+        )
+        """
+    )
+    report_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(paper_reading_reports)").fetchall()
+    }
+    report_migrations = {
+        "prompt": "ALTER TABLE paper_reading_reports ADD COLUMN prompt TEXT NOT NULL DEFAULT ''",
+        "system_prompt": "ALTER TABLE paper_reading_reports ADD COLUMN system_prompt TEXT NOT NULL DEFAULT ''",
+        "model_provider_id": "ALTER TABLE paper_reading_reports ADD COLUMN model_provider_id TEXT NOT NULL DEFAULT ''",
+        "model": "ALTER TABLE paper_reading_reports ADD COLUMN model TEXT NOT NULL DEFAULT ''",
+        "source_text_hash": "ALTER TABLE paper_reading_reports ADD COLUMN source_text_hash TEXT NOT NULL DEFAULT ''",
+        "source_project_ids_json": "ALTER TABLE paper_reading_reports ADD COLUMN source_project_ids_json TEXT NOT NULL DEFAULT '[]'",
+        "report_markdown": "ALTER TABLE paper_reading_reports ADD COLUMN report_markdown TEXT NOT NULL DEFAULT ''",
+        "error_message": "ALTER TABLE paper_reading_reports ADD COLUMN error_message TEXT NOT NULL DEFAULT ''",
+        "started_at": "ALTER TABLE paper_reading_reports ADD COLUMN started_at TEXT",
+        "finished_at": "ALTER TABLE paper_reading_reports ADD COLUMN finished_at TEXT",
+    }
+    for column, sql in report_migrations.items():
+        if column not in report_columns:
+            try:
+                conn.execute(sql)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_paper_reading_reports_status ON paper_reading_reports(status, updated_at DESC)"
     )
     conn.execute("DROP TABLE IF EXISTS llm_explanations")
 

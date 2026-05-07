@@ -218,6 +218,7 @@ export function SettingsForm({ settings, providers, onSettingChange, onProviderC
         <input name="scheduler_run_time" type="time" value={settings.scheduler_run_time || ""} onChange={(event) => onSettingChange("scheduler_run_time", event.target.value)} />
       </label>
       <NumberField label="执行间隔小时" name="scheduler_interval_hours" min="1" step="1" value={settings.scheduler_interval_hours} onChange={onSettingChange} />
+      <NumberField label="报告队列并发数" name="paper_report_queue_concurrency" min="1" max="8" step="1" value={settings.paper_report_queue_concurrency} onChange={onSettingChange} />
       <div className="form-actions">
         <button type="submit" className="primary">
           保存配置

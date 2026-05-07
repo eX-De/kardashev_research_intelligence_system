@@ -95,6 +95,7 @@ export function jobTitle(jobType) {
     "run-daily": "每日流程",
     "fetch-arxiv": "arXiv 抓取",
     "cache-arxiv-text": "论文正文缓存",
+    "generate-paper-reports": "全文报告生成",
     "generate-reports": "每日总报告生成",
     "sync-obsidian": "Obsidian 同步",
     "rank-papers": "论文匹配"

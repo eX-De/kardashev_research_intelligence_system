@@ -14,6 +14,7 @@
     "sync-obsidian": "python -m worker.cli sync-obsidian",
     "fetch-arxiv": "python -m worker.cli fetch-arxiv",
     "cache-arxiv-text": "python -m worker.cli cache-arxiv-text",
+    "generate-paper-reports": "python -m worker.cli generate-paper-reports",
     "generate-reports": "python -m worker.cli generate-reports",
     "run-daily": "python -m worker.cli run-daily",
     "test": "python -m unittest discover -s tests"
@@ -23,8 +24,13 @@
     "python": ">=3.11"
   },
   "dependencies": {
+    "katex": "^0.16.45",
     "react": "^19.2.5",
-    "react-dom": "^19.2.5"
+    "react-dom": "^19.2.5",
+    "react-markdown": "^10.1.0",
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^6.0.1",

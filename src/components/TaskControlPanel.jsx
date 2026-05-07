@@ -56,6 +56,9 @@ export function TaskControlPanel({ scheduler, onStartStartup, onStartScheduler, 
           <button onClick={() => onRunJob("cache-arxiv-text")} type="button">
             Cache PDF/TXT
           </button>
+          <button onClick={() => onRunJob("generate-paper-reports")} type="button">
+            Full Paper Reports
+          </button>
           <button onClick={() => onRunJob("generate-reports")} type="button">
             Generate Daily Report
           </button>

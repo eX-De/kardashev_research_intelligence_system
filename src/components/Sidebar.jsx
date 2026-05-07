@@ -18,6 +18,9 @@ export function Sidebar({ activeView, onNavigate, statusMessage }) {
         <button className={`nav-button ${navView === "inbox" ? "active" : ""}`} onClick={() => onNavigate("inbox")} type="button">
           论文推荐
         </button>
+        <button className={`nav-button ${navView === "reports" ? "active" : ""}`} onClick={() => onNavigate("reports")} type="button">
+          报告队列
+        </button>
         <button className={`nav-button ${navView === "control" ? "active" : ""}`} onClick={() => onNavigate("control")} type="button">
           配置与任务
         </button>

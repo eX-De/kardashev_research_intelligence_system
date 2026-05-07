@@ -4,6 +4,7 @@ import { ControlView } from "./components/ControlView.jsx";
 import { InboxView } from "./components/InboxView.jsx";
 import { ProjectPage } from "./components/ProjectPage.jsx";
 import { ProjectsView } from "./components/ProjectsView.jsx";
+import { ReportQueueView } from "./components/ReportQueueView.jsx";
 import { Sidebar } from "./components/Sidebar.jsx";
 
 export function App() {
@@ -40,6 +41,7 @@ export function App() {
           />
         ) : null}
         {activeView === "inbox" ? <InboxView setStatusMessage={setStatusMessage} /> : null}
+        {activeView === "reports" ? <ReportQueueView setStatusMessage={setStatusMessage} /> : null}
         {activeView === "control" ? <ControlView setStatusMessage={setStatusMessage} /> : null}
       </main>
     </>

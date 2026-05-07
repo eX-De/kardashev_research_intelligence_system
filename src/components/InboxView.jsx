@@ -1,6 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { api, fmtScore, postJson } from "../lib/dashboard.js";
+import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
+
+const REPORT_STATUS_LABELS = {
+  queued: "报告排队中",
+  processing: "报告生成中",
+  done: "全文报告已生成",
+  failed: "报告失败"
+};
+
+function reportStatusLabel(status) {
+  return REPORT_STATUS_LABELS[status] || "未生成报告";
+}
 
 function PaperList({ papers, activePaperId, onSelect }) {
   if (!papers.length) {
@@ -14,6 +26,7 @@ function PaperList({ papers, activePaperId, onSelect }) {
         {paper.project_name ? <span className="pill">{paper.project_name}</span> : null}
         {paper.project_count > 1 ? <span className="pill">{paper.project_count} projects</span> : null}
         {paper.relation_type ? <span className="pill">{paper.relation_type}</span> : null}
+        <span className={`pill report-pill ${paper.report_status || "missing"}`}>{reportStatusLabel(paper.report_status)}</span>
         <span className="pill">{(paper.categories || []).slice(0, 2).join(", ") || "arXiv"}</span>
         {paper.feedback_status ? <span className="pill">{paper.feedback_status}</span> : null}
       </div>
@@ -21,7 +34,7 @@ function PaperList({ papers, activePaperId, onSelect }) {
   ));
 }
 
-function PaperDetail({ detail, onRecommendation }) {
+function PaperDetail({ detail, onRecommendation, onGenerateReport }) {
   const [selectedProjectIds, setSelectedProjectIds] = useState([]);
   const [importance, setImportance] = useState("");
 
@@ -48,12 +61,15 @@ function PaperDetail({ detail, onRecommendation }) {
   const pendingRecommendations = recommendations.filter((recommendation) => recommendation.state === "pending");
   const judgments = detail.project_judgments || [];
   const evidence = detail.evidence || [];
+  const report = detail.paper_report || {};
+  const reportReady = report.status === "done" && Boolean(String(report.report_markdown || "").trim());
+  const reportBusy = report.status === "processing";
   const importanceOptions = [
     ["high", "高"],
     ["medium", "中"],
     ["low", "低"]
   ];
-  const canAccept = Boolean(importance) && selectedProjectIds.length > 0 && pendingRecommendations.length > 0;
+  const canAccept = Boolean(importance) && selectedProjectIds.length > 0 && pendingRecommendations.length > 0 && reportReady;
 
   function toggleProject(projectId) {
     setSelectedProjectIds((current) => (
@@ -100,11 +116,29 @@ function PaperDetail({ detail, onRecommendation }) {
               ))}
             </div>
             <div className="detail-actions">
-              <button className="primary" disabled={!canAccept} onClick={() => onRecommendation({ action: "accept", importance, project_ids: selectedProjectIds })} type="button">加入论文仓库</button>
+              <button className="primary" disabled={!canAccept} onClick={() => onRecommendation({ action: "accept", importance, project_ids: selectedProjectIds })} type="button">保存到 Obsidian</button>
               <button className="danger" onClick={() => onRecommendation({ action: "discard" })} type="button">遗弃</button>
             </div>
           </div>
         ) : null}
+
+        <div className="section">
+          <h3>全文报告</h3>
+          <div className={`report-state ${report.status || "missing"}`}>
+            <strong>{reportStatusLabel(report.status)}</strong>
+            {report.error_message ? <p>{report.error_message}</p> : null}
+            {report.model ? <p className="muted">{report.model_provider_id ? `${report.model_provider_id} · ` : ""}{report.model}</p> : null}
+          </div>
+          <div className="detail-actions">
+            {report.status !== "done" && report.status !== "failed" ? (
+              <button disabled={reportBusy} onClick={() => onGenerateReport(false)} type="button">生成全文报告</button>
+            ) : null}
+            {report.status === "done" || report.status === "failed" ? (
+              <button disabled={reportBusy} onClick={() => onGenerateReport(true)} type="button">重新生成</button>
+            ) : null}
+          </div>
+          {reportReady ? <LazyMarkdownReport markdown={report.report_markdown} /> : null}
+        </div>
 
         <div className="section">
           <h3>项目关联</h3>
@@ -190,10 +224,24 @@ export function InboxView({ setStatusMessage }) {
     if (!activePaperId) return;
     try {
       await postJson(`/api/papers/${activePaperId}/recommendation`, payload);
-      setStatusMessage(payload.action === "discard" ? "已遗弃推荐" : "已加入论文仓库");
+      setStatusMessage(payload.action === "discard" ? "已遗弃推荐" : "已保存到 Obsidian");
       await loadInbox();
     } catch (error) {
       setStatusMessage(error.message);
+    }
+  }
+
+  async function generateReport(force = false) {
+    if (!activePaperId) return;
+    try {
+      const data = await postJson(`/api/papers/${activePaperId}/report`, { force });
+      setDetail(data);
+      const nextReport = data.paper_report || {};
+      setStatusMessage(nextReport.status === "done" ? "全文报告已生成" : reportStatusLabel(nextReport.status));
+      await loadInbox();
+    } catch (error) {
+      setStatusMessage(error.message);
+      await loadPaper(activePaperId).catch(() => {});
     }
   }
 
@@ -215,7 +263,7 @@ export function InboxView({ setStatusMessage }) {
       </section>
 
       <section className="detail-panel" aria-label="论文详情">
-        <PaperDetail detail={detail} onRecommendation={updateRecommendation} />
+        <PaperDetail detail={detail} onGenerateReport={generateReport} onRecommendation={updateRecommendation} />
       </section>
     </section>
   );

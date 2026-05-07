@@ -28,6 +28,7 @@ INT_FIELDS = {
     "rag_prefilter_min_keep",
     "rag_prefilter_max_keep",
     "scheduler_interval_hours",
+    "paper_report_queue_concurrency",
 }
 
 FLOAT_FIELDS = {
@@ -176,6 +177,19 @@ def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, An
         "scheduler_run_time": str(stored.get("scheduler_run_time", os.environ.get("SCHEDULER_RUN_TIME", "09:00"))),
         "scheduler_interval_hours": int(
             stored.get("scheduler_interval_hours", os.environ.get("SCHEDULER_INTERVAL_HOURS", 24)) or 24
+        ),
+        "paper_report_queue_concurrency": max(
+            1,
+            int(
+                stored.get(
+                    "paper_report_queue_concurrency",
+                    os.environ.get(
+                        "PAPER_REPORT_QUEUE_CONCURRENCY",
+                        os.environ.get("PAPER_REPORT_QUEUE_LIMIT", 1),
+                    ),
+                )
+                or 1
+            ),
         ),
     }
 

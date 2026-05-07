@@ -8,14 +8,17 @@ from typing import Any, Callable
 
 from .api import (
     export_project_to_obsidian,
+    generate_paper_reading_report,
     health,
     inbox,
     job_history,
     link_project_note,
     link_project_paper,
     paper_detail,
+    paper_reports_queue,
     project_detail,
     projects,
+    reminders,
     save_feedback,
     save_project,
     update_paper_recommendation,
@@ -29,6 +32,7 @@ from .config import load_settings
 from .db import clean_unicode, connect, init_db, job_run, update_job_meta, utc_now
 from .llm import generate_missing_project_judgments
 from .obsidian import sync_obsidian
+from .paper_reports import ensure_paper_reports_for_recommendations, process_paper_report_queue
 from .recommendations import sync_project_paper_recommendations
 from .reports import generate_daily_report
 from .search import prefilter_papers, rank_project_papers, rank_unmatched_papers
@@ -72,6 +76,7 @@ DAILY_STEPS = [
     ("rank_project", "项目论文匹配"),
     ("judge_project_papers", "项目级判定"),
     ("paper_recommendations", "生成论文推荐"),
+    ("paper_reports", "生成全文报告"),
     ("archive_zero_match", "归档未通过论文"),
     ("reports", "生成每日总报告"),
 ]
@@ -111,6 +116,9 @@ def _step_summary(result: dict[str, Any]) -> str:
         ("project_judgments_filtered", "filtered by judgments"),
         ("paper_recommendations_created", "paper recommendations"),
         ("paper_recommendations_refreshed", "recommendations refreshed"),
+        ("paper_reports_queued", "paper reports queued"),
+        ("paper_reports_done", "full reports"),
+        ("paper_reports_failed", "report failures"),
         ("reports_created", "daily reports"),
         ("reports_failed", "report failures"),
     ]
@@ -403,6 +411,8 @@ def cmd_rank(_: argparse.Namespace) -> None:
             result.update(rank_project_papers(conn, settings))
             result.update(generate_missing_project_judgments(conn, settings))
             result.update(sync_project_paper_recommendations(conn))
+            result.update(ensure_paper_reports_for_recommendations(conn))
+            result.update(process_paper_report_queue(conn, settings))
             update_job_meta(conn, job_id, "Ranking completed", result)
         return result
 
@@ -419,6 +429,20 @@ def cmd_generate_reports(_: argparse.Namespace) -> None:
 
     result = _with_db(run)
     _print_json({"ok": True, "message": "Daily research report generated", **result})
+
+
+def cmd_generate_paper_reports(args: argparse.Namespace) -> None:
+    limit = int(args.limit) if str(args.limit or "").strip() else None
+
+    def run(conn, settings):
+        with job_run(conn, "generate-paper-reports") as job_id:
+            result = ensure_paper_reports_for_recommendations(conn)
+            result.update(process_paper_report_queue(conn, settings, limit=limit))
+            update_job_meta(conn, job_id, "Full paper reports generated", result)
+        return result
+
+    result = _with_db(run)
+    _print_json({"ok": True, "message": "Full paper reports generated", **result})
 
 
 def cmd_run_daily(_: argparse.Namespace) -> None:
@@ -537,11 +561,24 @@ def cmd_run_daily(_: argparse.Namespace) -> None:
             )
             accumulated.update(recommendation_result)
 
-            archive_result = _run_daily_step(
+            paper_report_result = _run_daily_step(
                 conn,
                 job_id,
                 steps,
                 8,
+                accumulated,
+                lambda: {
+                    **ensure_paper_reports_for_recommendations(conn, selected_paper_ids),
+                    **process_paper_report_queue(conn, settings, selected_paper_ids),
+                },
+            )
+            accumulated.update(paper_report_result)
+
+            archive_result = _run_daily_step(
+                conn,
+                job_id,
+                steps,
+                9,
                 accumulated,
                 lambda: archive_zero_match_papers(conn, settings, selected_paper_ids),
             )
@@ -551,7 +588,7 @@ def cmd_run_daily(_: argparse.Namespace) -> None:
                 conn,
                 job_id,
                 steps,
-                9,
+                10,
                 accumulated,
                 lambda: generate_daily_report(
                     conn,
@@ -595,6 +632,19 @@ def cmd_api_paper_recommendation(args: argparse.Namespace) -> None:
     result = _with_db(
         lambda conn, settings: update_paper_recommendation(conn, settings, int(args.paper_id), payload)
     )
+    _print_json(result)
+
+
+def cmd_api_paper_report(args: argparse.Namespace) -> None:
+    payload = _read_json_stdin("paper report")
+    result = _with_db(
+        lambda conn, settings: generate_paper_reading_report(conn, settings, int(args.paper_id), payload)
+    )
+    _print_json(result)
+
+
+def cmd_api_paper_reports(args: argparse.Namespace) -> None:
+    result = _with_db(lambda conn, settings: paper_reports_queue(conn, int(args.limit)))
     _print_json(result)
 
 
@@ -674,6 +724,11 @@ def cmd_api_jobs_history(args: argparse.Namespace) -> None:
     _print_json(result)
 
 
+def cmd_api_reminders(args: argparse.Namespace) -> None:
+    result = _with_db(lambda conn, settings: reminders(conn, int(args.limit)))
+    _print_json(result)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="research-intelligence-worker")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -696,6 +751,10 @@ def build_parser() -> argparse.ArgumentParser:
     reports = sub.add_parser("generate-reports")
     reports.set_defaults(func=cmd_generate_reports)
 
+    paper_reports = sub.add_parser("generate-paper-reports")
+    paper_reports.add_argument("--limit", default="")
+    paper_reports.set_defaults(func=cmd_generate_paper_reports)
+
     daily = sub.add_parser("run-daily")
     daily.set_defaults(func=cmd_run_daily)
 
@@ -715,6 +774,14 @@ def build_parser() -> argparse.ArgumentParser:
     api_paper_recommendation = sub.add_parser("api-paper-recommendation")
     api_paper_recommendation.add_argument("paper_id")
     api_paper_recommendation.set_defaults(func=cmd_api_paper_recommendation)
+
+    api_paper_report = sub.add_parser("api-paper-report")
+    api_paper_report.add_argument("paper_id")
+    api_paper_report.set_defaults(func=cmd_api_paper_report)
+
+    api_paper_reports = sub.add_parser("api-paper-reports")
+    api_paper_reports.add_argument("--limit", default="300")
+    api_paper_reports.set_defaults(func=cmd_api_paper_reports)
 
     api_projects = sub.add_parser("api-projects")
     api_projects.set_defaults(func=cmd_api_projects)
@@ -760,6 +827,10 @@ def build_parser() -> argparse.ArgumentParser:
     api_jobs_history = sub.add_parser("api-jobs-history")
     api_jobs_history.add_argument("--limit", default="20")
     api_jobs_history.set_defaults(func=cmd_api_jobs_history)
+
+    api_reminders = sub.add_parser("api-reminders")
+    api_reminders.add_argument("--limit", default="5")
+    api_reminders.set_defaults(func=cmd_api_reminders)
 
     return parser
 

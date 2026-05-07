@@ -29,6 +29,7 @@ function HealthGrid({ health }) {
       <HealthItem label="Chunks" value={counts.chunks ?? 0} />
       <HealthItem label="Papers" value={counts.papers ?? 0} />
       <HealthItem label="Paper TXT" value={counts.paper_texts ?? 0} />
+      <HealthItem label="Full Reports" value={counts.paper_reading_reports ?? 0} />
       <HealthItem label="Paper Chunks" value={counts.paper_chunks ?? 0} />
       <HealthItem label="Matches" value={counts.matches ?? 0} />
       <HealthItem label="Latest job" value={health?.latest_job?.status || "none"} state={health?.latest_job?.status === "failed" ? "bad" : "neutral"} />
