@@ -213,6 +213,8 @@ export function ControlView({ setStatusMessage }) {
           onStartScheduler={startScheduler}
           onStopScheduler={stopScheduler}
           onRunNow={() => runJob("run-daily", "/api/jobs/run-now")}
+          onResumeDaily={() => runJob("resume-daily", "/api/jobs/resume-daily")}
+          onRetryDaily={() => runJob("retry-daily", "/api/jobs/retry-daily")}
           onRunJob={runJob}
         />
         <section className="panel">

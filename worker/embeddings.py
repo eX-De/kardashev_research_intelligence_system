@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import math
 import urllib.error
 import urllib.request
-from typing import Iterable
+from typing import Callable, Iterable
 import sqlite3
 
 from .config import Settings
@@ -54,7 +55,26 @@ def embed_text(settings: Settings, text: str) -> list[float] | None:
 
 
 def embed_many(settings: Settings, texts: Iterable[str]) -> list[list[float] | None]:
-    return [embed_text(settings, text) for text in texts]
+    values = list(texts)
+    concurrency = _embedding_concurrency(settings, len(values))
+    if concurrency <= 1:
+        return [embed_text(settings, text) for text in values]
+    results: list[list[float] | None] = [None] * len(values)
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = {
+            executor.submit(embed_text, settings, text): index
+            for index, text in enumerate(values)
+        }
+        for future in as_completed(futures):
+            results[futures[future]] = future.result()
+    return results
+
+
+def _embedding_concurrency(settings: Settings, item_count: int | None = None) -> int:
+    configured = max(1, min(8, int(getattr(settings, "embedding_concurrency", 1) or 1)))
+    if item_count is None:
+        return configured
+    return min(configured, max(1, item_count))
 
 
 def ensure_arxiv_chunk_embedding(
@@ -96,6 +116,7 @@ def ensure_missing_arxiv_chunk_embeddings(
     settings: Settings,
     limit: int | None = None,
     paper_ids: list[int] | tuple[int, ...] | set[int] | None = None,
+    progress_callback: Callable[[dict[str, int | str]], None] | None = None,
 ) -> dict[str, int]:
     if not settings.llm_embedding_model:
         return {"arxiv_chunk_embeddings_created": 0, "arxiv_chunk_embeddings_skipped": 0}
@@ -121,11 +142,27 @@ def ensure_missing_arxiv_chunk_embeddings(
     rows = conn.execute(sql, params).fetchall()
     created = 0
     skipped = 0
-    for row in rows:
-        embedding = embed_text(settings, row["text"])
+    total = len(rows)
+    concurrency = _embedding_concurrency(settings, total)
+
+    def emit_progress(index: int) -> None:
+        if not progress_callback:
+            return
+        progress_callback(
+            {
+                "stage": "embedding",
+                "current": index,
+                "total": total,
+                "arxiv_chunk_embeddings_created": created,
+                "arxiv_chunk_embeddings_skipped": skipped,
+            }
+        )
+
+    def store_embedding(row: sqlite3.Row, embedding: list[float] | None) -> None:
+        nonlocal created, skipped
         if embedding is None:
             skipped += 1
-            continue
+            return
         conn.execute(
             """
             INSERT OR REPLACE INTO arxiv_chunk_embeddings(arxiv_chunk_id, model, embedding_json, created_at)
@@ -134,6 +171,24 @@ def ensure_missing_arxiv_chunk_embeddings(
             (int(row["id"]), settings.llm_embedding_model, to_json(embedding), utc_now()),
         )
         created += 1
+
+    emit_progress(0)
+    if concurrency <= 1:
+        for index, row in enumerate(rows, start=1):
+            store_embedding(row, embed_text(settings, row["text"]))
+            emit_progress(index)
+    else:
+        executor = ThreadPoolExecutor(max_workers=concurrency)
+        futures = {
+            executor.submit(embed_text, settings, row["text"]): row
+            for row in rows
+        }
+        try:
+            for completed, future in enumerate(as_completed(futures), start=1):
+                store_embedding(futures[future], future.result())
+                emit_progress(completed)
+        finally:
+            executor.shutdown(cancel_futures=True)
     conn.commit()
     return {"arxiv_chunk_embeddings_created": created, "arxiv_chunk_embeddings_skipped": skipped}
 
@@ -170,3 +225,131 @@ def ensure_arxiv_paper_embedding(
     )
     conn.commit()
     return embedding
+
+
+def ensure_arxiv_paper_embeddings(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    papers: list[sqlite3.Row],
+) -> dict[int, list[float] | None]:
+    if not settings.llm_embedding_model:
+        return {int(paper["id"]): None for paper in papers}
+    paper_ids = [int(paper["id"]) for paper in papers]
+    if not paper_ids:
+        return {}
+    placeholders = ", ".join("?" for _ in paper_ids)
+    existing_rows = conn.execute(
+        f"""
+        SELECT paper_id, embedding_json
+        FROM arxiv_paper_embeddings
+        WHERE model = ?
+          AND paper_id IN ({placeholders})
+        """,
+        (settings.llm_embedding_model, *paper_ids),
+    ).fetchall()
+    embeddings: dict[int, list[float] | None] = {
+        paper_id: None
+        for paper_id in paper_ids
+    }
+    for row in existing_rows:
+        values = from_json(row["embedding_json"], [])
+        embeddings[int(row["paper_id"])] = [float(value) for value in values] if values else None
+
+    missing = [
+        paper
+        for paper in papers
+        if embeddings[int(paper["id"])] is None
+    ]
+    concurrency = _embedding_concurrency(settings, len(missing))
+
+    def paper_text(paper: sqlite3.Row) -> str:
+        return f"{paper['title']}\n\n{paper['summary']}"
+
+    def store_embedding(paper: sqlite3.Row, embedding: list[float] | None) -> None:
+        paper_id = int(paper["id"])
+        embeddings[paper_id] = embedding
+        if embedding is None:
+            return
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO arxiv_paper_embeddings(paper_id, model, embedding_json, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (paper_id, settings.llm_embedding_model, to_json(embedding), utc_now()),
+        )
+
+    if concurrency <= 1:
+        for paper in missing:
+            store_embedding(paper, embed_text(settings, paper_text(paper)))
+    else:
+        executor = ThreadPoolExecutor(max_workers=concurrency)
+        futures = {
+            executor.submit(embed_text, settings, paper_text(paper)): paper
+            for paper in missing
+        }
+        try:
+            for future in as_completed(futures):
+                store_embedding(futures[future], future.result())
+        finally:
+            executor.shutdown(cancel_futures=True)
+    conn.commit()
+    return embeddings
+
+
+def ensure_missing_note_chunk_embeddings(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    limit: int | None = None,
+) -> dict[str, int]:
+    if not settings.llm_embedding_model:
+        return {"note_chunk_embeddings_created": 0, "note_chunk_embeddings_skipped": 0}
+    sql = """
+        SELECT c.id, c.text
+        FROM research_chunks c
+        LEFT JOIN chunk_embeddings e
+          ON e.chunk_id = c.id AND e.model = ?
+        WHERE e.chunk_id IS NULL
+        ORDER BY c.id
+    """
+    params: list[object] = [settings.llm_embedding_model]
+    if limit:
+        sql += " LIMIT ?"
+        params.append(limit)
+    rows = conn.execute(sql, params).fetchall()
+    created = 0
+    skipped = 0
+    concurrency = _embedding_concurrency(settings, len(rows))
+
+    def store_embedding(row: sqlite3.Row, embedding: list[float] | None) -> None:
+        nonlocal created, skipped
+        if embedding is None:
+            skipped += 1
+            return
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO chunk_embeddings(chunk_id, model, embedding_json, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (int(row["id"]), settings.llm_embedding_model, to_json(embedding), utc_now()),
+        )
+        created += 1
+
+    if concurrency <= 1:
+        for row in rows:
+            store_embedding(row, embed_text(settings, row["text"]))
+    else:
+        executor = ThreadPoolExecutor(max_workers=concurrency)
+        futures = {
+            executor.submit(embed_text, settings, row["text"]): row
+            for row in rows
+        }
+        try:
+            for future in as_completed(futures):
+                store_embedding(futures[future], future.result())
+        finally:
+            executor.shutdown(cancel_futures=True)
+    conn.commit()
+    return {
+        "note_chunk_embeddings_created": created,
+        "note_chunk_embeddings_skipped": skipped,
+    }

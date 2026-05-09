@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .config import Settings
 from .db import clean_unicode, to_json, utc_now
-from .embeddings import embed_text
+from .embeddings import embed_text, ensure_missing_note_chunk_embeddings
 
 TAG_PATTERN = re.compile(r"(?<![\w/])#([^\s#]+)")
 HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
@@ -604,6 +604,7 @@ def sync_obsidian(conn: sqlite3.Connection, settings: Settings) -> dict[str, int
         conn.commit()
 
     project_notes_synced = _sync_project_folder_memberships(conn)
+    embedding_backfill = ensure_missing_note_chunk_embeddings(conn, settings)
     conn.commit()
 
     return {
@@ -614,4 +615,5 @@ def sync_obsidian(conn: sqlite3.Connection, settings: Settings) -> dict[str, int
         "project_notes_synced": project_notes_synced,
         "chunks_created": chunks_created,
         "embeddings_created": embeddings_created,
+        **embedding_backfill,
     }

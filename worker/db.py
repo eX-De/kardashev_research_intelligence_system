@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
+
+SQLITE_BUSY_TIMEOUT_MS = 30_000
+JOB_STALE_AFTER_SECONDS = 30 * 60
+LEGACY_JOB_STALE_AFTER_SECONDS = 15 * 60
 
 
 SCHEMA = """
@@ -149,7 +155,55 @@ CREATE TABLE IF NOT EXISTS job_runs (
   started_at TEXT NOT NULL,
   finished_at TEXT,
   message TEXT NOT NULL DEFAULT '',
+  pid INTEGER,
+  heartbeat_at TEXT,
   meta_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS daily_run_meta (
+  job_id INTEGER PRIMARY KEY REFERENCES job_runs(id) ON DELETE CASCADE,
+  source_job_id INTEGER REFERENCES job_runs(id) ON DELETE SET NULL,
+  arxiv_batch_id TEXT NOT NULL DEFAULT '',
+  mode TEXT NOT NULL DEFAULT 'run-daily',
+  settings_hash TEXT NOT NULL DEFAULT '',
+  searchers_json TEXT NOT NULL DEFAULT '[]',
+  embedding_model TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS daily_run_steps (
+  job_id INTEGER NOT NULL REFERENCES job_runs(id) ON DELETE CASCADE,
+  step_key TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  started_at TEXT,
+  finished_at TEXT,
+  error TEXT NOT NULL DEFAULT '',
+  meta_json TEXT NOT NULL DEFAULT '{}',
+  PRIMARY KEY(job_id, step_key)
+);
+
+CREATE TABLE IF NOT EXISTS daily_run_papers (
+  job_id INTEGER NOT NULL REFERENCES job_runs(id) ON DELETE CASCADE,
+  paper_id INTEGER NOT NULL REFERENCES arxiv_papers(id) ON DELETE CASCADE,
+  source TEXT NOT NULL DEFAULT 'new_arxiv',
+  retry_reason TEXT NOT NULL DEFAULT '',
+  published_at TEXT NOT NULL DEFAULT '',
+  prefilter_score REAL,
+  prefilter_rank INTEGER,
+  prefilter_passed INTEGER NOT NULL DEFAULT 0,
+  selected INTEGER NOT NULL DEFAULT 0,
+  selection_reason TEXT NOT NULL DEFAULT '',
+  text_status TEXT NOT NULL DEFAULT 'pending',
+  embedding_status TEXT NOT NULL DEFAULT 'pending',
+  global_match_status TEXT NOT NULL DEFAULT 'pending',
+  project_match_status TEXT NOT NULL DEFAULT 'pending',
+  judgment_status TEXT NOT NULL DEFAULT 'pending',
+  recommendation_status TEXT NOT NULL DEFAULT 'pending',
+  report_status TEXT NOT NULL DEFAULT 'pending',
+  archive_status TEXT NOT NULL DEFAULT 'pending',
+  error TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(job_id, paper_id)
 );
 
 CREATE TABLE IF NOT EXISTS app_settings (
@@ -285,6 +339,11 @@ CREATE INDEX IF NOT EXISTS idx_arxiv_paper_tombstones_reason ON arxiv_paper_tomb
 CREATE INDEX IF NOT EXISTS idx_arxiv_text_chunks_paper ON arxiv_text_chunks(paper_id, chunk_index);
 CREATE INDEX IF NOT EXISTS idx_paper_prefilter_runs_paper ON paper_prefilter_runs(paper_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_matches_paper_score ON matches(paper_id, score DESC);
+CREATE INDEX IF NOT EXISTS idx_daily_run_meta_mode ON daily_run_meta(mode, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_daily_run_steps_status ON daily_run_steps(job_id, status);
+CREATE INDEX IF NOT EXISTS idx_daily_run_papers_selected ON daily_run_papers(job_id, selected, prefilter_rank);
+CREATE INDEX IF NOT EXISTS idx_daily_run_papers_stage ON daily_run_papers(job_id, text_status, global_match_status, project_match_status);
+CREATE INDEX IF NOT EXISTS idx_daily_run_papers_paper ON daily_run_papers(paper_id);
 CREATE INDEX IF NOT EXISTS idx_research_projects_status ON research_projects(status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_project_paper_matches_project_score ON project_paper_matches(project_id, score DESC);
 CREATE INDEX IF NOT EXISTS idx_project_paper_matches_paper ON project_paper_matches(paper_id);
@@ -295,6 +354,144 @@ CREATE INDEX IF NOT EXISTS idx_project_paper_recommendations_paper ON project_pa
 CREATE INDEX IF NOT EXISTS idx_paper_reading_reports_status ON paper_reading_reports(status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_project_artifacts_project ON project_artifacts(project_id, updated_at DESC);
 """
+
+REQUIRED_TABLES = {
+    "obsidian_notes",
+    "research_chunks",
+    "chunk_embeddings",
+    "arxiv_papers",
+    "arxiv_paper_tombstones",
+    "arxiv_text_chunks",
+    "arxiv_chunk_embeddings",
+    "arxiv_paper_embeddings",
+    "paper_prefilter_runs",
+    "matches",
+    "user_feedback",
+    "job_runs",
+    "daily_run_meta",
+    "daily_run_steps",
+    "daily_run_papers",
+    "app_settings",
+    "research_projects",
+    "project_papers",
+    "project_paper_matches",
+    "project_paper_judgments",
+    "project_paper_recommendations",
+    "paper_reading_reports",
+    "project_notes",
+    "project_artifacts",
+}
+
+REQUIRED_INDEXES = {
+    "idx_research_chunks_note",
+    "idx_arxiv_papers_published",
+    "idx_arxiv_paper_tombstones_reason",
+    "idx_arxiv_text_chunks_paper",
+    "idx_paper_prefilter_runs_paper",
+    "idx_matches_paper_score",
+    "idx_daily_run_meta_mode",
+    "idx_daily_run_steps_status",
+    "idx_daily_run_papers_selected",
+    "idx_daily_run_papers_stage",
+    "idx_daily_run_papers_paper",
+    "idx_research_projects_status",
+    "idx_research_projects_obsidian_note",
+    "idx_project_paper_matches_project_score",
+    "idx_project_paper_matches_paper",
+    "idx_project_paper_judgments_project_action",
+    "idx_project_paper_judgments_paper",
+    "idx_project_paper_recommendations_state",
+    "idx_project_paper_recommendations_paper",
+    "idx_paper_reading_reports_status",
+    "idx_project_artifacts_project",
+}
+
+REQUIRED_COLUMNS = {
+    "arxiv_papers": {
+        "pdf_path",
+        "text_path",
+        "text_extracted_at",
+        "text_status",
+        "text_error",
+        "text_char_count",
+    },
+    "matches": {"arxiv_chunk_id"},
+    "project_paper_matches": {"rank_score", "quality_score"},
+    "research_projects": {
+        "obsidian_project_path",
+        "obsidian_output_dir",
+        "obsidian_note_id",
+        "obsidian_folder",
+        "obsidian_status_tag",
+        "discovery_source",
+        "source_tags_json",
+        "arxiv_categories_json",
+        "automation_json",
+    },
+    "project_paper_recommendations": {
+        "importance",
+        "relation_type",
+        "reason",
+        "obsidian_path",
+        "attachment_path",
+        "source_judgment_hash",
+        "synced_at",
+    },
+    "paper_reading_reports": {
+        "prompt",
+        "system_prompt",
+        "model_provider_id",
+        "model",
+        "source_text_hash",
+        "source_project_ids_json",
+        "report_markdown",
+        "error_message",
+        "started_at",
+        "finished_at",
+    },
+    "job_runs": {
+        "pid",
+        "heartbeat_at",
+    },
+    "daily_run_meta": {
+        "source_job_id",
+        "arxiv_batch_id",
+        "mode",
+        "settings_hash",
+        "searchers_json",
+        "embedding_model",
+        "created_at",
+    },
+    "daily_run_steps": {
+        "status",
+        "started_at",
+        "finished_at",
+        "error",
+        "meta_json",
+    },
+    "daily_run_papers": {
+        "source",
+        "retry_reason",
+        "published_at",
+        "prefilter_score",
+        "prefilter_rank",
+        "prefilter_passed",
+        "selected",
+        "selection_reason",
+        "text_status",
+        "embedding_status",
+        "global_match_status",
+        "project_match_status",
+        "judgment_status",
+        "recommendation_status",
+        "report_status",
+        "archive_status",
+        "error",
+        "updated_at",
+    },
+}
+
+OBSOLETE_TABLES = {"llm_explanations"}
 
 
 def utc_now() -> str:
@@ -335,19 +532,85 @@ def from_json(value: str | None, default: Any) -> Any:
 
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
     conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA foreign_keys = ON")
+    _enable_wal_if_possible(conn, db_path)
     return conn
 
 
 def init_db(conn: sqlite3.Connection) -> None:
+    if _schema_current(conn):
+        return
     conn.executescript(SCHEMA)
     _migrate_db(conn)
     conn.commit()
 
 
+def _enable_wal_if_possible(conn: sqlite3.Connection, db_path: Path) -> None:
+    if str(db_path) == ":memory:":
+        return
+    try:
+        mode_row = conn.execute("PRAGMA journal_mode").fetchone()
+        mode = str(mode_row[0] if mode_row else "").lower()
+        if mode != "wal":
+            conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+    except sqlite3.OperationalError as exc:
+        if "locked" not in str(exc).lower():
+            raise
+
+
+def _sqlite_names(conn: sqlite3.Connection, object_type: str) -> set[str]:
+    return {
+        str(row["name"])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = ?",
+            (object_type,),
+        ).fetchall()
+    }
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {
+        str(row["name"])
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+
+
+def _schema_current(conn: sqlite3.Connection) -> bool:
+    tables = _sqlite_names(conn, "table")
+    if not REQUIRED_TABLES.issubset(tables):
+        return False
+    if OBSOLETE_TABLES.intersection(tables):
+        return False
+    indexes = _sqlite_names(conn, "index")
+    if not REQUIRED_INDEXES.issubset(indexes):
+        return False
+    for table, required_columns in REQUIRED_COLUMNS.items():
+        if not required_columns.issubset(_table_columns(conn, table)):
+            return False
+    return True
+
+
 def _migrate_db(conn: sqlite3.Connection) -> None:
+    job_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(job_runs)").fetchall()
+    }
+    job_migrations = {
+        "pid": "ALTER TABLE job_runs ADD COLUMN pid INTEGER",
+        "heartbeat_at": "ALTER TABLE job_runs ADD COLUMN heartbeat_at TEXT",
+    }
+    for column, sql in job_migrations.items():
+        if column not in job_columns:
+            try:
+                conn.execute(sql)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+
     columns = {
         row["name"]
         for row in conn.execute("PRAGMA table_info(arxiv_papers)").fetchall()
@@ -520,20 +783,118 @@ def update_job_meta(
     conn.execute(
         """
         UPDATE job_runs
-        SET message = ?, meta_json = ?
+        SET message = ?, meta_json = ?, heartbeat_at = ?
         WHERE id = ?
         """,
-        (message, to_json(meta), job_id),
+        (message, to_json(meta), utc_now(), job_id),
     )
     conn.commit()
+
+
+def _parse_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _process_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    if os.name == "nt":
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return True
+        output = result.stdout.strip()
+        return str(pid) in output and "No tasks" not in output and "INFO:" not in output
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def mark_stale_job_runs(
+    conn: sqlite3.Connection,
+    stale_after_seconds: int = JOB_STALE_AFTER_SECONDS,
+    legacy_stale_after_seconds: int = LEGACY_JOB_STALE_AFTER_SECONDS,
+) -> dict[str, int]:
+    now = datetime.now(timezone.utc)
+    now_text = now.isoformat(timespec="seconds")
+    rows = conn.execute(
+        """
+        SELECT id, job_type, started_at, message, pid, heartbeat_at, meta_json
+        FROM job_runs
+        WHERE status = 'running'
+        ORDER BY id
+        """
+    ).fetchall()
+    marked = 0
+    for row in rows:
+        pid = int(row["pid"] or 0)
+        started = _parse_timestamp(row["started_at"])
+        reason = ""
+        if pid:
+            if not _process_is_alive(pid):
+                reason = f"process {pid} is no longer running"
+        elif started and now - started > timedelta(seconds=legacy_stale_after_seconds):
+            reason = f"legacy running job older than {legacy_stale_after_seconds} seconds"
+        if not reason:
+            continue
+        meta = from_json(row["meta_json"], {})
+        if not isinstance(meta, dict):
+            meta = {}
+        meta["stale"] = {
+            "marked_at": now_text,
+            "reason": reason,
+        }
+        previous_message = str(row["message"] or "").strip()
+        message = f"Marked stale: {reason}"
+        if previous_message:
+            message = f"{message}; previous message: {previous_message[:500]}"
+        conn.execute(
+            """
+            UPDATE job_runs
+            SET status = 'failed',
+                finished_at = ?,
+                message = ?,
+                heartbeat_at = ?,
+                meta_json = ?
+            WHERE id = ? AND status = 'running'
+            """,
+            (now_text, message, now_text, to_json(meta), int(row["id"])),
+        )
+        marked += 1
+    if marked:
+        conn.commit()
+    return {"stale_jobs_checked": len(rows), "stale_jobs_marked": marked}
 
 
 @contextmanager
 def job_run(conn: sqlite3.Connection, job_type: str) -> Iterator[int]:
     started = utc_now()
     cur = conn.execute(
-        "INSERT INTO job_runs(job_type, status, started_at) VALUES (?, 'running', ?)",
-        (job_type, started),
+        """
+        INSERT INTO job_runs(job_type, status, started_at, pid, heartbeat_at)
+        VALUES (?, 'running', ?, ?, ?)
+        """,
+        (job_type, started, os.getpid(), started),
     )
     job_id = int(cur.lastrowid)
     conn.commit()
@@ -543,10 +904,10 @@ def job_run(conn: sqlite3.Connection, job_type: str) -> Iterator[int]:
         conn.execute(
             """
             UPDATE job_runs
-            SET status = 'failed', finished_at = ?, message = ?
+            SET status = 'failed', finished_at = ?, message = ?, heartbeat_at = ?
             WHERE id = ?
             """,
-            (utc_now(), str(exc), job_id),
+            (utc_now(), str(exc), utc_now(), job_id),
         )
         conn.commit()
         raise
@@ -554,9 +915,9 @@ def job_run(conn: sqlite3.Connection, job_type: str) -> Iterator[int]:
         conn.execute(
             """
             UPDATE job_runs
-            SET status = 'completed', finished_at = ?
+            SET status = 'completed', finished_at = ?, heartbeat_at = ?
             WHERE id = ?
             """,
-            (utc_now(), job_id),
+            (utc_now(), utc_now(), job_id),
         )
         conn.commit()

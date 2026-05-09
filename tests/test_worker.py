@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
+import json
+import threading
+import time
 import unittest
 import urllib.error
 from datetime import date, datetime, timedelta, timezone
@@ -21,11 +24,24 @@ from worker.api import (
     update_paper_recommendation,
 )
 from worker.arxiv_archive import archive_zero_match_papers
-from worker.arxiv_client import fetch_arxiv
+from worker.arxiv_client import _fetch_page, fetch_arxiv
 from worker.arxiv_text import cache_arxiv_full_texts, download_pdf, extract_pdf_text_to_file, safe_arxiv_filename
-from worker.cli import _daily_papers_for_run, _prefilter_daily_papers
-from worker.db import clean_unicode, init_db, to_json
-from worker.embeddings import ensure_arxiv_chunk_embedding
+from worker.cli import (
+    _daily_papers_for_run,
+    _delete_run_record,
+    _latest_resumable_daily_run,
+    _prefilter_daily_papers,
+    _retry_papers_for_run,
+    _selected_papers_from_existing_prefilter,
+    _snapshot_daily_papers,
+)
+from worker.db import clean_unicode, init_db, mark_stale_job_runs, to_json
+from worker.embeddings import (
+    ensure_arxiv_chunk_embedding,
+    ensure_arxiv_paper_embeddings,
+    ensure_missing_note_chunk_embeddings,
+    ensure_missing_arxiv_chunk_embeddings,
+)
 from worker.llm import _project_judgment_prompt, generate_missing_project_judgments
 from worker.obsidian import parse_note
 from worker.obsidian import sync_obsidian
@@ -59,6 +75,7 @@ def test_settings() -> Settings:
         arxiv_cache_full_text=True,
         arxiv_pdf_dir=Path(".test-tmp/arxiv_pdfs"),
         arxiv_text_dir=Path(".test-tmp/arxiv_text"),
+        retry_daily_max_results=100,
         rag_score_threshold=0.1,
         rag_top_k=3,
         rag_searchers=["keyword_search", "front_page_search"],
@@ -73,6 +90,7 @@ def test_settings() -> Settings:
         llm_chat_model="",
         llm_embedding_provider_id="",
         llm_embedding_model="",
+        embedding_concurrency=2,
     )
 
 
@@ -118,6 +136,339 @@ def chat_settings(settings: Settings) -> Settings:
 
 
 class WorkerTests(unittest.TestCase):
+    def test_init_db_skips_schema_script_when_schema_is_current(self) -> None:
+        class TrackingConnection(sqlite3.Connection):
+            executescript_calls = 0
+
+            def executescript(self, sql: str):
+                self.executescript_calls += 1
+                return super().executescript(sql)
+
+        conn = sqlite3.connect(":memory:", factory=TrackingConnection)
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        self.assertEqual(conn.executescript_calls, 1)
+
+        init_db(conn)
+        self.assertEqual(conn.executescript_calls, 1)
+
+    def test_mark_stale_legacy_job_runs_preserves_resume_meta(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO job_runs(job_type, status, started_at, message, meta_json)
+            VALUES ('run-daily', 'running', '2000-01-01T00:00:00+00:00', 'Daily run 4/11', ?)
+            """,
+            (to_json({"arxiv_batch_id": "batch-1"}),),
+        )
+        conn.commit()
+
+        result = mark_stale_job_runs(conn, legacy_stale_after_seconds=1)
+        row = conn.execute("SELECT status, finished_at, message, meta_json FROM job_runs").fetchone()
+        meta = json.loads(row["meta_json"])
+
+        self.assertEqual(result["stale_jobs_marked"], 1)
+        self.assertEqual(row["status"], "failed")
+        self.assertIn("Marked stale", row["message"])
+        self.assertEqual(meta["arxiv_batch_id"], "batch-1")
+        self.assertIn("stale", meta)
+        self.assertTrue(row["finished_at"])
+
+    def test_delete_run_record_removes_snapshot_only(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO job_runs(job_type, status, started_at, finished_at, message, meta_json)
+            VALUES ('run-daily', 'failed', '2026-05-08T00:00:00+00:00', '2026-05-08T00:05:00+00:00', 'failed', '{}')
+            """
+        )
+        job_id = int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+        conn.execute(
+            """
+            INSERT INTO arxiv_papers(
+              arxiv_id, title, authors_json, summary, categories_json,
+              published_at, updated_at, link, pdf_link, fetched_batch_id, created_at
+            )
+            VALUES ('2605.00050', 'Kept Paper', '[]', 'summary', '["cs.AI"]',
+                    '2026-05-08T00:00:00Z', '2026-05-08T00:00:00Z',
+                    'https://arxiv.org/abs/2605.00050', 'https://arxiv.org/pdf/2605.00050',
+                    'batch-1', 'now')
+            """
+        )
+        paper_id = int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+        conn.execute(
+            """
+            INSERT INTO daily_run_meta(job_id, arxiv_batch_id, mode, settings_hash, searchers_json, embedding_model, created_at)
+            VALUES (?, 'batch-1', 'run-daily', 'hash', '[]', '', 'now')
+            """,
+            (job_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO daily_run_steps(job_id, step_key, status, started_at, finished_at, meta_json)
+            VALUES (?, 'snapshot', 'completed', 'now', 'now', '{}')
+            """,
+            (job_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO daily_run_papers(job_id, paper_id, source, published_at, selected, updated_at)
+            VALUES (?, ?, 'new_arxiv', '2026-05-08T00:00:00Z', 1, 'now')
+            """,
+            (job_id, paper_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO paper_prefilter_runs(paper_id, model, score, rank, passed, reason, top_chunks_json, created_at)
+            VALUES (?, 'prefilter', 0.9, 1, 1, 'kept', '[]', 'now')
+            """,
+            (paper_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO obsidian_notes(path, title, frontmatter_json, tags_json, sha256, mtime, indexed_at)
+            VALUES ('Research/DeleteRun.md', 'Delete Run', '{}', '[]', 'hash', 1, 'now')
+            """
+        )
+        note_id = int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+        conn.execute(
+            """
+            INSERT INTO research_chunks(note_id, chunk_index, heading, text, token_count, source, created_at)
+            VALUES (?, 0, 'Context', 'matched context', 2, 'obsidian', 'now')
+            """,
+            (note_id,),
+        )
+        chunk_id = int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+        conn.execute(
+            """
+            INSERT INTO matches(paper_id, chunk_id, score, searchers_json, evidence_json, created_at)
+            VALUES (?, ?, 0.8, '["embedding_search"]', '{}', 'now')
+            """,
+            (paper_id, chunk_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO paper_reading_reports(paper_id, status, created_at, updated_at)
+            VALUES (?, 'done', 'now', 'now')
+            """,
+            (paper_id,),
+        )
+        conn.commit()
+
+        result = _delete_run_record(conn, job_id)
+
+        self.assertEqual(result["deleted_job_runs"], 1)
+        self.assertEqual(result["deleted_daily_run_meta"], 1)
+        self.assertEqual(result["deleted_daily_run_steps"], 1)
+        self.assertEqual(result["deleted_daily_run_papers"], 1)
+        self.assertEqual(result["products_deleted"], 0)
+        for table in ("job_runs", "daily_run_meta", "daily_run_steps", "daily_run_papers"):
+            count = conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()["count"]
+            self.assertEqual(count, 0)
+        for table in ("arxiv_papers", "paper_prefilter_runs", "matches", "paper_reading_reports"):
+            count = conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()["count"]
+            self.assertEqual(count, 1)
+
+    def test_delete_run_record_dry_run_does_not_delete(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO job_runs(job_type, status, started_at, meta_json)
+            VALUES ('run-daily', 'failed', '2026-05-08T00:00:00+00:00', '{}')
+            """
+        )
+        job_id = int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+        conn.execute(
+            """
+            INSERT INTO daily_run_meta(job_id, arxiv_batch_id, mode, settings_hash, searchers_json, embedding_model, created_at)
+            VALUES (?, 'batch-1', 'run-daily', 'hash', '[]', '', 'now')
+            """,
+            (job_id,),
+        )
+        conn.commit()
+
+        result = _delete_run_record(conn, job_id, dry_run=True)
+
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(result["would_delete_job_runs"], 1)
+        self.assertEqual(result["would_delete_daily_run_meta"], 1)
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM job_runs").fetchone()["count"], 1)
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM daily_run_meta").fetchone()["count"], 1)
+
+    def test_delete_run_record_refuses_running_without_force(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO job_runs(job_type, status, started_at, meta_json)
+            VALUES ('run-daily', 'running', '2026-05-08T00:00:00+00:00', '{}')
+            """
+        )
+        job_id = int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+        conn.commit()
+
+        with self.assertRaisesRegex(RuntimeError, "running"):
+            _delete_run_record(conn, job_id)
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM job_runs").fetchone()["count"], 1)
+
+        result = _delete_run_record(conn, job_id, force=True)
+
+        self.assertEqual(result["deleted_job_runs"], 1)
+        self.assertTrue(result["force_used"])
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM job_runs").fetchone()["count"], 0)
+
+    def test_latest_resumable_daily_run_ignores_failures_before_completion(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO job_runs(job_type, status, started_at, finished_at, meta_json)
+            VALUES ('run-daily', 'failed', '2026-05-08T00:00:00+00:00', '2026-05-08T00:10:00+00:00', ?)
+            """,
+            (to_json({"arxiv_batch_id": "old-batch"}),),
+        )
+        conn.execute(
+            """
+            INSERT INTO job_runs(job_type, status, started_at, finished_at, meta_json)
+            VALUES ('run-daily', 'completed', '2026-05-08T00:20:00+00:00', '2026-05-08T00:30:00+00:00', ?)
+            """,
+            (to_json({"arxiv_batch_id": "completed-batch"}),),
+        )
+        conn.commit()
+
+        self.assertIsNone(_latest_resumable_daily_run(conn))
+
+    def test_latest_resumable_daily_run_uses_persisted_snapshot(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO job_runs(job_type, status, started_at, finished_at, meta_json)
+            VALUES ('run-daily', 'failed', '2026-05-08T00:00:00+00:00', '2026-05-08T00:10:00+00:00', '{}')
+            """
+        )
+        job_id = int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+        conn.execute(
+            """
+            INSERT INTO arxiv_papers(
+              arxiv_id, title, authors_json, summary, categories_json,
+              published_at, updated_at, link, pdf_link, fetched_batch_id, created_at
+            )
+            VALUES ('2605.00001', 'Paper', '[]', 'summary', '["cs.CL"]',
+                    '2026-05-08T00:00:00Z', '2026-05-08T00:00:00Z',
+                    'https://arxiv.org/abs/2605.00001', 'https://arxiv.org/pdf/2605.00001',
+                    'batch-1', 'now')
+            """
+        )
+        paper_id = int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+        conn.execute(
+            """
+            INSERT INTO daily_run_meta(job_id, arxiv_batch_id, mode, settings_hash, searchers_json, embedding_model, created_at)
+            VALUES (?, 'batch-1', 'run-daily', 'hash', '[]', '', 'now')
+            """,
+            (job_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO daily_run_papers(job_id, paper_id, source, published_at, selected, updated_at)
+            VALUES (?, ?, 'new_arxiv', '2026-05-08T00:00:00Z', 1, 'now')
+            """,
+            (job_id, paper_id),
+        )
+        conn.commit()
+
+        result = _latest_resumable_daily_run(conn)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["id"], job_id)
+        self.assertEqual(result["meta"]["arxiv_batch_id"], "batch-1")
+
+    def test_fetch_page_retries_429(self) -> None:
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b"<feed />"
+
+        error = urllib.error.HTTPError(
+            url="https://export.arxiv.org/api/query",
+            code=429,
+            msg="Too Many Requests",
+            hdrs={"Retry-After": "1"},
+            fp=None,
+        )
+
+        with patch("worker.arxiv_client.urllib.request.urlopen", side_effect=[error, Response()]):
+            with patch("worker.arxiv_client.time.sleep") as sleep:
+                self.assertEqual(_fetch_page("cat:cs.CL", 0, 1), "<feed />")
+                sleep.assert_called_once_with(1)
+
+    def test_resume_prefilter_reconstructs_selected_papers(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        now = "2026-05-08T00:00:00Z"
+        for arxiv_id, title in (("2605.00001", "Passed"), ("2605.00002", "Skipped")):
+            conn.execute(
+                """
+                INSERT INTO arxiv_papers(
+                  arxiv_id, title, authors_json, summary, categories_json,
+                  published_at, updated_at, link, pdf_link, fetched_batch_id, created_at
+                )
+                VALUES (?, ?, '[]', 'summary', '["cs.CL"]', ?, ?, ?, ?, 'batch-1', ?)
+                """,
+                (
+                    arxiv_id,
+                    title,
+                    now,
+                    now,
+                    f"https://arxiv.org/abs/{arxiv_id}",
+                    f"https://arxiv.org/pdf/{arxiv_id}",
+                    now,
+                ),
+            )
+        rows = conn.execute("SELECT id, arxiv_id FROM arxiv_papers ORDER BY arxiv_id").fetchall()
+        conn.execute(
+            """
+            INSERT INTO paper_prefilter_runs(
+              paper_id, model, score, rank, passed, reason, top_chunks_json, created_at
+            )
+            VALUES (?, 'model', 0.9, 1, 1, 'score', '[]', ?)
+            """,
+            (int(rows[0]["id"]), now),
+        )
+        conn.execute(
+            """
+            INSERT INTO paper_prefilter_runs(
+              paper_id, model, score, rank, passed, reason, top_chunks_json, created_at
+            )
+            VALUES (?, 'model', 0.1, 2, 0, 'below_threshold', '[]', ?)
+            """,
+            (int(rows[1]["id"]), now),
+        )
+        conn.commit()
+
+        result = _selected_papers_from_existing_prefilter(conn, test_settings(), "batch-1")
+
+        self.assertIsNotNone(result)
+        selected, stats = result
+        self.assertEqual([paper["arxiv_id"] for paper in selected], ["2605.00001"])
+        self.assertEqual(stats["prefilter_passed"], 1)
+        self.assertEqual(stats["prefilter_skipped"], 1)
+
     def test_fetch_arxiv_stops_when_page_reaches_lookback_cutoff(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -243,7 +594,7 @@ class WorkerTests(unittest.TestCase):
         sleep.assert_called_once_with(20)
         self.assertTrue(target.exists())
 
-    def test_daily_papers_skip_previously_completed_papers(self) -> None:
+    def test_daily_papers_only_use_current_batch(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_db(conn)
@@ -331,14 +682,125 @@ class WorkerTests(unittest.TestCase):
         papers, result = _daily_papers_for_run(conn, test_settings(), "current")
         paper_ids = {int(paper["id"]) for paper in papers}
 
-        self.assertEqual(paper_ids, {new_id, retry_old_id, missing_chunks_old_id, missing_match_old_id})
+        self.assertEqual(paper_ids, {new_id})
         self.assertEqual(result["daily_new_papers"], 1)
-        self.assertEqual(result["daily_retry_papers"], 3)
-        self.assertEqual(result["daily_retry_text_papers"], 2)
-        self.assertEqual(result["daily_retry_global_match_papers"], 1)
-        self.assertEqual(result["daily_candidate_papers"], 4)
+        self.assertEqual(result["daily_retry_papers"], 0)
+        self.assertEqual(result["daily_candidate_papers"], 1)
 
-    def test_daily_prefilter_bypasses_resume_papers_missing_ranking(self) -> None:
+    def test_retry_daily_papers_collect_historical_gaps(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+
+        def insert_paper(arxiv_id: str, text_status: str, text_path: str = "") -> int:
+            conn.execute(
+                """
+                INSERT INTO arxiv_papers(
+                  arxiv_id, title, authors_json, summary, categories_json, published_at,
+                  updated_at, link, pdf_link, text_path, text_status, fetched_batch_id, created_at
+                )
+                VALUES (?, ?, '[]', 'Abstract', '["cs.CL"]',
+                  '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', ?, ?,
+                  ?, ?, 'old', 'now')
+                """,
+                (
+                    arxiv_id,
+                    arxiv_id,
+                    f"https://arxiv.org/abs/{arxiv_id}",
+                    f"https://arxiv.org/pdf/{arxiv_id}",
+                    text_path,
+                    text_status,
+                ),
+            )
+            return int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+
+        missing_text_id = insert_paper("2604.10001", "pending")
+        missing_embedding_id = insert_paper("2604.10002", "complete", "paper.txt")
+        tombstoned_id = insert_paper("2604.10003", "pending")
+        conn.execute(
+            """
+            INSERT INTO arxiv_text_chunks(paper_id, chunk_index, source, text, token_count, char_count, created_at)
+            VALUES (?, 0, 'full_text', 'chunk missing embedding', 3, 23, 'now')
+            """,
+            (missing_embedding_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO arxiv_paper_tombstones(
+              arxiv_id, title, authors_json, summary, categories_json, published_at,
+              updated_at, link, pdf_link, reason, original_fetched_batch_id, tombstoned_at
+            )
+            SELECT arxiv_id, title, authors_json, summary, categories_json, published_at,
+                   updated_at, link, pdf_link, 'no_match', fetched_batch_id, 'now'
+            FROM arxiv_papers
+            WHERE id = ?
+            """,
+            (tombstoned_id,),
+        )
+        conn.commit()
+
+        papers, info, result = _retry_papers_for_run(conn, test_settings())
+        paper_ids = {int(paper["id"]) for paper in papers}
+
+        self.assertIn(missing_text_id, paper_ids)
+        self.assertIn(missing_embedding_id, paper_ids)
+        self.assertNotIn(tombstoned_id, paper_ids)
+        self.assertEqual(info[missing_text_id]["retry_reason"], "retry_missing_text")
+        self.assertEqual(info[missing_embedding_id]["retry_reason"], "retry_missing_embedding")
+        self.assertEqual(result["daily_new_papers"], 0)
+        self.assertEqual(result["daily_retry_papers"], 2)
+
+    def test_snapshot_daily_papers_persists_selection(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO job_runs(job_type, status, started_at, meta_json)
+            VALUES ('run-daily', 'running', 'now', '{}')
+            """
+        )
+        job_id = int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+        for arxiv_id in ("2605.20001", "2605.20002"):
+            conn.execute(
+                """
+                INSERT INTO arxiv_papers(
+                  arxiv_id, title, authors_json, summary, categories_json,
+                  published_at, updated_at, link, pdf_link, fetched_batch_id, created_at
+                )
+                VALUES (?, ?, '[]', 'summary', '["cs.CL"]',
+                        '2026-05-08T00:00:00Z', '2026-05-08T00:00:00Z',
+                        ?, ?, 'batch-1', 'now')
+                """,
+                (
+                    arxiv_id,
+                    arxiv_id,
+                    f"https://arxiv.org/abs/{arxiv_id}",
+                    f"https://arxiv.org/pdf/{arxiv_id}",
+                ),
+            )
+        papers = conn.execute("SELECT * FROM arxiv_papers ORDER BY arxiv_id").fetchall()
+        settings = Settings(
+            **{
+                **test_settings().__dict__,
+                "rag_prefilter_enabled": False,
+                "rag_prefilter_max_keep": 1,
+            }
+        )
+
+        selected, result = _snapshot_daily_papers(conn, settings, job_id, list(papers))
+        rows = conn.execute(
+            "SELECT paper_id, selected, source FROM daily_run_papers WHERE job_id = ? ORDER BY paper_id",
+            (job_id,),
+        ).fetchall()
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(result["daily_candidate_papers"], 2)
+        self.assertEqual(result["daily_selected_papers"], 1)
+        self.assertEqual([int(row["selected"]) for row in rows], [1, 0])
+        self.assertEqual({row["source"] for row in rows}, {"new_arxiv"})
+
+    def test_daily_prefilter_does_not_bypass_historical_retry_papers(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_db(conn)
@@ -375,10 +837,10 @@ class WorkerTests(unittest.TestCase):
 
         result = _prefilter_daily_papers(conn, settings, "current", selected)
 
-        self.assertEqual([int(paper["id"]) for paper in selected], [int(paper_id)])
-        self.assertEqual(result["daily_retry_global_match_papers"], 1)
-        self.assertEqual(result["prefilter_resume_bypassed"], 1)
-        self.assertEqual(result["prefilter_passed"], 1)
+        self.assertEqual([int(paper["id"]) for paper in selected], [])
+        self.assertEqual(result["daily_retry_papers"], 0)
+        self.assertEqual(result["prefilter_resume_bypassed"], 0)
+        self.assertEqual(result["prefilter_passed"], 0)
 
     def test_archive_zero_match_papers_keeps_only_tombstone_metadata(self) -> None:
         conn = sqlite3.connect(":memory:")
@@ -1099,15 +1561,18 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(payload["scheduler_enabled"])
         self.assertFalse(payload["run_daily_on_startup_enabled"])
 
-    def test_paper_report_queue_concurrency_is_configurable(self) -> None:
+    def test_worker_concurrency_settings_are_configurable(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_db(conn)
 
-        save_app_settings(conn, {"paper_report_queue_concurrency": 3})
+        save_app_settings(conn, {"paper_report_queue_concurrency": 3, "embedding_concurrency": 4})
         payload = get_app_settings(conn, test_settings())["settings"]
+        applied = apply_stored_settings(conn, test_settings())
 
         self.assertEqual(payload["paper_report_queue_concurrency"], 3)
+        self.assertEqual(payload["embedding_concurrency"], 4)
+        self.assertEqual(applied.embedding_concurrency, 4)
 
     def test_stored_path_settings_remain_paths(self) -> None:
         conn = sqlite3.connect(":memory:")
@@ -1187,6 +1652,38 @@ class WorkerTests(unittest.TestCase):
         text = project_note.read_text(encoding="utf-8")
         self.assertIn("Status/已完成", text)
         self.assertNotIn("Status/进行中", text)
+
+    def test_sync_obsidian_backfills_missing_chunk_embeddings_for_skipped_notes(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        vault = Path.cwd() / ".test-tmp" / "embedding-backfill-vault"
+        note = vault / "Research" / "Stable.md"
+        note.parent.mkdir(parents=True, exist_ok=True)
+        note.write_text("# Stable\nExisting note chunk should receive embedding later.", encoding="utf-8")
+        settings = Settings(
+            **{
+                **embedding_settings().__dict__,
+                "obsidian_vault_path": vault,
+                "obsidian_include_dirs": ["Research"],
+                "embedding_concurrency": 2,
+            }
+        )
+
+        with patch("worker.obsidian.embed_text", return_value=None):
+            first = sync_obsidian(conn, settings)
+
+        self.assertEqual(first["notes_indexed"], 1)
+        self.assertEqual(first["embeddings_created"], 0)
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM chunk_embeddings").fetchone()["count"], 0)
+
+        with patch("worker.embeddings.embed_text", return_value=[0.1, 0.2]):
+            second = sync_obsidian(conn, settings)
+
+        self.assertEqual(second["notes_indexed"], 0)
+        self.assertEqual(second["notes_skipped"], 1)
+        self.assertEqual(second["note_chunk_embeddings_created"], 1)
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM chunk_embeddings").fetchone()["count"], 1)
 
     def test_obsidian_include_dirs_accept_backslashes(self) -> None:
         conn = sqlite3.connect(":memory:")
@@ -1847,6 +2344,151 @@ class WorkerTests(unittest.TestCase):
             "embedding cache text",
         )
         self.assertEqual(embedding, [0.1, 0.2])
+
+    def test_missing_arxiv_chunk_embeddings_use_configured_concurrency(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO arxiv_papers(
+              arxiv_id, title, authors_json, summary, categories_json, published_at,
+              updated_at, link, pdf_link, fetched_batch_id, created_at
+            )
+            VALUES ('2501.00003', 'Parallel embedding', '[]', 'Abstract', '["cs.CL"]',
+              '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'https://arxiv.org/abs/2501.00003',
+              'https://arxiv.org/pdf/2501.00003', 'batch', 'now')
+            """
+        )
+        paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
+        for index in range(6):
+            conn.execute(
+                """
+                INSERT INTO arxiv_text_chunks(paper_id, chunk_index, source, text, token_count, char_count, created_at)
+                VALUES (?, ?, 'full_text', ?, 3, 20, 'now')
+                """,
+                (paper_id, index, f"parallel embedding text {index}"),
+            )
+        conn.commit()
+        settings = Settings(**{**embedding_settings().__dict__, "embedding_concurrency": 3})
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def fake_embed_text(_settings: Settings, text: str) -> list[float]:
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.02)
+            with lock:
+                active -= 1
+            return [float(len(text))]
+
+        with patch("worker.embeddings.embed_text", side_effect=fake_embed_text):
+            result = ensure_missing_arxiv_chunk_embeddings(conn, settings)
+
+        self.assertGreater(max_active, 1)
+        self.assertEqual(result["arxiv_chunk_embeddings_created"], 6)
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) AS count FROM arxiv_chunk_embeddings").fetchone()["count"],
+            6,
+        )
+
+    def test_arxiv_paper_embeddings_use_configured_concurrency(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        for index in range(6):
+            conn.execute(
+                """
+                INSERT INTO arxiv_papers(
+                  arxiv_id, title, authors_json, summary, categories_json, published_at,
+                  updated_at, link, pdf_link, fetched_batch_id, created_at
+                )
+                VALUES (?, ?, '[]', ?, '["cs.CL"]',
+                  '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', ?, ?,
+                  'batch', 'now')
+                """,
+                (
+                    f"2501.10{index:03d}",
+                    f"Parallel paper {index}",
+                    f"Abstract text {index}",
+                    f"https://arxiv.org/abs/2501.10{index:03d}",
+                    f"https://arxiv.org/pdf/2501.10{index:03d}",
+                ),
+            )
+        conn.commit()
+        papers = conn.execute("SELECT * FROM arxiv_papers ORDER BY id").fetchall()
+        settings = Settings(**{**embedding_settings().__dict__, "embedding_concurrency": 3})
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def fake_embed_text(_settings: Settings, text: str) -> list[float]:
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.02)
+            with lock:
+                active -= 1
+            return [float(len(text))]
+
+        with patch("worker.embeddings.embed_text", side_effect=fake_embed_text):
+            embeddings = ensure_arxiv_paper_embeddings(conn, settings, list(papers))
+
+        self.assertGreater(max_active, 1)
+        self.assertEqual(len([value for value in embeddings.values() if value]), 6)
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) AS count FROM arxiv_paper_embeddings").fetchone()["count"],
+            6,
+        )
+
+    def test_missing_note_chunk_embeddings_use_configured_concurrency(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO obsidian_notes(path, title, frontmatter_json, tags_json, sha256, mtime, indexed_at)
+            VALUES ('Research/Parallel.md', 'Parallel', '{}', '[]', 'sha', 1, 'now')
+            """
+        )
+        note_id = conn.execute("SELECT id FROM obsidian_notes").fetchone()["id"]
+        for index in range(6):
+            conn.execute(
+                """
+                INSERT INTO research_chunks(note_id, chunk_index, heading, text, token_count, source, created_at)
+                VALUES (?, ?, 'Parallel', ?, 3, 'obsidian', 'now')
+                """,
+                (note_id, index, f"parallel note chunk {index}"),
+            )
+        conn.commit()
+        settings = Settings(**{**embedding_settings().__dict__, "embedding_concurrency": 3})
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def fake_embed_text(_settings: Settings, text: str) -> list[float]:
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.02)
+            with lock:
+                active -= 1
+            return [float(len(text))]
+
+        with patch("worker.embeddings.embed_text", side_effect=fake_embed_text):
+            result = ensure_missing_note_chunk_embeddings(conn, settings)
+
+        self.assertGreater(max_active, 1)
+        self.assertEqual(result["note_chunk_embeddings_created"], 6)
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) AS count FROM chunk_embeddings").fetchone()["count"],
+            6,
+        )
 
     def test_text_cache_can_be_limited_to_prefiltered_papers(self) -> None:
         conn = sqlite3.connect(":memory:")

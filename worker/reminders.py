@@ -12,6 +12,8 @@ REGISTERED_REMINDER_EVENTS: list[dict[str, Any]] = []
 
 JOB_TITLES = {
     "run-daily": "每日流程",
+    "resume-daily": "恢复每日流程",
+    "retry-daily": "历史论文补跑",
     "fetch-arxiv": "arXiv 抓取",
     "cache-arxiv-text": "论文正文缓存",
     "generate-paper-reports": "全文报告生成",
@@ -140,7 +142,7 @@ def _daily_run_progress(context: dict[str, Any]) -> list[dict[str, Any]]:
         (
             item
             for item in context["activities"]
-            if item["job_type"] == "run-daily" and item["status"] == "running"
+            if item["job_type"] in {"run-daily", "resume-daily", "retry-daily"} and item["status"] == "running"
         ),
         None,
     )
@@ -215,7 +217,10 @@ def _job_failed(context: dict[str, Any]) -> list[dict[str, Any]]:
 
 @register_reminder_event("daily_run_completed", "每日流程完成摘要")
 def _daily_run_completed(context: dict[str, Any]) -> list[dict[str, Any]]:
-    completed_daily = _completed(context["activities"], lambda _meta, item: item["job_type"] == "run-daily")
+    completed_daily = _completed(
+        context["activities"],
+        lambda _meta, item: item["job_type"] in {"run-daily", "resume-daily", "retry-daily"},
+    )
     if not completed_daily:
         return []
     meta = completed_daily.get("meta") or {}

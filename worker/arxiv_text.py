@@ -318,16 +318,35 @@ def cache_arxiv_full_texts(
         conn.commit()
         emit_progress(index + 1, str(row["arxiv_id"]))
 
+    if progress_callback:
+        progress_callback(
+            {
+                "stage": "chunk",
+                "current": 0,
+                "total": len(rows),
+                "arxiv_chunks_created": 0,
+            }
+        )
     chunk_result = ensure_arxiv_chunks(
         conn,
         row_limit if not selected_ids else None,
         paper_ids=selected_ids if paper_ids is not None else None,
     )
+    if progress_callback:
+        progress_callback(
+            {
+                "stage": "chunk",
+                "current": len(rows),
+                "total": len(rows),
+                "arxiv_chunks_created": int(chunk_result.get("arxiv_chunks_created") or 0),
+            }
+        )
     embedding_result = ensure_missing_arxiv_chunk_embeddings(
         conn,
         settings,
         row_limit * 80 if not selected_ids else None,
         paper_ids=selected_ids if paper_ids is not None else None,
+        progress_callback=progress_callback,
     )
 
     return {

@@ -57,6 +57,7 @@ class Settings:
     arxiv_cache_full_text: bool
     arxiv_pdf_dir: Path
     arxiv_text_dir: Path
+    retry_daily_max_results: int
     rag_score_threshold: float
     rag_top_k: int
     rag_searchers: list[str]
@@ -71,6 +72,7 @@ class Settings:
     llm_chat_model: str
     llm_embedding_provider_id: str
     llm_embedding_model: str
+    embedding_concurrency: int = 2
 
     def provider(self, provider_id: str) -> LLMProvider | None:
         return next((provider for provider in self.llm_providers if provider.id == provider_id), None)
@@ -154,6 +156,7 @@ def load_settings() -> Settings:
         arxiv_cache_full_text=_bool("ARXIV_CACHE_FULL_TEXT", "true"),
         arxiv_pdf_dir=Path(os.environ.get("ARXIV_PDF_DIR", "./data/arxiv_pdfs")),
         arxiv_text_dir=Path(os.environ.get("ARXIV_TEXT_DIR", "./data/arxiv_text")),
+        retry_daily_max_results=int(os.environ.get("RETRY_DAILY_MAX_RESULTS", "100")),
         rag_score_threshold=float(os.environ.get("RAG_SCORE_THRESHOLD", "0.35")),
         rag_top_k=int(os.environ.get("RAG_TOP_K", "6")),
         rag_searchers=_csv(
@@ -171,4 +174,5 @@ def load_settings() -> Settings:
         llm_chat_model=os.environ.get("LLM_CHAT_MODEL", ""),
         llm_embedding_provider_id=os.environ.get("LLM_EMBEDDING_PROVIDER_ID", ""),
         llm_embedding_model=os.environ.get("LLM_EMBEDDING_MODEL", ""),
+        embedding_concurrency=max(1, min(8, int(os.environ.get("EMBEDDING_CONCURRENCY", "2") or 2))),
     )

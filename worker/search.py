@@ -12,7 +12,7 @@ from .embeddings import (
     cosine,
     embed_text,
     ensure_arxiv_chunk_embedding,
-    ensure_arxiv_paper_embedding,
+    ensure_arxiv_paper_embeddings,
     ensure_missing_arxiv_chunk_embeddings,
 )
 
@@ -310,8 +310,9 @@ def prefilter_papers(
 
     scored: list[tuple[sqlite3.Row, float, list[dict[str, object]]]] = []
     fallback = False
+    paper_embeddings = ensure_arxiv_paper_embeddings(conn, settings, papers)
     for paper in papers:
-        embedding = ensure_arxiv_paper_embedding(conn, settings, paper)
+        embedding = paper_embeddings.get(int(paper["id"]))
         if embedding is None:
             fallback = True
             break

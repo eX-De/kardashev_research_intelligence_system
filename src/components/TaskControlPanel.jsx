@@ -10,13 +10,13 @@ function schedulerSummary(scheduler) {
   if (scheduler?.enabled) return `定时执行 · 下次执行 ${fmtDate(scheduler.next_run_at)}`;
   if (scheduler?.startup_daily?.enabled) {
     return scheduler.startup_daily.last_skip_reason === "already_completed_today"
-      ? "启动执行 · 今日已完成"
-      : "启动执行 · 每日首次启动 dashboard 时运行";
+      ? "访问触发 · 今日已完成"
+      : "访问触发 · 每日首次打开页面时运行";
   }
   return "未启用";
 }
 
-export function TaskControlPanel({ scheduler, onStartStartup, onStartScheduler, onStopScheduler, onRunNow, onRunJob }) {
+export function TaskControlPanel({ scheduler, onStartStartup, onStartScheduler, onStopScheduler, onRunNow, onResumeDaily, onRetryDaily, onRunJob }) {
   const activeMode = schedulerMode(scheduler);
 
   return (
@@ -27,9 +27,9 @@ export function TaskControlPanel({ scheduler, onStartStartup, onStartScheduler, 
       </div>
       <div className="task-mode-grid">
         <button className={`mode-card ${activeMode === "startup" ? "active" : ""}`} onClick={onStartStartup} type="button">
-          <span>启动触发</span>
-          <strong>每日首次启动执行</strong>
-          <p>每天第一次打开 dashboard 自动执行一次完整流程。</p>
+          <span>访问触发</span>
+          <strong>每日首次访问执行</strong>
+          <p>每天第一次打开 dashboard 页面自动执行一次完整流程。</p>
         </button>
         <button className={`mode-card ${activeMode === "scheduler" ? "active" : ""}`} onClick={onStartScheduler} type="button">
           <span>定时触发</span>
@@ -45,6 +45,12 @@ export function TaskControlPanel({ scheduler, onStartStartup, onStartScheduler, 
       <div className="task-action-panel">
         <button className="primary run-now-button" onClick={onRunNow} type="button">
           立即执行每日流程
+        </button>
+        <button onClick={onResumeDaily} type="button">
+          恢复上次每日流程
+        </button>
+        <button onClick={onRetryDaily} type="button">
+          补跑历史论文
         </button>
         <div className="task-shortcuts">
           <button onClick={() => onRunJob("sync-obsidian")} type="button">

@@ -1103,7 +1103,7 @@ def generate_paper_reading_report(
 def job_history(conn: sqlite3.Connection, limit: int = 20) -> dict[str, object]:
     rows = conn.execute(
         """
-        SELECT id, job_type, status, started_at, finished_at, message, meta_json
+        SELECT id, job_type, status, started_at, finished_at, message, pid, heartbeat_at, meta_json
         FROM job_runs
         ORDER BY id DESC
         LIMIT ?
@@ -1119,6 +1119,8 @@ def job_history(conn: sqlite3.Connection, limit: int = 20) -> dict[str, object]:
                 "started_at": row["started_at"],
                 "finished_at": row["finished_at"],
                 "message": row["message"],
+                "pid": row["pid"] if "pid" in row.keys() else None,
+                "heartbeat_at": row["heartbeat_at"] if "heartbeat_at" in row.keys() else None,
                 "meta": from_json(row["meta_json"], {}),
             }
             for row in rows

@@ -33,9 +33,11 @@ const schedulerRuntime = {
 
 const startupDailyRuntime = {
   enabled: false,
+  triggerInFlight: false,
   lastCheckAt: null,
   lastRunAt: null,
-  lastSkipReason: null
+  lastSkipReason: null,
+  lastError: null
 };
 
 const paperReportQueueRuntime = {
@@ -153,9 +155,11 @@ function schedulerStatus() {
     last_error: schedulerRuntime.lastError,
     startup_daily: {
       enabled: startupDailyRuntime.enabled,
+      trigger_in_flight: startupDailyRuntime.triggerInFlight,
       last_check_at: startupDailyRuntime.lastCheckAt,
       last_run_at: startupDailyRuntime.lastRunAt,
-      last_skip_reason: startupDailyRuntime.lastSkipReason
+      last_skip_reason: startupDailyRuntime.lastSkipReason,
+      last_error: startupDailyRuntime.lastError
     },
     paper_report_queue: {
       enabled: paperReportQueueRuntime.enabled,
@@ -177,6 +181,15 @@ async function readAppSettings() {
 
 async function saveAppSettings(payload) {
   return jsonFromWorker(["api-settings-save"], JSON.stringify(payload));
+}
+
+async function cleanupStaleJobs() {
+  try {
+    return await jsonFromWorker(["api-jobs-cleanup"]);
+  } catch (error) {
+    schedulerRuntime.lastError = { message: error.message, at: new Date().toISOString() };
+    return { ok: false, error: error.message };
+  }
 }
 
 function clearSchedulerTimer() {
@@ -235,6 +248,16 @@ async function runManagedJob(command, source = "manual", args = []) {
     const err = new Error(`Paper report queue is running: ${paperReportQueueRuntime.active} active`);
     err.statusCode = 409;
     throw err;
+  }
+  if (source !== "paper-report-queue") {
+    await cleanupStaleJobs();
+    const history = await jsonFromWorker(["api-jobs-history", "--limit", "20"]);
+    const running = (history.items || []).find((job) => job.status === "running");
+    if (running) {
+      const err = new Error(`Database job is already running: ${running.job_type} #${running.id}`);
+      err.statusCode = 409;
+      throw err;
+    }
   }
   const startedAt = new Date().toISOString();
   jobRuntime.currentJob = { command, source, args, started_at: startedAt };
@@ -379,32 +402,70 @@ function localDateKey(value) {
   return `${year}-${month}-${day}`;
 }
 
-async function completedRunDailyToday() {
+async function runDailyStateToday() {
+  await cleanupStaleJobs();
   const today = localDateKey(new Date());
   const history = await jsonFromWorker(["api-jobs-history", "--limit", "500"]);
-  return (history.items || []).some((job) => {
+  for (const job of history.items || []) {
     const finishedAt = job.finished_at || job.started_at;
-    return job.job_type === "run-daily" && job.status === "completed" && localDateKey(finishedAt) === today;
-  });
+    if (job.job_type !== "run-daily" || localDateKey(finishedAt) !== today) continue;
+    if (job.status === "running") return "running";
+    if (job.status === "completed") return "completed";
+  }
+  return "none";
 }
 
-async function runDailyOnStartupIfNeeded(settings) {
+async function runDailyOnDashboardOpenIfNeeded(settings) {
   startupDailyRuntime.enabled = Boolean(settings.run_daily_on_startup_enabled);
   startupDailyRuntime.lastCheckAt = new Date().toISOString();
   startupDailyRuntime.lastSkipReason = null;
-  if (!startupDailyRuntime.enabled) return schedulerStatus();
+  startupDailyRuntime.lastError = null;
+  if (!startupDailyRuntime.enabled) {
+    startupDailyRuntime.lastSkipReason = "disabled";
+    return { triggered: false, reason: "disabled", scheduler: schedulerStatus() };
+  }
   if (settings.scheduler_enabled) {
     startupDailyRuntime.enabled = false;
     startupDailyRuntime.lastSkipReason = "scheduler_enabled";
-    return schedulerStatus();
+    return { triggered: false, reason: "scheduler_enabled", scheduler: schedulerStatus() };
   }
-  if (await completedRunDailyToday()) {
+  if (startupDailyRuntime.triggerInFlight) {
+    startupDailyRuntime.lastSkipReason = "trigger_in_flight";
+    return { triggered: false, reason: "trigger_in_flight", scheduler: schedulerStatus() };
+  }
+  if (jobRuntime.currentJob) {
+    startupDailyRuntime.lastSkipReason = `busy:${jobRuntime.currentJob.command}`;
+    return { triggered: false, reason: startupDailyRuntime.lastSkipReason, scheduler: schedulerStatus() };
+  }
+  if (paperReportQueueRuntime.active > 0) {
+    startupDailyRuntime.lastSkipReason = `busy:paper_report_queue:${paperReportQueueRuntime.active}`;
+    return { triggered: false, reason: startupDailyRuntime.lastSkipReason, scheduler: schedulerStatus() };
+  }
+  const todayState = await runDailyStateToday();
+  if (todayState === "running") {
+    startupDailyRuntime.lastSkipReason = "already_running_today";
+    return { triggered: false, reason: "already_running_today", scheduler: schedulerStatus() };
+  }
+  if (todayState === "completed") {
     startupDailyRuntime.lastSkipReason = "already_completed_today";
-    return schedulerStatus();
+    return { triggered: false, reason: "already_completed_today", scheduler: schedulerStatus() };
   }
-  await runManagedJob("run-daily", "startup");
-  startupDailyRuntime.lastRunAt = new Date().toISOString();
-  return schedulerStatus();
+  startupDailyRuntime.triggerInFlight = true;
+  startupDailyRuntime.lastSkipReason = "launched";
+  runManagedJob("run-daily", "dashboard-open")
+    .then(() => {
+      startupDailyRuntime.lastRunAt = new Date().toISOString();
+      startupDailyRuntime.lastSkipReason = "completed";
+      startupDailyRuntime.lastError = null;
+    })
+    .catch((error) => {
+      startupDailyRuntime.lastSkipReason = "failed";
+      startupDailyRuntime.lastError = { message: error.message, at: new Date().toISOString() };
+    })
+    .finally(() => {
+      startupDailyRuntime.triggerInFlight = false;
+    });
+  return { triggered: true, reason: "launched", scheduler: schedulerStatus() };
 }
 
 async function jsonFromWorker(args, input = null) {
@@ -669,7 +730,7 @@ async function routeApi(req, res, url) {
       await stopScheduler({ persist: false });
       startupDailyRuntime.enabled = Boolean(data.settings?.run_daily_on_startup_enabled);
       if (startupDailyRuntime.enabled) {
-        startupDailyRuntime.lastSkipReason = "will_run_on_next_dashboard_start";
+        startupDailyRuntime.lastSkipReason = "will_run_on_next_dashboard_visit";
       }
     }
     sendJson(res, 200, { ...data, scheduler: schedulerStatus() });
@@ -731,8 +792,27 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  if (req.method === "POST" && url.pathname === "/api/jobs/startup-daily/check") {
+    const settings = await readAppSettings();
+    const result = await runDailyOnDashboardOpenIfNeeded(settings);
+    sendJson(res, 200, { ok: true, startup_daily_trigger: result, scheduler: schedulerStatus() });
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/api/jobs/run-now") {
     const data = await runManagedJob("run-daily", "manual");
+    sendJson(res, 200, { ok: true, ...data, scheduler: schedulerStatus() });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/jobs/resume-daily") {
+    const data = await runManagedJob("resume-daily", "manual");
+    sendJson(res, 200, { ok: true, ...data, scheduler: schedulerStatus() });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/jobs/retry-daily") {
+    const data = await runManagedJob("retry-daily", "manual");
     sendJson(res, 200, { ok: true, ...data, scheduler: schedulerStatus() });
     return;
   }
@@ -802,7 +882,8 @@ async function routeApi(req, res, url) {
     "/api/jobs/cache-arxiv-text": "cache-arxiv-text",
     "/api/jobs/generate-paper-reports": "generate-paper-reports",
     "/api/jobs/generate-reports": "generate-reports",
-    "/api/jobs/run-daily": "run-daily"
+    "/api/jobs/run-daily": "run-daily",
+    "/api/jobs/retry-daily": "retry-daily"
   };
   if (req.method === "POST" && jobMap[url.pathname]) {
     const data = await runManagedJob(jobMap[url.pathname], "manual");
@@ -835,7 +916,11 @@ server.listen(PORT, () => {
       if (settings.scheduler_enabled) {
         return startScheduler({ persist: false, settings });
       }
-      return runDailyOnStartupIfNeeded(settings);
+      startupDailyRuntime.enabled = Boolean(settings.run_daily_on_startup_enabled);
+      if (startupDailyRuntime.enabled) {
+        startupDailyRuntime.lastSkipReason = "waiting_for_dashboard_visit";
+      }
+      return schedulerStatus();
     })
     .catch((error) => {
       schedulerRuntime.lastError = { message: error.message, at: new Date().toISOString() };

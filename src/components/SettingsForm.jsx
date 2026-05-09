@@ -188,6 +188,7 @@ export function SettingsForm({ settings, providers, onSettingChange, onProviderC
       <CheckboxField label="缓存 PDF 并提取 TXT" name="arxiv_cache_full_text" checked={settings.arxiv_cache_full_text} onChange={onSettingChange} />
       <TextField label="PDF 缓存目录" name="arxiv_pdf_dir" placeholder="./data/arxiv_pdfs" value={settings.arxiv_pdf_dir} onChange={onSettingChange} />
       <TextField label="TXT 输出目录" name="arxiv_text_dir" placeholder="./data/arxiv_text" value={settings.arxiv_text_dir} onChange={onSettingChange} />
+      <NumberField label="历史补洞上限" name="retry_daily_max_results" min="1" step="1" value={settings.retry_daily_max_results} onChange={onSettingChange} />
 
       <FormSubhead title="RAG">HybridSearch 召回和进入 inbox 的阈值。</FormSubhead>
       <NumberField label="RAG 阈值" name="rag_score_threshold" min="0" max="1" step="0.01" value={settings.rag_score_threshold} onChange={onSettingChange} />
@@ -209,9 +210,10 @@ export function SettingsForm({ settings, providers, onSettingChange, onProviderC
         onRemoveProvider={onRemoveProvider}
         onSettingChange={onSettingChange}
       />
+      <NumberField label="Embedding 并发数" name="embedding_concurrency" min="1" max="8" step="1" value={settings.embedding_concurrency} onChange={onSettingChange} />
 
       <FormSubhead title="定时任务">两种每日流程触发方式互斥，执行内容相同。</FormSubhead>
-      <CheckboxField label="每日首次启动 dashboard 时执行" name="run_daily_on_startup_enabled" checked={settings.run_daily_on_startup_enabled} onChange={onSettingChange} />
+      <CheckboxField label="每日首次访问 dashboard 时执行" name="run_daily_on_startup_enabled" checked={settings.run_daily_on_startup_enabled} onChange={onSettingChange} />
       <CheckboxField label="按时间定时执行" name="scheduler_enabled" checked={settings.scheduler_enabled} onChange={onSettingChange} />
       <label>
         <span>每日执行时间</span>

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -15,6 +16,7 @@ from .db import to_json, utc_now
 ATOM = "{http://www.w3.org/2005/Atom}"
 ARXIV = "{http://arxiv.org/schemas/atom}"
 API_URL = "https://export.arxiv.org/api/query"
+ARXIV_RETRY_BACKOFF_SECONDS = (30, 60, 120)
 
 
 @dataclass
@@ -92,8 +94,20 @@ def _fetch_page(search_query: str, start: int, max_results: int) -> str:
         f"{API_URL}?{params}",
         headers={"User-Agent": "research-intelligence-system/0.1"},
     )
-    with urllib.request.urlopen(request, timeout=45) as response:
-        return response.read().decode("utf-8")
+    for attempt in range(len(ARXIV_RETRY_BACKOFF_SECONDS) + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=45) as response:
+                return response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            if exc.code != 429 or attempt >= len(ARXIV_RETRY_BACKOFF_SECONDS):
+                raise
+            retry_after = exc.headers.get("Retry-After") if exc.headers else ""
+            try:
+                delay = int(str(retry_after or "").strip())
+            except ValueError:
+                delay = ARXIV_RETRY_BACKOFF_SECONDS[attempt]
+            time.sleep(max(1, min(delay, 300)))
+    raise RuntimeError("arXiv request retry loop exhausted")
 
 
 def _is_recent(paper: ArxivPaper, lookback_days: int) -> bool:
@@ -115,6 +129,7 @@ def fetch_arxiv(conn: sqlite3.Connection, settings: Settings) -> dict[str, int |
     search_query = " OR ".join(f"cat:{category}" for category in settings.arxiv_categories)
     page_size = min(100, max(1, settings.arxiv_max_results))
     inserted = 0
+    updated = 0
     seen = 0
     tombstone_skipped = 0
     pages_fetched = 0
@@ -182,6 +197,36 @@ def fetch_arxiv(conn: sqlite3.Connection, settings: Settings) -> dict[str, int |
             )
             if cur.rowcount:
                 inserted += 1
+            else:
+                update_cur = conn.execute(
+                    """
+                    UPDATE arxiv_papers
+                    SET title = ?,
+                        authors_json = ?,
+                        summary = ?,
+                        categories_json = ?,
+                        published_at = ?,
+                        updated_at = ?,
+                        link = ?,
+                        pdf_link = ?,
+                        fetched_batch_id = ?
+                    WHERE arxiv_id = ?
+                    """,
+                    (
+                        paper.title,
+                        to_json(paper.authors),
+                        paper.summary,
+                        to_json(paper.categories),
+                        paper.published_at,
+                        paper.updated_at,
+                        paper.link,
+                        paper.pdf_link,
+                        batch_id,
+                        paper.arxiv_id,
+                    ),
+                )
+                if update_cur.rowcount:
+                    updated += 1
         conn.commit()
         if reached_cutoff:
             stopped_at_cutoff = 1
@@ -193,6 +238,7 @@ def fetch_arxiv(conn: sqlite3.Connection, settings: Settings) -> dict[str, int |
         "batch_id": batch_id,
         "papers_seen": seen,
         "papers_inserted": inserted,
+        "papers_updated": updated,
         "papers_tombstone_skipped": tombstone_skipped,
         "pages_fetched": pages_fetched,
         "stopped_at_cutoff": stopped_at_cutoff,

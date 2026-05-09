@@ -93,6 +93,8 @@ export function metaNumber(meta = {}, keys = []) {
 export function jobTitle(jobType) {
   const labels = {
     "run-daily": "每日流程",
+    "resume-daily": "恢复每日流程",
+    "retry-daily": "历史论文补跑",
     "fetch-arxiv": "arXiv 抓取",
     "cache-arxiv-text": "论文正文缓存",
     "generate-paper-reports": "全文报告生成",

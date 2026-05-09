@@ -23,12 +23,14 @@ PATH_FIELDS = {"obsidian_vault_path", "arxiv_pdf_dir", "arxiv_text_dir"}
 INT_FIELDS = {
     "arxiv_daily_lookback_days",
     "arxiv_max_results",
+    "retry_daily_max_results",
     "rag_top_k",
     "rag_prefilter_top_k",
     "rag_prefilter_min_keep",
     "rag_prefilter_max_keep",
     "scheduler_interval_hours",
     "paper_report_queue_concurrency",
+    "embedding_concurrency",
 }
 
 FLOAT_FIELDS = {
@@ -153,6 +155,10 @@ def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, An
         "arxiv_cache_full_text": settings.arxiv_cache_full_text,
         "arxiv_pdf_dir": str(settings.arxiv_pdf_dir),
         "arxiv_text_dir": str(settings.arxiv_text_dir),
+        "retry_daily_max_results": int(
+            stored.get("retry_daily_max_results", os.environ.get("RETRY_DAILY_MAX_RESULTS", settings.retry_daily_max_results))
+            or 100
+        ),
         "rag_score_threshold": settings.rag_score_threshold,
         "rag_top_k": settings.rag_top_k,
         "rag_searchers": settings.rag_searchers,
@@ -167,6 +173,13 @@ def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, An
         "llm_chat_model": settings.llm_chat_model,
         "llm_embedding_provider_id": settings.llm_embedding_provider_id,
         "llm_embedding_model": settings.llm_embedding_model,
+        "embedding_concurrency": max(
+            1,
+            min(
+                8,
+                int(stored.get("embedding_concurrency", os.environ.get("EMBEDDING_CONCURRENCY", settings.embedding_concurrency)) or 2),
+            ),
+        ),
         "scheduler_enabled": _bool(stored.get("scheduler_enabled", os.environ.get("SCHEDULER_ENABLED", False))),
         "run_daily_on_startup_enabled": _bool(
             stored.get(
