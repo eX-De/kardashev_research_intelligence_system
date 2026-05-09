@@ -10,6 +10,16 @@ from typing import Any
 from .config import LLMProvider, Settings, normalize_provider_base_url
 from .db import from_json, to_json, utc_now
 
+DEFAULT_PAPER_READER_PROMPT = """请阅读这篇论文 PDF，输出结构化解读：
+
+1. 研究问题和背景
+2. 方法和实验设计
+3. 主要发现
+4. 局限性
+5. 对后续研究或应用的启发
+
+请尽量使用中文，保留关键英文术语。"""
+
 CSV_FIELDS = {
     "obsidian_include_dirs",
     "obsidian_include_tags",
@@ -52,6 +62,15 @@ STRING_FIELDS = {
     "llm_chat_model",
     "llm_embedding_provider_id",
     "llm_embedding_model",
+    "paper_reader_default_prompt",
+    "paper_report_provider_id",
+    "paper_report_model",
+    "reader_chat_provider_id",
+    "reader_chat_model",
+    "reader_smart_save_provider_id",
+    "reader_smart_save_model",
+    "reader_question_provider_id",
+    "reader_question_model",
     "scheduler_run_time",
 }
 
@@ -173,6 +192,30 @@ def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, An
         "llm_chat_model": settings.llm_chat_model,
         "llm_embedding_provider_id": settings.llm_embedding_provider_id,
         "llm_embedding_model": settings.llm_embedding_model,
+        "paper_reader_default_prompt": str(
+            stored.get(
+                "paper_reader_default_prompt",
+                settings.paper_reader_default_prompt or DEFAULT_PAPER_READER_PROMPT,
+            )
+        ),
+        "paper_report_provider_id": str(
+            stored.get("paper_report_provider_id", settings.paper_report_provider_id or "")
+        ),
+        "paper_report_model": str(stored.get("paper_report_model", settings.paper_report_model or "")),
+        "reader_chat_provider_id": str(
+            stored.get("reader_chat_provider_id", settings.reader_chat_provider_id or "")
+        ),
+        "reader_chat_model": str(stored.get("reader_chat_model", settings.reader_chat_model or "")),
+        "reader_smart_save_provider_id": str(
+            stored.get("reader_smart_save_provider_id", settings.reader_smart_save_provider_id or "")
+        ),
+        "reader_smart_save_model": str(
+            stored.get("reader_smart_save_model", settings.reader_smart_save_model or "")
+        ),
+        "reader_question_provider_id": str(
+            stored.get("reader_question_provider_id", settings.reader_question_provider_id or "")
+        ),
+        "reader_question_model": str(stored.get("reader_question_model", settings.reader_question_model or "")),
         "embedding_concurrency": max(
             1,
             min(

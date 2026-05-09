@@ -1092,7 +1092,12 @@ def generate_paper_reading_report(
     payload: dict[str, object] | None = None,
 ) -> dict[str, object]:
     payload = payload or {}
-    queue_paper_report(conn, paper_id, force=bool(payload.get("force")))
+    queue_paper_report(
+        conn,
+        paper_id,
+        force=bool(payload.get("force")),
+        prompt=settings.paper_reader_default_prompt,
+    )
     result = process_paper_report_queue(conn, settings, [paper_id])
     detail = paper_detail(conn, paper_id)
     detail["ok"] = True

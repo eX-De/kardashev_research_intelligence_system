@@ -310,6 +310,17 @@ CREATE TABLE IF NOT EXISTS paper_reading_reports (
   finished_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS paper_reader_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  paper_id INTEGER NOT NULL REFERENCES arxiv_papers(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'chat',
+  model_provider_id TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS project_notes (
   project_id INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
   note_id INTEGER NOT NULL REFERENCES obsidian_notes(id) ON DELETE CASCADE,
@@ -352,6 +363,7 @@ CREATE INDEX IF NOT EXISTS idx_project_paper_judgments_paper ON project_paper_ju
 CREATE INDEX IF NOT EXISTS idx_project_paper_recommendations_state ON project_paper_recommendations(state, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_project_paper_recommendations_paper ON project_paper_recommendations(paper_id);
 CREATE INDEX IF NOT EXISTS idx_paper_reading_reports_status ON paper_reading_reports(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_paper_reader_messages_paper ON paper_reader_messages(paper_id, id);
 CREATE INDEX IF NOT EXISTS idx_project_artifacts_project ON project_artifacts(project_id, updated_at DESC);
 """
 
@@ -378,6 +390,7 @@ REQUIRED_TABLES = {
     "project_paper_judgments",
     "project_paper_recommendations",
     "paper_reading_reports",
+    "paper_reader_messages",
     "project_notes",
     "project_artifacts",
 }
@@ -403,6 +416,7 @@ REQUIRED_INDEXES = {
     "idx_project_paper_recommendations_state",
     "idx_project_paper_recommendations_paper",
     "idx_paper_reading_reports_status",
+    "idx_paper_reader_messages_paper",
     "idx_project_artifacts_project",
 }
 
@@ -770,6 +784,23 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
                     raise
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_paper_reading_reports_status ON paper_reading_reports(status, updated_at DESC)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS paper_reader_messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          paper_id INTEGER NOT NULL REFERENCES arxiv_papers(id) ON DELETE CASCADE,
+          role TEXT NOT NULL,
+          content TEXT NOT NULL,
+          source TEXT NOT NULL DEFAULT 'chat',
+          model_provider_id TEXT NOT NULL DEFAULT '',
+          model TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_paper_reader_messages_paper ON paper_reader_messages(paper_id, id)"
     )
     conn.execute("DROP TABLE IF EXISTS llm_explanations")
 

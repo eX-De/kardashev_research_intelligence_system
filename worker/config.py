@@ -73,6 +73,15 @@ class Settings:
     llm_embedding_provider_id: str
     llm_embedding_model: str
     embedding_concurrency: int = 2
+    paper_reader_default_prompt: str = ""
+    paper_report_provider_id: str = ""
+    paper_report_model: str = ""
+    reader_chat_provider_id: str = ""
+    reader_chat_model: str = ""
+    reader_smart_save_provider_id: str = ""
+    reader_smart_save_model: str = ""
+    reader_question_provider_id: str = ""
+    reader_question_model: str = ""
 
     def provider(self, provider_id: str) -> LLMProvider | None:
         return next((provider for provider in self.llm_providers if provider.id == provider_id), None)
@@ -175,4 +184,13 @@ def load_settings() -> Settings:
         llm_embedding_provider_id=os.environ.get("LLM_EMBEDDING_PROVIDER_ID", ""),
         llm_embedding_model=os.environ.get("LLM_EMBEDDING_MODEL", ""),
         embedding_concurrency=max(1, min(8, int(os.environ.get("EMBEDDING_CONCURRENCY", "2") or 2))),
+        paper_reader_default_prompt=os.environ.get("PAPER_READER_DEFAULT_PROMPT", ""),
+        paper_report_provider_id=os.environ.get("PAPER_REPORT_PROVIDER_ID", ""),
+        paper_report_model=os.environ.get("PAPER_REPORT_MODEL", ""),
+        reader_chat_provider_id=os.environ.get("READER_CHAT_PROVIDER_ID", ""),
+        reader_chat_model=os.environ.get("READER_CHAT_MODEL", ""),
+        reader_smart_save_provider_id=os.environ.get("READER_SMART_SAVE_PROVIDER_ID", ""),
+        reader_smart_save_model=os.environ.get("READER_SMART_SAVE_MODEL", ""),
+        reader_question_provider_id=os.environ.get("READER_QUESTION_PROVIDER_ID", ""),
+        reader_question_model=os.environ.get("READER_QUESTION_MODEL", ""),
     )

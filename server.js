@@ -1,8 +1,8 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { extname, isAbsolute, join, normalize, relative, resolve } from "node:path";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const __dirname = resolve(fileURLToPath(new URL(".", import.meta.url)));
@@ -58,6 +58,7 @@ const MIME_TYPES = {
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".svg": "image/svg+xml; charset=utf-8",
+  ".pdf": "application/pdf",
   ".png": "image/png",
   ".ico": "image/x-icon",
   ".map": "application/json; charset=utf-8"
@@ -113,6 +114,77 @@ function worker(args, input = null) {
       }
     );
   if (input !== null) child.stdin.end(input, "utf8");
+  });
+}
+
+function streamWorkerEvents(args, input, res) {
+  return new Promise((resolvePromise) => {
+    const child = spawn(PYTHON_BIN, ["-m", "worker.cli", ...args], {
+      cwd: __dirname,
+      env: {
+        ...process.env,
+        PYTHONUTF8: "1",
+        PYTHONIOENCODING: "utf-8"
+      },
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+
+    let buffer = "";
+    let stderr = "";
+    let closedByClient = false;
+
+    const writeEvent = (event, data) => {
+      if (closedByClient || res.writableEnded) return;
+      res.write(`event: ${event}\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    const handleLine = (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      try {
+        const parsed = JSON.parse(trimmed);
+        writeEvent(parsed.event || "message", parsed.data || {});
+      } catch {
+        writeEvent("error", { error: `Worker stream returned invalid JSON: ${trimmed.slice(0, 300)}` });
+      }
+    };
+
+    res.on("close", () => {
+      if (!res.writableEnded) {
+        closedByClient = true;
+        child.kill();
+      }
+    });
+
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk;
+      let index = buffer.indexOf("\n");
+      while (index !== -1) {
+        handleLine(buffer.slice(0, index));
+        buffer = buffer.slice(index + 1);
+        index = buffer.indexOf("\n");
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", (error) => {
+      writeEvent("error", { error: error.message });
+      if (!res.writableEnded) res.end();
+      resolvePromise();
+    });
+    child.on("close", (code) => {
+      if (buffer.trim()) handleLine(buffer);
+      if (code !== 0 && !closedByClient) {
+        writeEvent("error", { error: stderr.trim() || `Worker exited with code ${code}` });
+      }
+      if (!res.writableEnded) res.end();
+      resolvePromise();
+    });
+    child.stdin.end(input ?? "", "utf8");
   });
 }
 
@@ -826,6 +898,122 @@ async function routeApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/paper-reports") {
     const limit = url.searchParams.get("limit") || "300";
     const data = await jsonFromWorker(["api-paper-reports", "--limit", limit]);
+    sendJson(res, 200, data);
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/reader/papers") {
+    const limit = url.searchParams.get("limit") || "300";
+    const data = await jsonFromWorker(["api-reader-papers", "--limit", limit]);
+    sendJson(res, 200, data);
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/reader/papers/upload") {
+    const body = await readRequestJson(req);
+    const data = await jsonFromWorker(["api-reader-upload"], JSON.stringify(body));
+    sendJson(res, 200, data);
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/reader/papers/urls") {
+    const body = await readRequestJson(req);
+    const data = await jsonFromWorker(["api-reader-urls"], JSON.stringify(body));
+    sendJson(res, 200, data);
+    return;
+  }
+
+  const readerPaperMatch = url.pathname.match(/^\/api\/reader\/papers\/(\d+)$/);
+  if (req.method === "GET" && readerPaperMatch) {
+    const data = await jsonFromWorker(["api-reader-paper", readerPaperMatch[1]]);
+    sendJson(res, 200, data);
+    return;
+  }
+
+  const readerPdfMatch = url.pathname.match(/^\/api\/reader\/papers\/(\d+)\/pdf$/);
+  if (req.method === "GET" && readerPdfMatch) {
+    const data = await jsonFromWorker(["api-reader-paper", readerPdfMatch[1]]);
+    const rawPath = String(data?.paper?.pdf_path || "");
+    if (!rawPath) {
+      sendJson(res, 404, { error: "PDF not available" });
+      return;
+    }
+    const pdfPath = isAbsolute(rawPath) ? rawPath : resolve(__dirname, rawPath);
+    if (!existsSync(pdfPath)) {
+      sendJson(res, 404, { error: "PDF file is missing" });
+      return;
+    }
+    res.writeHead(200, {
+      "content-type": "application/pdf",
+      "cache-control": "no-store"
+    });
+    createReadStream(pdfPath).pipe(res);
+    return;
+  }
+
+  const readerChatMatch = url.pathname.match(/^\/api\/reader\/papers\/(\d+)\/chat$/);
+  if (req.method === "POST" && readerChatMatch) {
+    const body = await readRequestJson(req);
+    if (body.stream === true) {
+      res.socket?.setNoDelay?.(true);
+      res.setHeader("content-type", "text/event-stream; charset=utf-8");
+      res.setHeader("cache-control", "no-cache, no-transform");
+      res.setHeader("connection", "keep-alive");
+      res.setHeader("x-accel-buffering", "no");
+      res.flushHeaders?.();
+      await streamWorkerEvents([
+        "api-reader-chat-stream",
+        readerChatMatch[1]
+      ], JSON.stringify(body), res);
+      return;
+    }
+    const data = await jsonFromWorker([
+      "api-reader-chat",
+      readerChatMatch[1]
+    ], JSON.stringify(body));
+    sendJson(res, 200, data);
+    return;
+  }
+
+  const readerSaveMatch = url.pathname.match(/^\/api\/reader\/papers\/(\d+)\/save$/);
+  if (req.method === "POST" && readerSaveMatch) {
+    const data = await jsonFromWorker(["api-reader-save", readerSaveMatch[1]]);
+    sendJson(res, 200, data);
+    return;
+  }
+
+  const readerFollowupsMatch = url.pathname.match(/^\/api\/reader\/papers\/(\d+)\/follow-up-questions$/);
+  if (req.method === "POST" && readerFollowupsMatch) {
+    const body = await readRequestJson(req);
+    const data = await jsonFromWorker([
+      "api-reader-followups",
+      readerFollowupsMatch[1]
+    ], JSON.stringify(body));
+    sendJson(res, 200, data);
+    return;
+  }
+
+  const readerMessageMatch = url.pathname.match(/^\/api\/reader\/papers\/(\d+)\/messages\/(\d+)$/);
+  if (req.method === "DELETE" && readerMessageMatch) {
+    const data = await jsonFromWorker([
+      "api-reader-delete-message",
+      readerMessageMatch[1],
+      readerMessageMatch[2]
+    ]);
+    sendJson(res, 200, data);
+    return;
+  }
+
+  const readerCancelMatch = url.pathname.match(/^\/api\/reader\/papers\/(\d+)\/cancel$/);
+  if (req.method === "POST" && readerCancelMatch) {
+    const data = await jsonFromWorker(["api-reader-cancel", readerCancelMatch[1]]);
+    sendJson(res, 200, data);
+    return;
+  }
+
+  const readerRetryMatch = url.pathname.match(/^\/api\/reader\/papers\/(\d+)\/retry$/);
+  if (req.method === "POST" && readerRetryMatch) {
+    const data = await jsonFromWorker(["api-reader-retry", readerRetryMatch[1]]);
     sendJson(res, 200, data);
     return;
   }

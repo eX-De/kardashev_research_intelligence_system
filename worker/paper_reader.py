@@ -1,0 +1,911 @@
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import sqlite3
+from pathlib import Path
+from urllib.parse import unquote, urljoin, urlparse
+import re
+
+from .config import Settings
+from .arxiv_text import download_pdf, extract_pdf_text_to_file, replace_arxiv_chunks_for_paper
+from .db import clean_unicode, to_json, utc_now
+from .paper_reports import (
+    _call_chat_text,
+    _ensure_full_text,
+    _iter_chat_text_chunks,
+    paper_report_payload,
+    queue_paper_report,
+)
+from .obsidian_library import (
+    _copy_attachment,
+    _paper_note_path,
+    _read_text,
+    _split_frontmatter,
+    _update_frontmatter,
+    _vault,
+    _write_markdown,
+)
+
+
+VALID_READER_ROLES = {"user", "assistant"}
+PDF_LINK_PATTERN = re.compile(r"""href=["']([^"']+?\.pdf(?:\?[^"']*)?)["']""", re.IGNORECASE)
+
+
+def _reader_message_payload(row: sqlite3.Row) -> dict[str, object]:
+    return {
+        "id": int(row["id"]),
+        "paper_id": int(row["paper_id"]),
+        "role": row["role"],
+        "content": row["content"],
+        "source": row["source"],
+        "model_provider_id": row["model_provider_id"],
+        "model": row["model"],
+        "created_at": row["created_at"],
+    }
+
+
+def _model_choice(settings: Settings, provider_id: str, model: str) -> tuple[str, str]:
+    next_provider = clean_unicode(str(provider_id or "")).strip() or settings.llm_chat_provider_id
+    next_model = clean_unicode(str(model or "")).strip() or settings.llm_chat_model
+    return next_provider, next_model
+
+
+def _reader_chat_model(settings: Settings) -> tuple[str, str]:
+    return _model_choice(settings, settings.reader_chat_provider_id, settings.reader_chat_model)
+
+
+def _reader_smart_save_model(settings: Settings) -> tuple[str, str]:
+    return _model_choice(settings, settings.reader_smart_save_provider_id, settings.reader_smart_save_model)
+
+
+def _reader_question_model(settings: Settings) -> tuple[str, str]:
+    return _model_choice(settings, settings.reader_question_provider_id, settings.reader_question_model)
+
+
+def _reader_report_prompt(settings: Settings) -> str:
+    from .paper_reports import PAPER_READER_DEFAULT_PROMPT
+
+    return clean_unicode(str(settings.paper_reader_default_prompt or "")).strip() or PAPER_READER_DEFAULT_PROMPT
+
+
+def paper_reader_messages(conn: sqlite3.Connection, paper_id: int) -> list[dict[str, object]]:
+    rows = conn.execute(
+        """
+        SELECT id, paper_id, role, content, source, model_provider_id, model, created_at
+        FROM paper_reader_messages
+        WHERE paper_id = ?
+        ORDER BY id
+        """,
+        (paper_id,),
+    ).fetchall()
+    return [_reader_message_payload(row) for row in rows]
+
+
+def _reader_file_stem(prefix: str, identity: str) -> str:
+    digest = hashlib.sha256(identity.encode("utf-8", "replace")).hexdigest()[:16]
+    return f"{prefix}-{digest}"
+
+
+def _title_from_filename(filename: str, fallback: str) -> str:
+    name = Path(filename or "").name
+    if name.lower().endswith(".pdf"):
+        name = name[:-4]
+    return clean_unicode(name).strip() or fallback
+
+
+def _title_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    last = unquote(Path(parsed.path).name)
+    return _title_from_filename(last, parsed.netloc or "Imported paper")
+
+
+def _arxiv_id_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    if "arxiv.org" not in parsed.netloc.lower():
+        return ""
+    parts = [part for part in parsed.path.split("/") if part]
+    if not parts:
+        return ""
+    candidate = parts[-1].removesuffix(".pdf")
+    return candidate if re.match(r"^\d{4}\.\d{4,5}(v\d+)?$", candidate) else ""
+
+
+def _pdf_url_from_input(url: str) -> str:
+    arxiv_id = _arxiv_id_from_url(url)
+    if arxiv_id:
+        return f"https://arxiv.org/pdf/{arxiv_id}"
+    parsed = urlparse(url)
+    if parsed.path.lower().endswith(".pdf"):
+        return url
+    return ""
+
+
+def _discover_pdf_url(url: str) -> str:
+    direct = _pdf_url_from_input(url)
+    if direct:
+        return direct
+    import urllib.request
+
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "research-intelligence-system/0.1"},
+    )
+    with urllib.request.urlopen(request, timeout=45) as response:
+        content_type = response.headers.get("content-type", "")
+        body = response.read(1_000_000)
+    if "pdf" in content_type.lower():
+        return url
+    text = body.decode("utf-8", errors="ignore")
+    match = PDF_LINK_PATTERN.search(text)
+    if not match:
+        raise RuntimeError("No PDF link was discovered on the supplied URL")
+    return urljoin(url, match.group(1))
+
+
+def _insert_imported_paper(
+    conn: sqlite3.Connection,
+    *,
+    arxiv_id: str,
+    title: str,
+    summary: str,
+    link: str,
+    pdf_link: str,
+    pdf_path: Path,
+    text_path: Path,
+    text_status: str,
+    text_error: str = "",
+    text_char_count: int = 0,
+) -> int:
+    now = utc_now()
+    existing = conn.execute("SELECT id FROM arxiv_papers WHERE arxiv_id = ?", (arxiv_id,)).fetchone()
+    if existing:
+        paper_id = int(existing["id"])
+        conn.execute(
+            """
+            UPDATE arxiv_papers
+            SET title = ?,
+                summary = ?,
+                link = ?,
+                pdf_link = ?,
+                pdf_path = ?,
+                text_path = ?,
+                text_extracted_at = CASE WHEN ? = 'complete' THEN ? ELSE text_extracted_at END,
+                text_status = ?,
+                text_error = ?,
+                text_char_count = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                title,
+                summary,
+                link,
+                pdf_link,
+                str(pdf_path),
+                str(text_path),
+                text_status,
+                now,
+                text_status,
+                text_error,
+                text_char_count,
+                now,
+                paper_id,
+            ),
+        )
+        return paper_id
+    cursor = conn.execute(
+        """
+        INSERT INTO arxiv_papers(
+          arxiv_id, title, authors_json, summary, categories_json, published_at,
+          updated_at, link, pdf_link, pdf_path, text_path, text_extracted_at,
+          text_status, text_error, text_char_count, fetched_batch_id, created_at
+        )
+        VALUES (?, ?, '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reader-import', ?)
+        """,
+        (
+            arxiv_id,
+            title,
+            summary,
+            to_json(["reader"]),
+            now,
+            now,
+            link,
+            pdf_link,
+            str(pdf_path),
+            str(text_path),
+            now if text_status == "complete" else None,
+            text_status,
+            text_error,
+            text_char_count,
+            now,
+        ),
+    )
+    return int(cursor.lastrowid)
+
+
+def _finalize_imported_pdf(
+    conn: sqlite3.Connection,
+    paper_id: int,
+    pdf_path: Path,
+    text_path: Path,
+) -> None:
+    paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
+    text = text_path.read_text(encoding="utf-8", errors="ignore") if text_path.exists() else ""
+    replace_arxiv_chunks_for_paper(conn, paper, text)
+
+
+def _queue_imported_report(conn: sqlite3.Connection, settings: Settings, paper_id: int) -> None:
+    queue_paper_report(conn, paper_id, prompt=_reader_report_prompt(settings))
+
+
+def import_reader_pdf(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    filename = clean_unicode(str(payload.get("filename") or "uploaded.pdf")).strip() or "uploaded.pdf"
+    title = clean_unicode(str(payload.get("title") or "")).strip() or _title_from_filename(filename, "Uploaded PDF")
+    raw_base64 = str(payload.get("content_base64") or payload.get("contentBase64") or "").strip()
+    if "," in raw_base64 and raw_base64.lower().startswith("data:"):
+        raw_base64 = raw_base64.split(",", 1)[1]
+    if not raw_base64:
+        raise RuntimeError("PDF upload content is required")
+    try:
+        pdf_bytes = base64.b64decode(raw_base64, validate=True)
+    except Exception as exc:
+        raise RuntimeError("Invalid base64 PDF upload") from exc
+    if not pdf_bytes.startswith(b"%PDF-"):
+        raise RuntimeError("Uploaded file does not look like a PDF")
+
+    digest = hashlib.sha256(pdf_bytes).hexdigest()
+    stem = _reader_file_stem("upload", digest)
+    pdf_path = settings.arxiv_pdf_dir / f"{stem}.pdf"
+    text_path = settings.arxiv_text_dir / f"{stem}.txt"
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    pdf_path.write_bytes(pdf_bytes)
+    text_error = ""
+    try:
+        char_count = extract_pdf_text_to_file(pdf_path, text_path)
+        text_status = "complete"
+    except Exception as exc:
+        char_count = 0
+        text_status = "failed"
+        text_error = str(exc)[:1000]
+    paper_id = _insert_imported_paper(
+        conn,
+        arxiv_id=f"reader-upload-{digest[:16]}",
+        title=title,
+        summary="Manual PDF import.",
+        link="",
+        pdf_link="",
+        pdf_path=pdf_path,
+        text_path=text_path,
+        text_status=text_status,
+        text_error=text_error,
+        text_char_count=char_count,
+    )
+    if text_status == "complete":
+        _finalize_imported_pdf(conn, paper_id, pdf_path, text_path)
+    _queue_imported_report(conn, settings, paper_id)
+    conn.commit()
+    detail = paper_reader_detail(conn, paper_id)
+    detail["ok"] = True
+    detail["imported"] = {"paper_id": paper_id, "source": "upload", "text_status": text_status}
+    return detail
+
+
+def import_reader_pdfs(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    files = payload.get("files")
+    if not isinstance(files, list):
+        return import_reader_pdf(conn, settings, payload)
+    imported: list[dict[str, object]] = []
+    errors: list[dict[str, str]] = []
+    last_detail: dict[str, object] | None = None
+    for index, item in enumerate(files):
+        if not isinstance(item, dict):
+            errors.append({"filename": f"file-{index + 1}", "error": "Invalid file payload"})
+            continue
+        try:
+            last_detail = import_reader_pdf(conn, settings, item)
+            imported.append(dict(last_detail.get("imported") or {}))
+        except Exception as exc:
+            conn.rollback()
+            errors.append(
+                {
+                    "filename": clean_unicode(str(item.get("filename") or f"file-{index + 1}")),
+                    "error": str(exc),
+                }
+            )
+    return {
+        "ok": bool(imported),
+        "imported": imported,
+        "errors": errors,
+        "last_detail": last_detail,
+    }
+
+
+def import_reader_urls(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    raw_urls = payload.get("urls", [])
+    if isinstance(raw_urls, str):
+        urls = [item.strip() for item in raw_urls.splitlines() if item.strip()]
+    elif isinstance(raw_urls, list):
+        urls = [str(item).strip() for item in raw_urls if str(item).strip()]
+    else:
+        urls = []
+    if not urls:
+        raise RuntimeError("At least one URL is required")
+
+    imported: list[dict[str, object]] = []
+    errors: list[dict[str, str]] = []
+    for url in urls:
+        try:
+            pdf_link = _discover_pdf_url(url)
+            arxiv_id = _arxiv_id_from_url(url) or _arxiv_id_from_url(pdf_link)
+            source_id = arxiv_id or f"reader-url-{hashlib.sha256(url.encode('utf-8', 'replace')).hexdigest()[:16]}"
+            stem = _reader_file_stem("url", source_id)
+            pdf_path = settings.arxiv_pdf_dir / f"{stem}.pdf"
+            text_path = settings.arxiv_text_dir / f"{stem}.txt"
+            download_pdf(pdf_link, pdf_path)
+            text_error = ""
+            try:
+                char_count = extract_pdf_text_to_file(pdf_path, text_path)
+                text_status = "complete"
+            except Exception as exc:
+                char_count = 0
+                text_status = "failed"
+                text_error = str(exc)[:1000]
+            paper_id = _insert_imported_paper(
+                conn,
+                arxiv_id=source_id,
+                title=clean_unicode(str(payload.get("title") or "")).strip() or _title_from_url(url),
+                summary=f"Imported from {url}",
+                link=url,
+                pdf_link=pdf_link,
+                pdf_path=pdf_path,
+                text_path=text_path,
+                text_status=text_status,
+                text_error=text_error,
+                text_char_count=char_count,
+            )
+            if text_status == "complete":
+                _finalize_imported_pdf(conn, paper_id, pdf_path, text_path)
+            _queue_imported_report(conn, settings, paper_id)
+            conn.commit()
+            imported.append({"paper_id": paper_id, "url": url, "pdf_link": pdf_link, "text_status": text_status})
+        except Exception as exc:
+            conn.rollback()
+            errors.append({"url": url, "error": str(exc)})
+    return {"ok": bool(imported), "imported": imported, "errors": errors}
+
+
+def _history_for_model(rows: list[dict[str, object]]) -> list[dict[str, str]]:
+    messages: list[dict[str, str]] = []
+    for row in rows:
+        role = str(row.get("role") or "")
+        content = clean_unicode(str(row.get("content") or "")).strip()
+        if role in VALID_READER_ROLES and content:
+            messages.append({"role": role, "content": content})
+    return messages
+
+
+def _build_chat_messages(paper_text: str, history: list[dict[str, object]], message: str) -> list[dict[str, str]]:
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a research paper reading assistant. Answer from the supplied full PDF text whenever possible.",
+        },
+        {
+            "role": "user",
+            "content": (
+                "下面是 PyMuPDF 从论文 PDF 中解析出的完整文本，按页保留。"
+                "后续对话都应优先基于这份文本回答。\n\n"
+                "<paper_text>\n"
+                f"{paper_text}\n"
+                "</paper_text>"
+            ),
+        },
+        {"role": "assistant", "content": "我已收到完整 PDF 解析文本。"},
+    ]
+    normalized = _history_for_model(history)
+    if normalized:
+        messages.extend(normalized)
+    else:
+        messages.append({"role": "user", "content": "Please summarize this paper."})
+    messages.append({"role": "user", "content": message})
+    return messages
+
+
+def paper_reader_detail(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
+    from .api import paper_detail
+
+    detail = paper_detail(conn, paper_id)
+    detail["reader_messages"] = paper_reader_messages(conn, paper_id)
+    return detail
+
+
+def paper_reader_chat(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    paper_id: int,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    message = clean_unicode(str(payload.get("message") or "")).strip()
+    if not message:
+        raise RuntimeError("Chat message is required")
+
+    paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
+    if not paper:
+        raise RuntimeError(f"Paper not found: {paper_id}")
+
+    history = paper_reader_messages(conn, paper_id)
+    paper_text = _ensure_full_text(conn, settings, paper_id)
+    if not paper_text:
+        raise RuntimeError("Full paper text is missing")
+
+    now = utc_now()
+    conn.execute(
+        """
+        INSERT INTO paper_reader_messages(
+          paper_id, role, content, source, model_provider_id, model, created_at
+        )
+        VALUES (?, 'user', ?, 'chat', '', '', ?)
+        """,
+        (paper_id, message, now),
+    )
+    conn.commit()
+
+    model_messages = _build_chat_messages(paper_text, history, message)
+    provider_id, model = _reader_chat_model(settings)
+    answer = _call_chat_text(
+        settings,
+        model_messages,
+        provider_id=provider_id,
+        model=model,
+        purpose="Paper reader chat",
+    )
+    created_at = utc_now()
+    conn.execute(
+        """
+        INSERT INTO paper_reader_messages(
+          paper_id, role, content, source, model_provider_id, model, created_at
+        )
+        VALUES (?, 'assistant', ?, 'chat', ?, ?, ?)
+        """,
+        (
+            paper_id,
+            answer,
+            provider_id,
+            model,
+            created_at,
+        ),
+    )
+    conn.commit()
+    return paper_reader_detail(conn, paper_id)
+
+
+def paper_reader_chat_stream(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    paper_id: int,
+    payload: dict[str, object],
+    emit,
+) -> None:
+    message = clean_unicode(str(payload.get("message") or "")).strip()
+    if not message:
+        raise RuntimeError("Chat message is required")
+
+    paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
+    if not paper:
+        raise RuntimeError(f"Paper not found: {paper_id}")
+
+    history = paper_reader_messages(conn, paper_id)
+    paper_text = _ensure_full_text(conn, settings, paper_id)
+    if not paper_text:
+        raise RuntimeError("Full paper text is missing")
+
+    now = utc_now()
+    conn.execute(
+        """
+        INSERT INTO paper_reader_messages(
+          paper_id, role, content, source, model_provider_id, model, created_at
+        )
+        VALUES (?, 'user', ?, 'chat', '', '', ?)
+        """,
+        (paper_id, message, now),
+    )
+    conn.commit()
+
+    provider_id, model = _reader_chat_model(settings)
+    emit("start", {"model": {"provider_id": provider_id, "model": model}})
+    model_messages = _build_chat_messages(paper_text, history, message)
+    answer_parts: list[str] = []
+    for chunk in _iter_chat_text_chunks(
+        settings,
+        model_messages,
+        provider_id=provider_id,
+        model=model,
+        purpose="Paper reader chat stream",
+    ):
+        if not chunk:
+            continue
+        answer_parts.append(chunk)
+        emit("chunk", {"text": chunk})
+    answer = clean_unicode("".join(answer_parts)).strip()
+    if not answer:
+        raise RuntimeError("Paper reader chat stream returned an empty response")
+    created_at = utc_now()
+    cursor = conn.execute(
+        """
+        INSERT INTO paper_reader_messages(
+          paper_id, role, content, source, model_provider_id, model, created_at
+        )
+        VALUES (?, 'assistant', ?, 'chat', ?, ?, ?)
+        """,
+        (paper_id, answer, provider_id, model, created_at),
+    )
+    conn.commit()
+    emit(
+        "done",
+        {
+            "message": {
+                "id": int(cursor.lastrowid),
+                "paper_id": paper_id,
+                "role": "assistant",
+                "content": answer,
+                "source": "chat",
+                "model_provider_id": provider_id,
+                "model": model,
+                "created_at": created_at,
+            },
+            "detail": paper_reader_detail(conn, paper_id),
+        },
+    )
+
+
+def delete_reader_message(conn: sqlite3.Connection, paper_id: int, message_id: int) -> dict[str, object]:
+    cursor = conn.execute(
+        "DELETE FROM paper_reader_messages WHERE id = ? AND paper_id = ?",
+        (int(message_id), int(paper_id)),
+    )
+    if cursor.rowcount == 0:
+        raise RuntimeError("Message not found")
+    conn.commit()
+    detail = paper_reader_detail(conn, paper_id)
+    detail["ok"] = True
+    return detail
+
+
+def cancel_reader_report(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
+    report = conn.execute(
+        "SELECT status FROM paper_reading_reports WHERE paper_id = ?",
+        (paper_id,),
+    ).fetchone()
+    if not report:
+        raise RuntimeError("Report queue item was not found")
+    status = str(report["status"] or "")
+    if status == "queued":
+        now = utc_now()
+        conn.execute(
+            """
+            UPDATE paper_reading_reports
+            SET status = 'cancelled',
+                error_message = '',
+                finished_at = ?,
+                updated_at = ?
+            WHERE paper_id = ?
+            """,
+            (now, now, paper_id),
+        )
+        conn.commit()
+    elif status == "processing":
+        raise RuntimeError("Processing reports cannot be cancelled")
+    detail = paper_reader_detail(conn, paper_id)
+    detail["ok"] = True
+    return detail
+
+
+def retry_reader_report(conn: sqlite3.Connection, settings: Settings, paper_id: int) -> dict[str, object]:
+    queue_paper_report(conn, paper_id, force=True, prompt=_reader_report_prompt(settings))
+    detail = paper_reader_detail(conn, paper_id)
+    detail["ok"] = True
+    return detail
+
+
+def _paper_payload(paper: sqlite3.Row) -> dict[str, object]:
+    return {
+        "id": int(paper["id"]),
+        "title": paper["title"],
+        "original_url": paper["link"],
+        "original_filename": "",
+        "source_type": "arxiv" if not str(paper["arxiv_id"] or "").startswith("reader-") else "reader",
+        "arxiv_id": paper["arxiv_id"],
+    }
+
+
+def _build_note_messages(paper: sqlite3.Row, initial_analysis: str, follow_up_messages: list[dict[str, object]]) -> list[dict[str, str]]:
+    paper_data = _paper_payload(paper)
+    title = paper_data.get("title") or paper_data.get("original_filename") or paper_data.get("original_url") or f"Paper {paper_data.get('id', '')}".strip()
+    metadata_lines = [
+        f"- Paper Reader ID: {paper_data.get('id')}",
+        f"- Title: {title}",
+        f"- Source type: {paper_data.get('source_type') or ''}",
+    ]
+    if paper_data.get("original_url"):
+        metadata_lines.append(f"- Original URL: {paper_data.get('original_url')}")
+    if paper_data.get("original_filename"):
+        metadata_lines.append(f"- Original filename: {paper_data.get('original_filename')}")
+
+    transcript = []
+    for index, message in enumerate(_history_for_model(follow_up_messages), start=1):
+        transcript.append(f"### Message {index} ({message['role']})\n\n{message['content']}")
+
+    user_message = (
+        "请把一篇论文的初始分析作为基准，将后续会话中有价值的信息有机整合进去，"
+        "生成一份可直接保存到 Obsidian 的结构化中文 Markdown 笔记。\n\n"
+        "要求：\n"
+        "- 只输出一个合法 JSON object，不要输出 Markdown front matter，不要包裹在代码块中。\n"
+        "- JSON 必须包含 tags、task、TLDR、aliases、body 五个字段。\n"
+        "- tags 是字符串数组，必须包含 Paper/普通；还要为论文的所有关键词分别添加 Concept/<keyword> 标签。关键词 tag 用中文术语优先，不能包含空格；如果必须使用英文多词术语，用下划线连接。\n"
+        "- task 是英文字符串，简短描述论文解决的任务或问题。\n"
+        "- TLDR 是中文字符串，用一句话概括论文做了什么。\n"
+        "- aliases 是字符串数组，只填写论文提出的框架、模型、方法缩写；没有明确缩写就输出空数组 []。\n"
+        "- body 是 Markdown 正文字符串，可以使用一级标题和二级标题；不要在 body 里输出 YAML front matter。\n"
+        "- 保留初始分析里的核心结构、事实和判断，不要为了改写而丢失信息。\n"
+        "- 将后续问答补充到最相关的小节里；不要简单追加完整聊天记录。\n"
+        "- 如果会话纠正了初始分析，请以会话中的纠正为准，并在文字中自然体现。\n"
+        "- 不要杜撰论文中没有出现、初始分析和会话都没有提供的信息。\n"
+        "- 正文可以保留关键英文术语；整体以中文表达。\n\n"
+        "JSON 示例：\n"
+        "{\n"
+        "  \"tags\": [\"Paper/普通\", \"Concept/知识电路\", \"Concept/预训练Transformer\"],\n"
+        "  \"task\": \"Short English task description.\",\n"
+        "  \"TLDR\": \"一句话说明论文做了什么。\",\n"
+        "  \"aliases\": [\"FRAMEWORK\"],\n"
+        "  \"body\": \"# 论文标题或主题\\n\\n## 研究问题和背景\\n\\n正文。\"\n"
+        "}\n\n"
+        "论文元数据：\n"
+        f"{chr(10).join(metadata_lines)}\n\n"
+        "<initial_analysis>\n"
+        f"{initial_analysis}\n"
+        "</initial_analysis>\n\n"
+        "<follow_up_conversation>\n"
+        f"{chr(10).join(transcript) if transcript else '无后续会话。'}\n"
+        "</follow_up_conversation>"
+    )
+
+    return [
+        {
+            "role": "system",
+            "content": "You are a careful research note editor. Produce precise, well-structured Markdown notes for Obsidian.",
+        },
+        {"role": "user", "content": user_message},
+    ]
+
+
+def _strip_json_code_fence(value: str) -> str:
+    text = clean_unicode(str(value or "")).strip()
+    match = re.match(r"^```(?:json)?\s*([\s\S]*?)\s*```$", text, flags=re.IGNORECASE)
+    return match.group(1).strip() if match else text
+
+
+def _parse_json_object(value: str) -> dict[str, object]:
+    text = _strip_json_code_fence(value)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Model returned invalid JSON: {text[:500]}") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Model returned JSON, but not an object")
+    return parsed
+
+
+def _normalize_list(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [clean_unicode(str(item)).strip() for item in value if clean_unicode(str(item)).strip()]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                parsed = json.loads(text.replace("'", '"'))
+                if isinstance(parsed, list):
+                    return _normalize_list(parsed)
+            except json.JSONDecodeError:
+                pass
+        return [text]
+    return []
+
+
+def _normalize_tag(value: str) -> str:
+    tag = re.sub(r"\s+", "_", clean_unicode(str(value or "")).strip().lstrip("#"))
+    tag = re.sub(r"""[\\?#\[\]()"']""", "", tag).strip("/")
+    if not tag:
+        return ""
+    if tag == "Paper/普通" or tag.startswith("Concept/"):
+        return tag
+    return f"Concept/{tag}"
+
+
+def _smart_save_frontmatter(paper: sqlite3.Row, generated: dict[str, object], existing: dict[str, object]) -> dict[str, object]:
+    updated = dict(existing)
+    tags = ["Paper/普通"]
+    for tag in _normalize_list(generated.get("tags")):
+        normalized = _normalize_tag(tag)
+        if normalized and normalized not in tags:
+            tags.append(normalized)
+    updated["tags"] = tags
+    updated["task"] = clean_unicode(str(generated.get("task") or "")).strip()
+    updated["TLDR"] = clean_unicode(str(generated.get("TLDR") or generated.get("tldr") or "")).strip()
+    updated["aliases"] = list(dict.fromkeys(_normalize_list(generated.get("aliases"))))
+    updated["arxiv_id"] = paper["arxiv_id"]
+    updated["link"] = paper["link"]
+    updated["pdf_link"] = paper["pdf_link"]
+    updated["published_at"] = paper["published_at"]
+    return updated
+
+
+def _generate_smart_save_note(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    paper: sqlite3.Row,
+    paper_id: int,
+) -> dict[str, object]:
+    report = paper_report_payload(conn, paper_id)
+    initial_analysis = ""
+    if report and report.get("status") == "done":
+        initial_analysis = clean_unicode(str(report.get("report_markdown") or "")).strip()
+    if not initial_analysis:
+        raise RuntimeError("Initial analysis is not available yet.")
+    messages = paper_reader_messages(conn, paper_id)
+    provider_id, model = _reader_smart_save_model(settings)
+    generated_text = _call_chat_text(
+        settings,
+        _build_note_messages(paper, initial_analysis, messages),
+        response_format={"type": "json_object"},
+        provider_id=provider_id,
+        model=model,
+        purpose="Paper reader Smart Save",
+    )
+    generated = _parse_json_object(generated_text)
+    body = clean_unicode(str(generated.get("body") or "")).strip()
+    if not body:
+        raise RuntimeError("Model returned an empty note body")
+    return {
+        "generated": generated,
+        "body": body,
+        "messages": messages,
+        "model": {"provider_id": provider_id, "model": model},
+    }
+
+
+def _build_question_messages(paper: sqlite3.Row, selected_text: str, anchor_message: dict[str, object]) -> list[dict[str, str]]:
+    title = paper["title"] or f"Paper {paper['id']}"
+    context_text = clean_unicode(str(anchor_message.get("context_text") or anchor_message.get("contextText") or anchor_message.get("content") or "")).strip()
+    user_message = (
+        "请根据用户在论文对话中选中的文字，生成一组可直接发送给论文助手的追问问题。\n\n"
+        "要求：\n"
+        "- 只输出一个合法 JSON object，不要包裹在代码块中。\n"
+        "- JSON 必须包含 questions 字段，值为 4 到 5 个字符串组成的数组。\n"
+        "- 每个问题都要短、简单、可直接发送；中文不超过 28 个字，英文不超过 14 个词。\n"
+        "- 每个问题只问一个点，不要使用多个从句，不要合并多个问题。\n"
+        "- 不要把选中文本整段复制进问题里；只引用必要关键词。\n"
+        "- 第一条问题必须是基础概念解释类问题，格式类似“请解释 X”或“X 是什么意思？”。\n"
+        "- X 应该从选中文本里挑一个最关键的概念、术语、方法名、指标或缩写；不要用“这段话”“这个概念”代替。\n"
+        "- 所有问题都必须围绕选中文本中的概念、方法、指标、结论或证据；不要针对上下文里的其他内容提问。\n"
+        "- 所在消息上下文只用于消歧和理解选中文本，不要把上下文当成独立提问对象。\n"
+        "- 不要生成泛泛的模板问题，不要重复。\n"
+        "- 优先使用中文；关键术语可以保留英文。\n\n"
+        "论文元数据：\n"
+        f"- Paper Reader ID: {paper['id']}\n"
+        f"- Title: {title}\n\n"
+        "所在消息：\n"
+        f"- Message ID: {anchor_message.get('id')}\n"
+        f"- Role: {anchor_message.get('role')}\n"
+        f"- Source: {anchor_message.get('source')}\n\n"
+        "<selected_text>\n"
+        f"{selected_text[:2000]}\n"
+        "</selected_text>\n\n"
+        "<message_context_window>\n"
+        f"{context_text[:4000]}\n"
+        "</message_context_window>"
+    )
+
+    return [
+        {
+            "role": "system",
+            "content": "You generate concise, high-value follow-up questions for research paper reading conversations.",
+        },
+        {"role": "user", "content": user_message},
+    ]
+
+
+def generate_reader_followup_questions(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    paper_id: int,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    selected_text = clean_unicode(str(payload.get("selected_text") or payload.get("selectedText") or "")).strip()
+    if not selected_text:
+        raise RuntimeError("Selected text is required")
+    anchor_message_id = int(payload.get("anchor_message_id") or payload.get("anchorMessageId") or 0)
+    anchor = conn.execute(
+        """
+        SELECT id, paper_id, role, content, source, model_provider_id, model, created_at
+        FROM paper_reader_messages
+        WHERE id = ?
+          AND paper_id = ?
+        """,
+        (anchor_message_id, paper_id),
+    ).fetchone()
+    if not anchor:
+        raise RuntimeError("Anchor message was not found for this paper")
+    paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
+    if not paper:
+        raise RuntimeError(f"Paper not found: {paper_id}")
+    anchor_payload = _reader_message_payload(anchor)
+    anchor_payload["context_text"] = payload.get("context_text") or payload.get("contextText") or anchor["content"]
+    provider_id, model = _reader_question_model(settings)
+    text = _call_chat_text(
+        settings,
+        _build_question_messages(paper, selected_text, anchor_payload),
+        response_format={"type": "json_object"},
+        provider_id=provider_id,
+        model=model,
+        purpose="Paper reader follow-up question generation",
+    )
+    parsed = _parse_json_object(text)
+    questions = _normalize_list(parsed.get("questions"))[:5]
+    if not questions:
+        raise RuntimeError("Model returned no follow-up questions")
+    return {
+        "ok": True,
+        "questions": questions,
+        "model": {
+            "provider_id": provider_id,
+            "model": model,
+        },
+    }
+
+
+def save_reader_note_to_obsidian(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    paper_id: int,
+) -> dict[str, object]:
+    vault = _vault(settings)
+    paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
+    if not paper:
+        raise RuntimeError(f"Paper not found: {paper_id}")
+
+    note_path, note_rel = _paper_note_path(vault, settings, paper)
+    attachment_rel = _copy_attachment(vault, settings, paper)
+    text = _read_text(note_path)
+    frontmatter, body = _split_frontmatter(text)
+    repo_rel = str(settings.obsidian_paper_repository_dir or "").replace("\\", "/").strip("/")
+    frontmatter = _update_frontmatter(frontmatter, paper, [], attachment_rel, repo_rel)
+
+    smart_save = _generate_smart_save_note(conn, settings, paper, paper_id)
+    frontmatter = _smart_save_frontmatter(paper, smart_save["generated"], frontmatter)
+    body = smart_save["body"]
+    _write_markdown(note_path, frontmatter, body)
+    return {
+        "ok": True,
+        "obsidian_path": note_rel,
+        "attachment_path": attachment_rel,
+        "chat_messages": len(smart_save["messages"]),
+        "has_report": True,
+        "generated": smart_save["generated"],
+        "model": smart_save["model"],
+    }

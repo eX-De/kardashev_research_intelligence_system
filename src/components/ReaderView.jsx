@@ -1,0 +1,811 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+import { api, fmtDate, postJson } from "../lib/dashboard.js";
+import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
+
+const REPORT_STATUS_LABELS = {
+  queued: "Queued",
+  processing: "Processing",
+  done: "Done",
+  failed: "Failed",
+  cancelled: "Cancelled"
+};
+
+function reportStatusLabel(status) {
+  return REPORT_STATUS_LABELS[status] || status || "Missing";
+}
+
+function parseSseEvent(rawEvent) {
+  const lines = rawEvent.split(/\r?\n/);
+  const dataLines = [];
+  let event = "message";
+  for (const line of lines) {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+  }
+  if (!dataLines.length) return null;
+  return { event, data: JSON.parse(dataLines.join("\n")) };
+}
+
+async function readErrorResponse(response) {
+  const data = await response.json().catch(() => null);
+  return data?.error || `HTTP ${response.status}`;
+}
+
+async function readSseStream(response, handlers) {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("Streaming response is not available in this browser.");
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let match = buffer.match(/\r?\n\r?\n/);
+    while (match) {
+      const rawEvent = buffer.slice(0, match.index);
+      buffer = buffer.slice(match.index + match[0].length);
+      const parsed = parseSseEvent(rawEvent);
+      if (parsed?.event === "start") handlers.onStart?.(parsed.data);
+      if (parsed?.event === "chunk") handlers.onChunk?.(parsed.data.text || "");
+      if (parsed?.event === "done") handlers.onDone?.(parsed.data);
+      if (parsed?.event === "error") throw new Error(parsed.data.error || "Chat stream failed");
+      match = buffer.match(/\r?\n\r?\n/);
+    }
+  }
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    const parsed = parseSseEvent(buffer);
+    if (parsed?.event === "chunk") handlers.onChunk?.(parsed.data.text || "");
+    if (parsed?.event === "done") handlers.onDone?.(parsed.data);
+    if (parsed?.event === "error") throw new Error(parsed.data.error || "Chat stream failed");
+  }
+}
+
+function hasPersistedPendingUser(messages, pendingUser) {
+  if (!pendingUser) return false;
+  return messages.some((item) => item.role === "user" && item.content === pendingUser.content);
+}
+
+const FOLLOWUP_PANEL_WIDTH = 380;
+const FOLLOWUP_PANEL_MAX_HEIGHT = 360;
+const SELECTED_TEXT_LIMIT = 2000;
+const SELECTION_CONTEXT_CHARS = 3200;
+
+function normalizePromptText(text) {
+  return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function getSelectionRect(selection) {
+  if (!selection || selection.rangeCount === 0) return null;
+  const range = selection.getRangeAt(0);
+  const rect = range.getBoundingClientRect();
+  if (rect.width || rect.height) return rect;
+  return range.getClientRects()[0] || null;
+}
+
+function getFollowUpPanelPosition(rect) {
+  const margin = 12;
+  const width = Math.min(FOLLOWUP_PANEL_WIDTH, window.innerWidth - margin * 2);
+  const left = Math.min(Math.max(rect.left + rect.width / 2 - width / 2, margin), window.innerWidth - width - margin);
+  let top = rect.bottom + 8;
+  if (top + FOLLOWUP_PANEL_MAX_HEIGHT > window.innerHeight) {
+    top = Math.max(margin, rect.top - FOLLOWUP_PANEL_MAX_HEIGHT - 8);
+  }
+  return { left, top, width };
+}
+
+function getClosestMessageContent(node, root) {
+  const element = node?.nodeType === 1 ? node : node?.parentElement;
+  const content = element?.closest?.("[data-message-content='true']");
+  return content && root.contains(content) ? content : null;
+}
+
+function getRangeText(element) {
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  const text = range.toString();
+  range.detach?.();
+  return text;
+}
+
+function getSelectionStartOffset(selection, contentElement) {
+  const range = selection.getRangeAt(0);
+  const beforeSelection = document.createRange();
+  beforeSelection.selectNodeContents(contentElement);
+  beforeSelection.setEnd(range.startContainer, range.startOffset);
+  const offset = beforeSelection.toString().length;
+  beforeSelection.detach?.();
+  return offset;
+}
+
+function getSelectionContextText(selection, contentElement) {
+  const selectedLength = Math.min(selection.getRangeAt(0).toString().length, SELECTION_CONTEXT_CHARS);
+  const fullText = getRangeText(contentElement);
+  const startOffset = getSelectionStartOffset(selection, contentElement);
+  const endOffset = startOffset + selectedLength;
+  const beforeBudget = Math.floor(Math.max(SELECTION_CONTEXT_CHARS - selectedLength, 0) / 2);
+  let contextStart = Math.max(0, startOffset - beforeBudget);
+  let contextEnd = Math.min(fullText.length, contextStart + SELECTION_CONTEXT_CHARS);
+  contextStart = Math.max(0, Math.min(contextStart, contextEnd - SELECTION_CONTEXT_CHARS));
+  if (contextEnd < endOffset) {
+    contextEnd = Math.min(fullText.length, endOffset);
+    contextStart = Math.max(0, contextEnd - SELECTION_CONTEXT_CHARS);
+  }
+  return normalizePromptText(fullText.slice(contextStart, contextEnd));
+}
+
+function ReaderRow({ active, item, onSelect }) {
+  return (
+    <article className={`report-row ${active ? "active" : ""}`} onClick={() => onSelect(item.paper_id)} role="button" tabIndex={0}>
+      <div className="report-row-main">
+        <div className="report-row-title">{item.title}</div>
+        <div className="report-row-meta">
+          <span>{item.arxiv_id}</span>
+          <span>{item.text_status || "text pending"}</span>
+          {item.project_names?.length ? <span>{item.project_names.slice(0, 2).join(", ")}</span> : null}
+          {item.project_count > 2 ? <span>{item.project_count} projects</span> : null}
+          {item.model ? <span>{item.model}</span> : null}
+          {item.updated_at ? <span>{fmtDate(item.updated_at)}</span> : null}
+        </div>
+        {item.error_message ? <p className="report-row-error">{item.error_message}</p> : null}
+      </div>
+      <div className="report-row-actions">
+        <span className={`status-pill report-status-${item.status}`}>{reportStatusLabel(item.status)}</span>
+      </div>
+    </article>
+  );
+}
+
+function ChatMessage({ deleting, message, onDelete }) {
+  const isAssistant = message.role === "assistant";
+  const persistedId = Number.isInteger(Number(message.id)) ? Number(message.id) : null;
+  return (
+    <article
+      className={`reader-message ${isAssistant ? "assistant" : "user"} ${message.transient ? "transient" : ""}`}
+      data-message-id={persistedId ?? undefined}
+      data-reader-message={persistedId ? "true" : undefined}
+    >
+      <div className="reader-message-header">
+        <strong>{isAssistant ? "Assistant" : "You"}</strong>
+        {message.model ? <span>{message.model}</span> : null}
+        {message.created_at ? <span>{fmtDate(message.created_at)}</span> : null}
+        {message.streaming ? <span>streaming</span> : null}
+        {persistedId && onDelete ? (
+          <button disabled={deleting} onClick={() => onDelete(persistedId)} type="button">
+            {deleting ? "删除中" : "删除"}
+          </button>
+        ) : null}
+      </div>
+      <div data-message-content="true">
+        {isAssistant ? (
+          message.content ? <LazyMarkdownReport markdown={message.content} /> : <p className="muted">...</p>
+        ) : (
+          <p>{message.content}</p>
+        )}
+      </div>
+    </article>
+  );
+}
+
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("PDF 读取失败"));
+    reader.onload = () => {
+      const value = String(reader.result || "");
+      resolve(value.includes(",") ? value.split(",", 2)[1] : value);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function ReaderDetail({
+  activeTab,
+  busy,
+  deletingMessageId,
+  detail,
+  displayedMessages,
+  message,
+  onCancel,
+  onDeleteMessage,
+  onGenerate,
+  onRetry,
+  onSave,
+  onSendMessage,
+  onSendQuestion,
+  onTabChange,
+  setMessage
+}) {
+  const [selectedText, setSelectedText] = useState("");
+  const [selectionContext, setSelectionContext] = useState(null);
+  const [questionSuggestions, setQuestionSuggestions] = useState([]);
+  const [questionError, setQuestionError] = useState("");
+  const [generatingQuestions, setGeneratingQuestions] = useState(false);
+  const [followUpPanelPosition, setFollowUpPanelPosition] = useState(null);
+  const messagesRef = useRef(null);
+
+  useEffect(() => {
+    if (!selectedText) return undefined;
+
+    function selectionIsInMessages(selection) {
+      const root = messagesRef.current;
+      const anchorNode = selection?.anchorNode;
+      const focusNode = selection?.focusNode;
+      return Boolean(root && anchorNode && focusNode && root.contains(anchorNode) && root.contains(focusNode));
+    }
+
+    function closeIfSelectionCleared() {
+      const selection = window.getSelection?.();
+      if (!selection || selection.rangeCount === 0 || !normalizePromptText(selection.toString()) || !selectionIsInMessages(selection)) {
+        resetFollowUpSelection();
+      }
+    }
+
+    function refreshPanelPosition() {
+      const root = messagesRef.current;
+      const selection = window.getSelection?.();
+      if (!root || !selection || selection.rangeCount === 0) return;
+      const anchorNode = selection.anchorNode;
+      const focusNode = selection.focusNode;
+      if (!anchorNode || !focusNode || !root.contains(anchorNode) || !root.contains(focusNode)) return;
+      const rect = getSelectionRect(selection);
+      if (rect) setFollowUpPanelPosition(getFollowUpPanelPosition(rect));
+    }
+
+    document.addEventListener("selectionchange", closeIfSelectionCleared);
+    window.addEventListener("resize", refreshPanelPosition);
+    window.addEventListener("scroll", refreshPanelPosition, true);
+    return () => {
+      document.removeEventListener("selectionchange", closeIfSelectionCleared);
+      window.removeEventListener("resize", refreshPanelPosition);
+      window.removeEventListener("scroll", refreshPanelPosition, true);
+    };
+  }, [selectedText]);
+
+  useEffect(() => {
+    if (activeTab !== "chat" && selectedText) resetFollowUpSelection();
+  }, [activeTab, selectedText]);
+
+  if (!detail?.paper) {
+    return (
+      <div className="empty-detail">
+        <h2>选择一篇论文</h2>
+        <p>解读报告和逐篇对话会显示在这里。</p>
+      </div>
+    );
+  }
+  const paper = detail.paper;
+  const report = detail.paper_report || {};
+  const ready = report.status === "done" && String(report.report_markdown || "").trim();
+  const canRetry = ["done", "failed", "cancelled"].includes(report.status);
+
+  function resetFollowUpSelection() {
+    setSelectedText("");
+    setSelectionContext(null);
+    setQuestionSuggestions([]);
+    setQuestionError("");
+    setFollowUpPanelPosition(null);
+  }
+
+  function clearSelection() {
+    resetFollowUpSelection();
+    window.getSelection?.().removeAllRanges?.();
+  }
+
+  function updateSelectedText() {
+    const root = messagesRef.current;
+    const selection = window.getSelection?.();
+    if (!root || !selection || selection.rangeCount === 0) return;
+    const anchorNode = selection.anchorNode;
+    const focusNode = selection.focusNode;
+    if (!anchorNode || !focusNode || !root.contains(anchorNode) || !root.contains(focusNode)) return;
+    const anchorContent = getClosestMessageContent(anchorNode, root);
+    const focusContent = getClosestMessageContent(focusNode, root);
+    if (!anchorContent || anchorContent !== focusContent) {
+      clearSelection();
+      return;
+    }
+    const anchorMessage = anchorContent.closest("[data-message-id]");
+    const messageId = Number(anchorMessage?.dataset?.messageId);
+    if (!Number.isInteger(messageId)) {
+      clearSelection();
+      return;
+    }
+    const text = normalizePromptText(selection.toString());
+    if (!text) return;
+    const rect = getSelectionRect(selection);
+    if (!rect) return;
+    const contextText = getSelectionContextText(selection, anchorContent);
+    if (!contextText) {
+      clearSelection();
+      return;
+    }
+    setSelectedText(text.slice(0, SELECTED_TEXT_LIMIT));
+    setSelectionContext({
+      messageId,
+      contextText
+    });
+    setFollowUpPanelPosition(getFollowUpPanelPosition(rect));
+    setQuestionSuggestions([]);
+    setQuestionError("");
+  }
+
+  async function generateQuestions() {
+    if (!selectedText || !selectionContext?.messageId) return;
+    setGeneratingQuestions(true);
+    setQuestionError("");
+    setQuestionSuggestions([]);
+    try {
+      const result = await postJson(`/api/reader/papers/${paper.id}/follow-up-questions`, {
+        selected_text: selectedText,
+        anchor_message_id: selectionContext.messageId,
+        context_text: selectionContext.contextText
+      });
+      setQuestionSuggestions(result.questions || []);
+    } catch (error) {
+      setQuestionError(error.message);
+    } finally {
+      setGeneratingQuestions(false);
+    }
+  }
+
+  async function sendSuggestedQuestion(question) {
+    clearSelection();
+    await onSendQuestion(question);
+  }
+
+  return (
+    <div className="detail-card reader-detail-card">
+      <div className="detail-main">
+        <div className="detail-title">
+          <h2>{paper.title}</h2>
+          <p className="muted">
+            <a href={paper.link} target="_blank" rel="noreferrer">{paper.arxiv_id}</a>
+            {" · "}
+            {(paper.categories || []).join(", ") || "arXiv"}
+          </p>
+          <p className="muted">TXT: {paper.text_status || "pending"}{paper.text_path ? ` · ${paper.text_path}` : ""}</p>
+          {paper.pdf_path ? (
+            <p className="muted">
+              <a href={`/api/reader/papers/${paper.id}/pdf`} target="_blank" rel="noreferrer">打开 PDF</a>
+              {" · "}
+              {paper.pdf_path}
+            </p>
+          ) : null}
+        </div>
+
+        <div className="reader-tabs" role="tablist">
+          <button className={activeTab === "analysis" ? "active" : ""} onClick={() => onTabChange("analysis")} type="button">
+            解读报告
+          </button>
+          <button className={activeTab === "chat" ? "active" : ""} onClick={() => onTabChange("chat")} type="button">
+            Chat
+          </button>
+        </div>
+
+        {activeTab === "analysis" ? (
+          <>
+            <div className={`report-state ${report.status || "missing"}`}>
+              <strong>{reportStatusLabel(report.status)}</strong>
+              {report.error_message ? <p>{report.error_message}</p> : null}
+              {report.model ? <p>{report.model_provider_id ? `${report.model_provider_id} · ` : ""}{report.model}</p> : null}
+              {report.updated_at ? <p>Updated: {fmtDate(report.updated_at)}</p> : null}
+            </div>
+            <div className="detail-actions">
+              <button disabled={busy} onClick={() => onSave(paper.id)} type="button">保存到 Obsidian</button>
+              {report.status !== "processing" && report.status !== "queued" && !ready ? (
+                <button disabled={busy} onClick={() => onGenerate(paper.id, false)} type="button">生成全文报告</button>
+              ) : null}
+              {report.status === "queued" ? (
+                <button disabled={busy} onClick={() => onCancel(paper.id)} type="button">取消排队</button>
+              ) : null}
+              {canRetry ? (
+                <button disabled={busy} onClick={() => onRetry(paper.id)} type="button">重新入队</button>
+              ) : null}
+            </div>
+            <div className="section">
+              <h3>项目关联</h3>
+              <div className="evidence-list">
+                {(detail.project_recommendations || []).length ? detail.project_recommendations.map((recommendation) => (
+                  <article className="evidence" key={`${recommendation.project_id}-${recommendation.state}`}>
+                    <strong>{recommendation.project_name} · {recommendation.relation_type} · {recommendation.state}</strong>
+                    <p>{recommendation.reason || "暂无推荐理由。"}</p>
+                  </article>
+                )) : <p className="summary">暂无项目级推荐。</p>}
+              </div>
+            </div>
+            <div className="section">
+              <h3>全文报告</h3>
+              {ready ? <LazyMarkdownReport markdown={report.report_markdown} /> : <p className="muted">报告尚未生成。</p>}
+            </div>
+          </>
+        ) : (
+          <section className="reader-chat">
+            <div className="reader-messages" onKeyUp={updateSelectedText} onMouseUp={updateSelectedText} ref={messagesRef}>
+              {displayedMessages.length ? displayedMessages.map((item) => (
+                <ChatMessage
+                  deleting={deletingMessageId === Number(item.id)}
+                  key={item.id}
+                  message={item}
+                  onDelete={onDeleteMessage}
+                />
+              )) : <p className="muted">还没有对话。发送问题后会基于论文全文回答。</p>}
+            </div>
+            {selectedText && followUpPanelPosition ? (
+              <div
+                className="reader-followups reader-followups-floating"
+                onMouseDown={(event) => event.preventDefault()}
+                style={{
+                  left: `${followUpPanelPosition.left}px`,
+                  top: `${followUpPanelPosition.top}px`,
+                  width: `${followUpPanelPosition.width}px`
+                }}
+              >
+                <div className="reader-followups-header">
+                  <strong>追问建议</strong>
+                  <button onClick={clearSelection} type="button">清除</button>
+                </div>
+                <p>{selectedText.length > 260 ? `${selectedText.slice(0, 260)}...` : selectedText}</p>
+                <div className="reader-followups-actions">
+                  <button disabled={generatingQuestions || busy} onClick={generateQuestions} type="button">
+                    {generatingQuestions ? "生成中" : "生成追问"}
+                  </button>
+                </div>
+                {questionError ? <div className="error-line">{questionError}</div> : null}
+                {questionSuggestions.length ? (
+                  <div className="reader-question-list">
+                    {questionSuggestions.map((question, index) => (
+                      <button disabled={busy} key={`${question}-${index}`} onClick={() => sendSuggestedQuestion(question)} type="button">
+                        {question}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            <form className="reader-composer" onSubmit={onSendMessage}>
+              <textarea
+                disabled={busy}
+                onChange={(event) => setMessage(event.target.value)}
+                placeholder="针对这篇论文提问..."
+                value={message}
+              />
+              <button disabled={busy || !message.trim()} type="submit">{busy ? "发送中" : "发送"}</button>
+            </form>
+          </section>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function ReaderView({ setStatusMessage }) {
+  const [items, setItems] = useState([]);
+  const [stats, setStats] = useState({});
+  const [queueStatus, setQueueStatus] = useState({});
+  const [activePaperId, setActivePaperId] = useState(null);
+  const [detail, setDetail] = useState(null);
+  const [activeTab, setActiveTab] = useState("analysis");
+  const [message, setMessage] = useState("");
+  const [urls, setUrls] = useState("");
+  const [selectedFiles, setSelectedFiles] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
+  const [pendingUser, setPendingUser] = useState(null);
+  const [streamingAssistant, setStreamingAssistant] = useState(null);
+  const [deletingMessageId, setDeletingMessageId] = useState(null);
+
+  const baseMessages = detail?.reader_messages || [];
+  const displayedMessages = useMemo(() => {
+    const messages = [...baseMessages];
+    if (pendingUser && !hasPersistedPendingUser(baseMessages, pendingUser)) messages.push(pendingUser);
+    if (streamingAssistant) messages.push(streamingAssistant);
+    return messages;
+  }, [baseMessages, pendingUser, streamingAssistant]);
+
+  const loadPaper = useCallback(async (paperId) => {
+    const data = await api(`/api/reader/papers/${paperId}`);
+    setDetail(data);
+    setActivePaperId(Number(paperId));
+  }, []);
+
+  const refresh = useCallback(async () => {
+    const [data, statusData] = await Promise.all([
+      api("/api/reader/papers"),
+      api("/api/jobs/status")
+    ]);
+    const nextItems = data.items || [];
+    setItems(nextItems);
+    setStats(data.stats || {});
+    setQueueStatus(statusData.scheduler?.paper_report_queue || {});
+    const nextId = activePaperId && nextItems.some((item) => item.paper_id === activePaperId)
+      ? activePaperId
+      : nextItems[0]?.paper_id;
+    if (nextId) {
+      await loadPaper(nextId);
+    } else {
+      setDetail(null);
+      setActivePaperId(null);
+    }
+  }, [activePaperId, loadPaper]);
+
+  useEffect(() => {
+    refresh().catch((error) => setStatusMessage(error.message));
+    const timer = setInterval(() => {
+      refresh().catch((error) => setStatusMessage(error.message));
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [refresh, setStatusMessage]);
+
+  async function generateReport(paperId, force = false) {
+    setBusy(true);
+    try {
+      const data = await postJson(`/api/papers/${paperId}/report`, { force });
+      setDetail(data);
+      setStatusMessage(data.paper_report?.status === "done" ? "全文报告已生成" : reportStatusLabel(data.paper_report?.status));
+      await refresh();
+    } catch (error) {
+      setStatusMessage(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function cancelReport(paperId) {
+    setBusy(true);
+    try {
+      const data = await postJson(`/api/reader/papers/${paperId}/cancel`, {});
+      setDetail(data);
+      setStatusMessage("报告排队已取消");
+      await refresh();
+    } catch (error) {
+      setStatusMessage(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function retryReport(paperId) {
+    setBusy(true);
+    try {
+      const data = await postJson(`/api/reader/papers/${paperId}/retry`, {});
+      setDetail(data);
+      setStatusMessage("报告已重新加入队列");
+      await refresh();
+    } catch (error) {
+      setStatusMessage(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function sendReaderMessage(rawMessage, options = {}) {
+    const paperId = activePaperId;
+    if (!paperId || !String(rawMessage || "").trim()) return;
+    const nextMessage = String(rawMessage || "").trim();
+    const sentAt = Date.now();
+    setBusy(true);
+    setActiveTab("chat");
+    setPendingUser({
+      id: `pending-user-${sentAt}`,
+      role: "user",
+      content: nextMessage,
+      source: "chat",
+      created_at: new Date(sentAt).toISOString(),
+      transient: true
+    });
+    setStreamingAssistant({
+      id: `streaming-assistant-${sentAt}`,
+      role: "assistant",
+      content: "",
+      source: "chat",
+      created_at: new Date().toISOString(),
+      transient: true,
+      streaming: true
+    });
+    try {
+      const response = await fetch(`/api/reader/papers/${paperId}/chat`, {
+        method: "POST",
+        headers: { accept: "text/event-stream", "content-type": "application/json" },
+        body: JSON.stringify({ message: nextMessage, stream: true })
+      });
+      if (!response.ok) throw new Error(await readErrorResponse(response));
+      let completed = false;
+      await readSseStream(response, {
+        onStart(data) {
+          setStreamingAssistant((current) => current ? {
+            ...current,
+            model: data.model?.model || current.model,
+            model_provider_id: data.model?.provider_id || current.model_provider_id
+          } : current);
+        },
+        onChunk(text) {
+          setStreamingAssistant((current) => current ? { ...current, content: `${current.content}${text}` } : current);
+        },
+        onDone(data) {
+          completed = true;
+          if (data.detail) setDetail(data.detail);
+        }
+      });
+      if (!completed) await loadPaper(paperId);
+      setStatusMessage("阅读器回复已生成");
+    } catch (error) {
+      if (options.restoreOnFailure !== false) setMessage(nextMessage);
+      setStatusMessage(error.message);
+      await loadPaper(paperId).catch(() => {});
+    } finally {
+      setPendingUser(null);
+      setStreamingAssistant(null);
+      setBusy(false);
+    }
+  }
+
+  async function sendMessage(event) {
+    event.preventDefault();
+    const nextMessage = message.trim();
+    setMessage("");
+    await sendReaderMessage(nextMessage);
+  }
+
+  async function deleteMessage(messageId) {
+    if (!activePaperId) return;
+    setDeletingMessageId(messageId);
+    try {
+      const data = await api(`/api/reader/papers/${activePaperId}/messages/${messageId}`, { method: "DELETE" });
+      setDetail(data);
+      setStatusMessage("消息已删除");
+    } catch (error) {
+      setStatusMessage(error.message);
+    } finally {
+      setDeletingMessageId(null);
+    }
+  }
+
+  async function saveToObsidian(paperId) {
+    setBusy(true);
+    try {
+      const data = await postJson(`/api/reader/papers/${paperId}/save`, {});
+      setStatusMessage(`已保存到 Obsidian：${data.obsidian_path || ""}`);
+    } catch (error) {
+      setStatusMessage(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitUrls(event) {
+    event.preventDefault();
+    if (!urls.trim()) return;
+    setImportBusy(true);
+    try {
+      const data = await postJson("/api/reader/papers/urls", { urls });
+      setUrls("");
+      setStatusMessage(`URL 导入完成：${data.imported?.length || 0} 篇，失败 ${data.errors?.length || 0} 篇`);
+      await refresh();
+      const firstId = data.imported?.[0]?.paper_id;
+      if (firstId) await loadPaper(firstId);
+    } catch (error) {
+      setStatusMessage(error.message);
+    } finally {
+      setImportBusy(false);
+    }
+  }
+
+  async function submitPdf(event) {
+    event.preventDefault();
+    if (!selectedFiles.length) return;
+    setImportBusy(true);
+    try {
+      const files = [];
+      for (const file of selectedFiles) {
+        files.push({
+          filename: file.name,
+          title: file.name.replace(/\.pdf$/i, ""),
+          content_base64: await readFileAsBase64(file)
+        });
+      }
+      const data = await postJson("/api/reader/papers/upload", { files });
+      setSelectedFiles([]);
+      event.currentTarget.reset();
+      setStatusMessage(`PDF 导入完成：${data.imported?.length || 0} 篇，失败 ${data.errors?.length || 0} 篇`);
+      await refresh();
+      const firstId = data.imported?.[0]?.paper_id || data.last_detail?.paper?.id;
+      if (firstId) await loadPaper(firstId);
+    } catch (error) {
+      setStatusMessage(error.message);
+    } finally {
+      setImportBusy(false);
+    }
+  }
+
+  return (
+    <section className="view report-queue-view reader-view">
+      <section className="report-list-panel" aria-label="全文报告队列">
+        <header className="panel-header">
+          <div>
+            <h1>报告队列</h1>
+            <p className="muted">
+              自动生成{queueStatus.enabled ? "已启用" : "未启用"}
+              {queueStatus.concurrency ? ` · concurrency ${queueStatus.active || 0}/${queueStatus.concurrency}` : ""}
+              {queueStatus.last_skip_reason ? ` · ${queueStatus.last_skip_reason}` : ""}
+            </p>
+            <div className="report-stats-row">
+              {["queued", "processing", "done", "failed", "cancelled"].map((status) => (
+                <span className={`stat-pill report-status-${status}`} key={status}>
+                  {reportStatusLabel(status)}: {stats[status] || 0}
+                </span>
+              ))}
+              <span className="stat-pill">Total: {stats.total || 0}</span>
+            </div>
+          </div>
+          <button onClick={() => refresh().catch((error) => setStatusMessage(error.message))} type="button">刷新</button>
+        </header>
+        <div className="reader-import-panel">
+          <form className="reader-import-block" onSubmit={submitUrls}>
+            <label>
+              <span>URL</span>
+              <textarea
+                disabled={importBusy}
+                onChange={(event) => setUrls(event.target.value)}
+                placeholder="https://arxiv.org/abs/..."
+                value={urls}
+              />
+            </label>
+            <button disabled={importBusy || !urls.trim()} type="submit">导入 URL</button>
+          </form>
+          <form className="reader-import-block" onSubmit={submitPdf}>
+            <label>
+              <span>PDF</span>
+              <input
+                accept="application/pdf,.pdf"
+                disabled={importBusy}
+                multiple
+                onChange={(event) => setSelectedFiles([...event.target.files || []])}
+                type="file"
+              />
+            </label>
+            <button disabled={importBusy || !selectedFiles.length} type="submit">
+              导入 PDF{selectedFiles.length ? ` (${selectedFiles.length})` : ""}
+            </button>
+          </form>
+        </div>
+        <div className="report-list">
+          {items.length ? items.map((item) => (
+            <ReaderRow
+              active={item.paper_id === activePaperId}
+              item={item}
+              key={item.paper_id}
+              onSelect={(paperId) => loadPaper(paperId).catch((error) => setStatusMessage(error.message))}
+            />
+          )) : (
+            <div className="paper-card">
+              <h2>暂无全文报告任务</h2>
+              <div className="card-meta">项目级推荐通过后会自动进入这里，也可以导入 URL 或 PDF。</div>
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section className="detail-panel" aria-label="报告队列详情">
+        <ReaderDetail
+          activeTab={activeTab}
+          busy={busy}
+          deletingMessageId={deletingMessageId}
+          detail={detail}
+          displayedMessages={displayedMessages}
+          message={message}
+          onCancel={cancelReport}
+          onDeleteMessage={deleteMessage}
+          onGenerate={generateReport}
+          onRetry={retryReport}
+          onSave={saveToObsidian}
+          onSendQuestion={(question) => sendReaderMessage(question, { restoreOnFailure: false })}
+          onSendMessage={sendMessage}
+          onTabChange={setActiveTab}
+          setMessage={setMessage}
+        />
+      </section>
+    </section>
+  );
+}

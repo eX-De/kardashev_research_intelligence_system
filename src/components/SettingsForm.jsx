@@ -73,6 +73,16 @@ function ProviderSelectors({ settings, providers, onProviderChange, onAddProvide
   const embeddingProvider = providerOptions.find((provider) => provider.id === settings.llm_embedding_provider_id);
   const chatModels = String(chatProvider?.chat_models || "").split(",").map((item) => item.trim()).filter(Boolean);
   const embeddingModels = String(embeddingProvider?.embedding_models || "").split(",").map((item) => item.trim()).filter(Boolean);
+  const modelsForProvider = (providerId) => {
+    const provider = providerOptions.find((item) => item.id === providerId);
+    return String(provider?.chat_models || "").split(",").map((item) => item.trim()).filter(Boolean);
+  };
+  const readerPairs = [
+    ["paper_report_provider_id", "paper_report_model", "解读报告模型"],
+    ["reader_chat_provider_id", "reader_chat_model", "阅读器 Chat 模型"],
+    ["reader_smart_save_provider_id", "reader_smart_save_model", "Smart Save 模型"],
+    ["reader_question_provider_id", "reader_question_model", "追问生成模型"]
+  ];
 
   return (
     <>
@@ -145,6 +155,30 @@ function ProviderSelectors({ settings, providers, onProviderChange, onAddProvide
           {embeddingModels.length ? embeddingModels.map((model) => <option key={model} value={model}>{model}</option>) : <option value="">未配置</option>}
         </select>
       </label>
+      <div className="settings-grid-wide">
+        <div className="reader-model-grid">
+          {readerPairs.map(([providerField, modelField, label]) => {
+            const selectedProviderId = settings[providerField] || settings.llm_chat_provider_id || "";
+            const models = modelsForProvider(selectedProviderId);
+            return (
+              <div className="reader-model-row" key={providerField}>
+                <label>
+                  <span>{label} provider</span>
+                  <select value={selectedProviderId} onChange={(event) => onSettingChange(providerField, event.target.value)}>
+                    {providerOptions.length ? providerOptions.map((provider) => <option key={provider.id} value={provider.id}>{provider.name || provider.id}</option>) : <option value="">未配置</option>}
+                  </select>
+                </label>
+                <label>
+                  <span>{label}</span>
+                  <select value={settings[modelField] || settings.llm_chat_model || ""} onChange={(event) => onSettingChange(modelField, event.target.value)}>
+                    {models.length ? models.map((model) => <option key={model} value={model}>{model}</option>) : <option value="">未配置</option>}
+                  </select>
+                </label>
+              </div>
+            );
+          })}
+        </div>
+      </div>
     </>
   );
 }
@@ -202,6 +236,13 @@ export function SettingsForm({ settings, providers, onSettingChange, onProviderC
       <TextField label="向量索引 backend" name="vector_index_backend" placeholder="sqlite" value={settings.vector_index_backend} onChange={onSettingChange} />
 
       <FormSubhead title="LLM Providers">支持多个 OpenAI-compatible provider 和多个模型。</FormSubhead>
+      <label className="settings-grid-wide">
+        <span>论文解读默认 prompt</span>
+        <textarea
+          value={settings.paper_reader_default_prompt || ""}
+          onChange={(event) => onSettingChange("paper_reader_default_prompt", event.target.value)}
+        />
+      </label>
       <ProviderSelectors
         settings={settings}
         providers={providers}

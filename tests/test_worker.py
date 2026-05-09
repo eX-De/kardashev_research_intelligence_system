@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import base64
 import json
 import threading
 import time
@@ -49,6 +50,18 @@ from worker.paper_reports import (
     PAPER_READER_DEFAULT_PROMPT,
     ensure_paper_reports_for_recommendations,
     process_paper_report_queue,
+)
+from worker.paper_reader import (
+    cancel_reader_report,
+    delete_reader_message,
+    generate_reader_followup_questions,
+    import_reader_pdfs,
+    import_reader_pdf,
+    import_reader_urls,
+    paper_reader_chat,
+    paper_reader_chat_stream,
+    save_reader_note_to_obsidian,
+    retry_reader_report,
 )
 from worker.reminders import reminders
 from worker.recommendations import sync_project_paper_recommendations
@@ -1198,8 +1211,15 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(result["paper_reports_queued"], 1)
         captured: dict[str, object] = {}
 
-        def fake_chat(_: Settings, messages: list[dict[str, str]]) -> str:
+        def fake_chat(
+            _: Settings,
+            messages: list[dict[str, str]],
+            response_format: dict[str, object] | None = None,
+            **kwargs,
+        ) -> str:
             captured["messages"] = messages
+            captured["response_format"] = response_format
+            captured["kwargs"] = kwargs
             return "# 全文报告\n\n完整报告内容"
 
         with patch("worker.paper_reports._call_chat_text", side_effect=fake_chat):
@@ -1209,10 +1229,501 @@ class WorkerTests(unittest.TestCase):
         report = conn.execute("SELECT * FROM paper_reading_reports WHERE paper_id = ?", (paper_id,)).fetchone()
         self.assertEqual(report["status"], "done")
         self.assertEqual(report["prompt"], PAPER_READER_DEFAULT_PROMPT)
+        self.assertEqual(captured["kwargs"]["provider_id"], "test-chat")
+        self.assertEqual(captured["kwargs"]["model"], "test-chat-model")
         messages = captured["messages"]
         self.assertEqual(messages[0]["content"], "You are a research paper reading assistant. Read the supplied full PDF text and answer accurately from it.")
         self.assertIn("--- page 1 ---\nFull paper body for report.", messages[1]["content"])
         self.assertTrue(messages[1]["content"].endswith(PAPER_READER_DEFAULT_PROMPT))
+
+    def test_paper_reader_chat_uses_original_prompt_and_persists_messages(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        text_dir = Path.cwd() / ".test-tmp" / "paper-reader-chat"
+        text_dir.mkdir(parents=True, exist_ok=True)
+        text_path = text_dir / "2605.00016.txt"
+        text_path.write_text("--- page 1 ---\nMethod details for chat.", encoding="utf-8")
+        conn.execute(
+            """
+            INSERT INTO arxiv_papers(
+              arxiv_id, title, authors_json, summary, categories_json, published_at,
+              updated_at, link, pdf_link, text_path, text_status, fetched_batch_id, created_at
+            )
+            VALUES (
+              '2605.00016', 'Reader Chat Paper', '[]', 'Abstract for chat', '["cs.AI"]',
+              '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z',
+              'https://arxiv.org/abs/2605.00016', 'https://arxiv.org/pdf/2605.00016',
+              ?, 'complete', 'batch', 'now'
+            )
+            """,
+            (str(text_path),),
+        )
+        paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO paper_reading_reports(
+              paper_id, status, prompt, system_prompt, report_markdown,
+              error_message, created_at, updated_at, finished_at
+            )
+            VALUES (?, 'done', ?, 'system', '# 报告\n\n已有解读报告', '', 'now', 'now', 'now')
+            """,
+            (paper_id, PAPER_READER_DEFAULT_PROMPT),
+        )
+        conn.commit()
+        captured: dict[str, object] = {}
+
+        def fake_chat(
+            _: Settings,
+            messages: list[dict[str, str]],
+            response_format: dict[str, object] | None = None,
+            **kwargs,
+        ) -> str:
+            captured["messages"] = messages
+            captured["response_format"] = response_format
+            captured["kwargs"] = kwargs
+            return "基于全文的回答"
+
+        with patch("worker.paper_reader._call_chat_text", side_effect=fake_chat):
+            result = paper_reader_chat(
+                conn,
+                Settings(
+                    **{
+                        **chat_settings(test_settings()).__dict__,
+                        "reader_chat_provider_id": "test-chat",
+                        "reader_chat_model": "reader-chat-dedicated",
+                    }
+                ),
+                int(paper_id),
+                {"message": "这篇论文的方法是什么？"},
+            )
+
+        self.assertEqual(len(result["reader_messages"]), 2)
+        self.assertEqual(result["reader_messages"][0]["role"], "user")
+        self.assertEqual(result["reader_messages"][1]["role"], "assistant")
+        self.assertEqual(result["reader_messages"][1]["model"], "reader-chat-dedicated")
+        messages = captured["messages"]
+        self.assertIsNone(captured["response_format"])
+        self.assertEqual(captured["kwargs"]["provider_id"], "test-chat")
+        self.assertEqual(captured["kwargs"]["model"], "reader-chat-dedicated")
+        self.assertEqual(
+            messages[0]["content"],
+            "You are a research paper reading assistant. Answer from the supplied full PDF text whenever possible.",
+        )
+        self.assertIn("后续对话都应优先基于这份文本回答。", messages[1]["content"])
+        self.assertIn("--- page 1 ---\nMethod details for chat.", messages[1]["content"])
+        self.assertEqual(messages[2]["content"], "我已收到完整 PDF 解析文本。")
+        self.assertNotIn("已有解读报告", messages[1]["content"])
+        self.assertEqual(messages[-1]["content"], "这篇论文的方法是什么？")
+
+    def test_import_reader_pdf_creates_report_queue_item_and_chunks(self) -> None:
+        try:
+            import fitz
+        except ImportError:
+            self.skipTest("PyMuPDF not installed")
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        source_dir = Path.cwd() / ".test-tmp" / "reader-import-source"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        source_pdf = source_dir / "reader-upload.pdf"
+        doc = fitz.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "Reader import extraction works")
+        doc.save(source_pdf)
+        doc.close()
+
+        result = import_reader_pdf(
+            conn,
+            test_settings(),
+            {
+                "filename": "reader-upload.pdf",
+                "content_base64": base64.b64encode(source_pdf.read_bytes()).decode("ascii"),
+            },
+        )
+
+        paper_id = int(result["paper"]["id"])
+        report = conn.execute("SELECT * FROM paper_reading_reports WHERE paper_id = ?", (paper_id,)).fetchone()
+        self.assertIsNotNone(report)
+        self.assertEqual(report["status"], "queued")
+        paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
+        self.assertTrue(str(paper["arxiv_id"]).startswith("reader-upload-"))
+        self.assertEqual(paper["text_status"], "complete")
+        self.assertIn("Reader import extraction works", Path(paper["text_path"]).read_text(encoding="utf-8"))
+        self.assertGreater(
+            conn.execute("SELECT COUNT(*) AS count FROM arxiv_text_chunks WHERE paper_id = ?", (paper_id,)).fetchone()["count"],
+            0,
+        )
+
+    def test_import_reader_url_downloads_direct_pdf_and_queues_report(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+
+        def fake_download(_: str, destination: Path) -> None:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(b"%PDF- fake")
+
+        def fake_extract(_: Path, text_path: Path) -> int:
+            text_path.parent.mkdir(parents=True, exist_ok=True)
+            text_path.write_text("--- page 1 ---\nURL import text.", encoding="utf-8")
+            return 28
+
+        with patch("worker.paper_reader.download_pdf", side_effect=fake_download):
+            with patch("worker.paper_reader.extract_pdf_text_to_file", side_effect=fake_extract):
+                result = import_reader_urls(
+                    conn,
+                    test_settings(),
+                    {"urls": "https://example.test/paper.pdf"},
+                )
+
+        self.assertEqual(len(result["imported"]), 1)
+        paper_id = int(result["imported"][0]["paper_id"])
+        report = conn.execute("SELECT * FROM paper_reading_reports WHERE paper_id = ?", (paper_id,)).fetchone()
+        self.assertEqual(report["status"], "queued")
+        paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
+        self.assertTrue(str(paper["arxiv_id"]).startswith("reader-url-"))
+        self.assertEqual(paper["pdf_link"], "https://example.test/paper.pdf")
+
+    def test_import_reader_pdfs_batches_uploads(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+
+        def fake_extract(_: Path, text_path: Path) -> int:
+            text_path.parent.mkdir(parents=True, exist_ok=True)
+            text_path.write_text("--- page 1 ---\nBatch import text.", encoding="utf-8")
+            return 34
+
+        payload = {
+            "files": [
+                {
+                    "filename": "batch-a.pdf",
+                    "content_base64": base64.b64encode(b"%PDF- batch-a").decode("ascii"),
+                },
+                {
+                    "filename": "batch-b.pdf",
+                    "content_base64": base64.b64encode(b"%PDF- batch-b").decode("ascii"),
+                },
+            ]
+        }
+        with patch("worker.paper_reader.extract_pdf_text_to_file", side_effect=fake_extract):
+            result = import_reader_pdfs(conn, test_settings(), payload)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(result["imported"]), 2)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM arxiv_papers").fetchone()["count"], 2)
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM paper_reading_reports").fetchone()["count"], 2)
+
+    def test_reader_save_writes_report_and_chat_to_obsidian(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        vault = Path.cwd() / ".test-tmp" / "reader-save-vault"
+        vault.mkdir(parents=True, exist_ok=True)
+        pdf_dir = Path.cwd() / ".test-tmp" / "reader-save-pdfs"
+        pdf_dir.mkdir(parents=True, exist_ok=True)
+        pdf_path = pdf_dir / "reader-save.pdf"
+        pdf_path.write_bytes(b"%PDF- reader save")
+        conn.execute(
+            """
+            INSERT INTO arxiv_papers(
+              arxiv_id, title, authors_json, summary, categories_json, published_at,
+              updated_at, link, pdf_link, pdf_path, text_status, fetched_batch_id, created_at
+            )
+            VALUES (
+              'reader-upload-save', 'Reader Save Paper', '[]', 'Reader save abstract.', '["reader"]',
+              '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z',
+              '', '', ?, 'complete', 'reader-import', 'now'
+            )
+            """,
+            (str(pdf_path),),
+        )
+        paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO paper_reading_reports(
+              paper_id, status, prompt, system_prompt, report_markdown,
+              error_message, created_at, updated_at, finished_at
+            )
+            VALUES (?, 'done', ?, 'system', '# 报告\n\n保存这份解读', '', 'now', 'now', 'now')
+            """,
+            (paper_id, PAPER_READER_DEFAULT_PROMPT),
+        )
+        conn.execute(
+            """
+            INSERT INTO paper_reader_messages(paper_id, role, content, source, created_at)
+            VALUES (?, 'user', '解释贡献。', 'chat', 'now')
+            """,
+            (paper_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO paper_reader_messages(paper_id, role, content, source, model, created_at)
+            VALUES (?, 'assistant', '贡献是统一阅读器。', 'chat', 'test-chat-model', 'now')
+            """,
+            (paper_id,),
+        )
+        conn.commit()
+
+        captured: dict[str, object] = {}
+
+        def fake_chat(
+            _: Settings,
+            messages: list[dict[str, str]],
+            response_format: dict[str, object] | None = None,
+            **kwargs,
+        ) -> str:
+            captured["messages"] = messages
+            captured["response_format"] = response_format
+            captured["kwargs"] = kwargs
+            return json.dumps(
+                {
+                    "tags": ["Paper/普通", "Concept/统一阅读器"],
+                    "task": "Integrated paper reading",
+                    "TLDR": "统一阅读器整合报告和追问。",
+                    "aliases": ["RIS"],
+                    "body": (
+                        "# Reader Save Paper\n\n"
+                        "## 研究问题和背景\n\n"
+                        "保存这份解读。\n\n"
+                        "## 对话补充\n\n"
+                        "贡献是统一阅读器。"
+                    ),
+                },
+                ensure_ascii=False,
+            )
+
+        with patch("worker.paper_reader._call_chat_text", side_effect=fake_chat):
+            result = save_reader_note_to_obsidian(
+                conn,
+                Settings(
+                    **{
+                        **chat_settings(test_settings()).__dict__,
+                        "obsidian_vault_path": vault,
+                        "reader_smart_save_provider_id": "test-chat",
+                        "reader_smart_save_model": "smart-save-dedicated",
+                    }
+                ),
+                int(paper_id),
+            )
+
+        note = vault / result["obsidian_path"]
+        text = note.read_text(encoding="utf-8")
+        messages = captured["messages"]
+        self.assertEqual(captured["response_format"], {"type": "json_object"})
+        self.assertEqual(captured["kwargs"]["provider_id"], "test-chat")
+        self.assertEqual(captured["kwargs"]["model"], "smart-save-dedicated")
+        self.assertEqual(
+            messages[0]["content"],
+            "You are a careful research note editor. Produce precise, well-structured Markdown notes for Obsidian.",
+        )
+        self.assertIn("JSON 必须包含 tags、task、TLDR、aliases、body 五个字段。", messages[1]["content"])
+        self.assertIn("保存这份解读", messages[1]["content"])
+        self.assertIn("贡献是统一阅读器。", messages[1]["content"])
+        self.assertIn("tags:", text)
+        self.assertIn("Paper/普通", text)
+        self.assertIn("Concept/统一阅读器", text)
+        self.assertIn('task: "Integrated paper reading"', text)
+        self.assertIn('TLDR: "统一阅读器整合报告和追问。"', text)
+        self.assertIn("aliases:", text)
+        self.assertIn("RIS", text)
+        self.assertIn("保存这份解读", text)
+        self.assertIn("贡献是统一阅读器。", text)
+        self.assertNotIn("## User now", text)
+        self.assertTrue((vault / result["attachment_path"]).exists())
+
+    def test_reader_followup_questions_use_selected_text_prompt(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO arxiv_papers(
+              arxiv_id, title, authors_json, summary, categories_json, published_at,
+              updated_at, link, pdf_link, text_status, fetched_batch_id, created_at
+            )
+            VALUES (
+              'reader-followup', 'Reader Followup Paper', '[]', 'Followup abstract.', '["reader"]',
+              '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z',
+              '', '', 'complete', 'reader-import', 'now'
+            )
+            """
+        )
+        paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO paper_reader_messages(paper_id, role, content, source, model, created_at)
+            VALUES (?, 'assistant', '关键术语 X 代表统一阅读器中的追问生成机制。', 'chat', 'test-chat-model', 'now')
+            """,
+            (paper_id,),
+        )
+        anchor_id = conn.execute("SELECT id FROM paper_reader_messages").fetchone()["id"]
+        conn.commit()
+        captured: dict[str, object] = {}
+
+        def fake_chat(
+            _: Settings,
+            messages: list[dict[str, str]],
+            response_format: dict[str, object] | None = None,
+            **kwargs,
+        ) -> str:
+            captured["messages"] = messages
+            captured["response_format"] = response_format
+            captured["kwargs"] = kwargs
+            return json.dumps(
+                {
+                    "questions": [
+                        "请解释 X",
+                        "X 如何触发？",
+                        "X 依赖哪些上下文？",
+                        "X 的输出是什么？",
+                    ]
+                },
+                ensure_ascii=False,
+            )
+
+        with patch("worker.paper_reader._call_chat_text", side_effect=fake_chat):
+            result = generate_reader_followup_questions(
+                conn,
+                Settings(
+                    **{
+                        **chat_settings(test_settings()).__dict__,
+                        "reader_question_provider_id": "test-chat",
+                        "reader_question_model": "question-dedicated",
+                    }
+                ),
+                int(paper_id),
+                {
+                    "selected_text": "关键术语 X",
+                    "anchor_message_id": int(anchor_id),
+                    "context_text": "关键术语 X 代表统一阅读器中的追问生成机制。",
+                },
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["questions"][0], "请解释 X")
+        self.assertEqual(len(result["questions"]), 4)
+        self.assertEqual(result["model"]["model"], "question-dedicated")
+        messages = captured["messages"]
+        self.assertEqual(captured["response_format"], {"type": "json_object"})
+        self.assertEqual(captured["kwargs"]["provider_id"], "test-chat")
+        self.assertEqual(captured["kwargs"]["model"], "question-dedicated")
+        self.assertEqual(
+            messages[0]["content"],
+            "You generate concise, high-value follow-up questions for research paper reading conversations.",
+        )
+        self.assertIn("JSON 必须包含 questions 字段", messages[1]["content"])
+        self.assertIn("<selected_text>\n关键术语 X\n</selected_text>", messages[1]["content"])
+        self.assertIn("<message_context_window>", messages[1]["content"])
+
+    def test_reader_message_delete_cancel_and_retry_report(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO arxiv_papers(
+              arxiv_id, title, authors_json, summary, categories_json, published_at,
+              updated_at, link, pdf_link, text_status, fetched_batch_id, created_at
+            )
+            VALUES (
+              'reader-control', 'Reader Control Paper', '[]', 'Control abstract.', '["reader"]',
+              '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z',
+              '', '', 'complete', 'reader-import', 'now'
+            )
+            """
+        )
+        paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO paper_reading_reports(
+              paper_id, status, prompt, system_prompt, report_markdown,
+              error_message, created_at, updated_at
+            )
+            VALUES (?, 'queued', ?, 'system', '', '', 'now', 'now')
+            """,
+            (paper_id, PAPER_READER_DEFAULT_PROMPT),
+        )
+        conn.execute(
+            """
+            INSERT INTO paper_reader_messages(paper_id, role, content, source, created_at)
+            VALUES (?, 'assistant', '可删除消息。', 'chat', 'now')
+            """,
+            (paper_id,),
+        )
+        message_id = conn.execute("SELECT id FROM paper_reader_messages").fetchone()["id"]
+        conn.commit()
+
+        deleted = delete_reader_message(conn, int(paper_id), int(message_id))
+        self.assertTrue(deleted["ok"])
+        self.assertEqual(deleted["reader_messages"], [])
+
+        cancelled = cancel_reader_report(conn, int(paper_id))
+        self.assertEqual(cancelled["paper_report"]["status"], "cancelled")
+
+        retried = retry_reader_report(conn, test_settings(), int(paper_id))
+        self.assertEqual(retried["paper_report"]["status"], "queued")
+
+    def test_paper_reader_chat_stream_emits_chunks_and_persists_answer(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        text_dir = Path.cwd() / ".test-tmp" / "paper-reader-stream"
+        text_dir.mkdir(parents=True, exist_ok=True)
+        text_path = text_dir / "stream.txt"
+        text_path.write_text("--- page 1 ---\nStream paper text.", encoding="utf-8")
+        conn.execute(
+            """
+            INSERT INTO arxiv_papers(
+              arxiv_id, title, authors_json, summary, categories_json, published_at,
+              updated_at, link, pdf_link, text_path, text_status, fetched_batch_id, created_at
+            )
+            VALUES (
+              'reader-stream', 'Reader Stream Paper', '[]', 'Stream abstract.', '["reader"]',
+              '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z',
+              '', '', ?, 'complete', 'reader-import', 'now'
+            )
+            """,
+            (str(text_path),),
+        )
+        paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
+        conn.commit()
+        captured: dict[str, object] = {}
+
+        def fake_chunks(_: Settings, messages: list[dict[str, str]], **kwargs):
+            captured["messages"] = messages
+            captured["kwargs"] = kwargs
+            yield "第一段"
+            yield "第二段"
+
+        events: list[tuple[str, dict[str, object]]] = []
+        settings = Settings(
+            **{
+                **chat_settings(test_settings()).__dict__,
+                "reader_chat_provider_id": "test-chat",
+                "reader_chat_model": "reader-stream-model",
+            }
+        )
+        with patch("worker.paper_reader._iter_chat_text_chunks", side_effect=fake_chunks):
+            paper_reader_chat_stream(
+                conn,
+                settings,
+                int(paper_id),
+                {"message": "流式解释。"},
+                lambda event, data: events.append((event, data)),
+            )
+
+        self.assertEqual([event for event, _ in events], ["start", "chunk", "chunk", "done"])
+        self.assertEqual(events[1][1]["text"], "第一段")
+        self.assertEqual(events[2][1]["text"], "第二段")
+        self.assertEqual(captured["kwargs"]["provider_id"], "test-chat")
+        self.assertEqual(captured["kwargs"]["model"], "reader-stream-model")
+        messages = conn.execute("SELECT role, content, model FROM paper_reader_messages ORDER BY id").fetchall()
+        self.assertEqual([row["role"] for row in messages], ["user", "assistant"])
+        self.assertEqual(messages[1]["content"], "第一段第二段")
+        self.assertEqual(messages[1]["model"], "reader-stream-model")
 
     def test_paper_reports_queue_api_lists_statuses(self) -> None:
         conn = sqlite3.connect(":memory:")

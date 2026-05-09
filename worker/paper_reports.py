@@ -135,11 +135,17 @@ def ensure_paper_reports_for_recommendations(
     }
 
 
+def _settings_report_prompt(settings: Settings) -> str:
+    prompt = clean_unicode(str(settings.paper_reader_default_prompt or "")).strip()
+    return prompt or PAPER_READER_DEFAULT_PROMPT
+
+
 def queue_paper_report(
     conn: sqlite3.Connection,
     paper_id: int,
     *,
     force: bool = False,
+    prompt: str | None = None,
 ) -> dict[str, int]:
     if not conn.execute("SELECT id FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone():
         raise RuntimeError(f"Paper not found: {paper_id}")
@@ -149,6 +155,7 @@ def queue_paper_report(
         (paper_id,),
     ).fetchone()
     now = utc_now()
+    prompt_text = clean_unicode(str(prompt or "")).strip() or PAPER_READER_DEFAULT_PROMPT
     if not existing:
         conn.execute(
             """
@@ -158,7 +165,7 @@ def queue_paper_report(
             )
             VALUES (?, 'queued', ?, ?, '[]', ?, ?)
             """,
-            (paper_id, PAPER_READER_DEFAULT_PROMPT, PAPER_READER_ANALYSIS_SYSTEM, now, now),
+            (paper_id, prompt_text, PAPER_READER_ANALYSIS_SYSTEM, now, now),
         )
         conn.commit()
         return {"paper_reports_queued": 1}
@@ -176,7 +183,7 @@ def queue_paper_report(
                 updated_at = ?
             WHERE paper_id = ?
             """,
-            (PAPER_READER_DEFAULT_PROMPT, PAPER_READER_ANALYSIS_SYSTEM, now, paper_id),
+            (prompt_text, PAPER_READER_ANALYSIS_SYSTEM, now, paper_id),
         )
         conn.commit()
         return {"paper_reports_requeued": 1}
@@ -273,15 +280,26 @@ def _analysis_messages(paper_text: str, prompt: str) -> list[dict[str, str]]:
     ]
 
 
-def _call_chat_text(settings: Settings, messages: list[dict[str, str]]) -> str:
-    provider = settings.chat_provider()
-    if not provider or not provider.api_key or not provider.base_url or not settings.llm_chat_model:
-        raise RuntimeError("LLM chat provider is not fully configured; full paper report generation requires LLM output")
+def _call_chat_text(
+    settings: Settings,
+    messages: list[dict[str, str]],
+    response_format: dict[str, object] | None = None,
+    provider_id: str | None = None,
+    model: str | None = None,
+    purpose: str = "LLM chat request",
+) -> str:
+    provider_id = clean_unicode(str(provider_id or settings.llm_chat_provider_id or "")).strip()
+    model = clean_unicode(str(model or settings.llm_chat_model or "")).strip()
+    provider = settings.provider(provider_id)
+    if not provider or not provider.api_key or not provider.base_url or not model:
+        raise RuntimeError(f"{purpose} provider is not fully configured")
     payload = {
-        "model": settings.llm_chat_model,
+        "model": model,
         "messages": messages,
         "temperature": 0.1,
     }
+    if response_format:
+        payload["response_format"] = response_format
     request = urllib.request.Request(
         f"{provider.base_url}/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
@@ -305,6 +323,76 @@ def _call_chat_text(settings: Settings, messages: list[dict[str, str]]) -> str:
     if not text:
         raise RuntimeError("Full paper report LLM request failed: empty response")
     return text
+
+
+def _iter_chat_text_chunks(
+    settings: Settings,
+    messages: list[dict[str, str]],
+    response_format: dict[str, object] | None = None,
+    provider_id: str | None = None,
+    model: str | None = None,
+    purpose: str = "LLM chat stream",
+):
+    provider_id = clean_unicode(str(provider_id or settings.llm_chat_provider_id or "")).strip()
+    model = clean_unicode(str(model or settings.llm_chat_model or "")).strip()
+    provider = settings.provider(provider_id)
+    if not provider or not provider.api_key or not provider.base_url or not model:
+        raise RuntimeError(f"{purpose} provider is not fully configured")
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.1,
+        "stream": True,
+    }
+    if response_format:
+        payload["response_format"] = response_format
+    request = urllib.request.Request(
+        f"{provider.base_url}/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {provider.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=180) as response:
+            saw_stream_chunk = False
+            body_parts: list[bytes] = []
+            for raw_line in response:
+                body_parts.append(raw_line)
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line or line.startswith(":"):
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    parsed = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                delta = parsed.get("choices", [{}])[0].get("delta", {})
+                content = clean_unicode(str(delta.get("content") or ""))
+                if content:
+                    saw_stream_chunk = True
+                    yield content
+            if not saw_stream_chunk:
+                raw = b"".join(body_parts).decode("utf-8", errors="replace").strip()
+                if raw.startswith("{"):
+                    parsed = json.loads(raw)
+                    content = (
+                        parsed.get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                    )
+                    text = clean_unicode(str(content or "")).strip()
+                    if text:
+                        yield text
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"{purpose} failed: {exc}") from exc
 
 
 def _claim_queued_report(
@@ -394,8 +482,21 @@ def process_paper_report_queue(
             if not paper_text:
                 raise RuntimeError("Full paper text is missing")
             text_hash = hashlib.sha256(paper_text.encode("utf-8", "replace")).hexdigest()
-            messages = _analysis_messages(paper_text, PAPER_READER_DEFAULT_PROMPT)
-            markdown = _call_chat_text(settings, messages)
+            report = conn.execute(
+                "SELECT prompt FROM paper_reading_reports WHERE paper_id = ?",
+                (paper_id,),
+            ).fetchone()
+            prompt = clean_unicode(str(report["prompt"] if report else "")).strip() or _settings_report_prompt(settings)
+            provider_id = settings.paper_report_provider_id or settings.llm_chat_provider_id
+            model = settings.paper_report_model or settings.llm_chat_model
+            messages = _analysis_messages(paper_text, prompt)
+            markdown = _call_chat_text(
+                settings,
+                messages,
+                provider_id=provider_id,
+                model=model,
+                purpose="Full paper report generation",
+            )
             finished = utc_now()
             conn.execute(
                 """
@@ -413,10 +514,10 @@ def process_paper_report_queue(
                 WHERE paper_id = ?
                 """,
                 (
-                    PAPER_READER_DEFAULT_PROMPT,
+                    prompt,
                     PAPER_READER_ANALYSIS_SYSTEM,
-                    settings.llm_chat_provider_id,
-                    settings.llm_chat_model,
+                    provider_id,
+                    model,
                     text_hash,
                     markdown,
                     finished,

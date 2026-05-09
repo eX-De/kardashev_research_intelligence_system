@@ -36,6 +36,18 @@ from .db import clean_unicode, connect, from_json, init_db, job_run, mark_stale_
 from .llm import generate_missing_project_judgments
 from .obsidian import sync_obsidian
 from .paper_reports import ensure_paper_reports_for_recommendations, process_paper_report_queue
+from .paper_reader import (
+    cancel_reader_report,
+    delete_reader_message,
+    generate_reader_followup_questions,
+    import_reader_pdfs,
+    import_reader_urls,
+    paper_reader_chat,
+    paper_reader_chat_stream,
+    paper_reader_detail,
+    retry_reader_report,
+    save_reader_note_to_obsidian,
+)
 from .recommendations import sync_project_paper_recommendations
 from .reports import generate_daily_report
 from .search import prefilter_papers, rank_project_papers, rank_unmatched_papers
@@ -1481,6 +1493,93 @@ def cmd_api_paper_reports(args: argparse.Namespace) -> None:
     _print_json(result)
 
 
+def cmd_api_reader_papers(args: argparse.Namespace) -> None:
+    result = _with_db(lambda conn, settings: paper_reports_queue(conn, int(args.limit)))
+    _print_json(result)
+
+
+def cmd_api_reader_paper(args: argparse.Namespace) -> None:
+    result = _with_db(lambda conn, settings: paper_reader_detail(conn, int(args.paper_id)))
+    _print_json(result)
+
+
+def cmd_api_reader_chat(args: argparse.Namespace) -> None:
+    payload = _read_json_stdin("paper reader chat")
+    result = _with_db(
+        lambda conn, settings: paper_reader_chat(conn, settings, int(args.paper_id), payload)
+    )
+    _print_json(result)
+
+
+def _print_json_event(event: str, data: dict[str, object]) -> None:
+    payload = json.dumps(clean_unicode({"event": event, "data": data}), ensure_ascii=False)
+    sys.stdout.buffer.write(payload.encode("utf-8", "replace") + b"\n")
+    sys.stdout.buffer.flush()
+
+
+def cmd_api_reader_chat_stream(args: argparse.Namespace) -> None:
+    payload = _read_json_stdin("paper reader streaming chat")
+    settings = load_settings()
+    conn = connect(settings.db_path)
+    init_db(conn)
+    mark_stale_job_runs(conn)
+    settings = apply_stored_settings(conn, settings)
+
+    def emit(event: str, data: dict[str, object]) -> None:
+        _print_json_event(event, data)
+
+    try:
+        paper_reader_chat_stream(conn, settings, int(args.paper_id), payload, emit)
+    except Exception as exc:
+        emit("error", {"error": str(exc)})
+    finally:
+        conn.close()
+
+
+def cmd_api_reader_upload(_: argparse.Namespace) -> None:
+    payload = _read_json_stdin("paper reader upload")
+    result = _with_db(lambda conn, settings: import_reader_pdfs(conn, settings, payload))
+    _print_json(result)
+
+
+def cmd_api_reader_urls(_: argparse.Namespace) -> None:
+    payload = _read_json_stdin("paper reader urls")
+    result = _with_db(lambda conn, settings: import_reader_urls(conn, settings, payload))
+    _print_json(result)
+
+
+def cmd_api_reader_save(args: argparse.Namespace) -> None:
+    result = _with_db(
+        lambda conn, settings: save_reader_note_to_obsidian(conn, settings, int(args.paper_id))
+    )
+    _print_json(result)
+
+
+def cmd_api_reader_followups(args: argparse.Namespace) -> None:
+    payload = _read_json_stdin("paper reader follow-up questions")
+    result = _with_db(
+        lambda conn, settings: generate_reader_followup_questions(conn, settings, int(args.paper_id), payload)
+    )
+    _print_json(result)
+
+
+def cmd_api_reader_delete_message(args: argparse.Namespace) -> None:
+    result = _with_db(
+        lambda conn, settings: delete_reader_message(conn, int(args.paper_id), int(args.message_id))
+    )
+    _print_json(result)
+
+
+def cmd_api_reader_cancel(args: argparse.Namespace) -> None:
+    result = _with_db(lambda conn, settings: cancel_reader_report(conn, int(args.paper_id)))
+    _print_json(result)
+
+
+def cmd_api_reader_retry(args: argparse.Namespace) -> None:
+    result = _with_db(lambda conn, settings: retry_reader_report(conn, settings, int(args.paper_id)))
+    _print_json(result)
+
+
 def cmd_api_projects(_: argparse.Namespace) -> None:
     result = _with_db(lambda conn, settings: projects(conn))
     _print_json(result)
@@ -1726,6 +1825,49 @@ def build_parser() -> argparse.ArgumentParser:
     api_paper_reports = sub.add_parser("api-paper-reports")
     api_paper_reports.add_argument("--limit", default="300")
     api_paper_reports.set_defaults(func=cmd_api_paper_reports)
+
+    api_reader_papers = sub.add_parser("api-reader-papers")
+    api_reader_papers.add_argument("--limit", default="300")
+    api_reader_papers.set_defaults(func=cmd_api_reader_papers)
+
+    api_reader_paper = sub.add_parser("api-reader-paper")
+    api_reader_paper.add_argument("paper_id")
+    api_reader_paper.set_defaults(func=cmd_api_reader_paper)
+
+    api_reader_chat = sub.add_parser("api-reader-chat")
+    api_reader_chat.add_argument("paper_id")
+    api_reader_chat.set_defaults(func=cmd_api_reader_chat)
+
+    api_reader_chat_stream = sub.add_parser("api-reader-chat-stream")
+    api_reader_chat_stream.add_argument("paper_id")
+    api_reader_chat_stream.set_defaults(func=cmd_api_reader_chat_stream)
+
+    api_reader_upload = sub.add_parser("api-reader-upload")
+    api_reader_upload.set_defaults(func=cmd_api_reader_upload)
+
+    api_reader_urls = sub.add_parser("api-reader-urls")
+    api_reader_urls.set_defaults(func=cmd_api_reader_urls)
+
+    api_reader_save = sub.add_parser("api-reader-save")
+    api_reader_save.add_argument("paper_id")
+    api_reader_save.set_defaults(func=cmd_api_reader_save)
+
+    api_reader_followups = sub.add_parser("api-reader-followups")
+    api_reader_followups.add_argument("paper_id")
+    api_reader_followups.set_defaults(func=cmd_api_reader_followups)
+
+    api_reader_delete_message = sub.add_parser("api-reader-delete-message")
+    api_reader_delete_message.add_argument("paper_id")
+    api_reader_delete_message.add_argument("message_id")
+    api_reader_delete_message.set_defaults(func=cmd_api_reader_delete_message)
+
+    api_reader_cancel = sub.add_parser("api-reader-cancel")
+    api_reader_cancel.add_argument("paper_id")
+    api_reader_cancel.set_defaults(func=cmd_api_reader_cancel)
+
+    api_reader_retry = sub.add_parser("api-reader-retry")
+    api_reader_retry.add_argument("paper_id")
+    api_reader_retry.set_defaults(func=cmd_api_reader_retry)
 
     api_projects = sub.add_parser("api-projects")
     api_projects.set_defaults(func=cmd_api_projects)
