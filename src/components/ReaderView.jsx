@@ -205,6 +205,10 @@ function getSelectionContextText(selection, contentElement) {
 
 function ReaderRow({ active, deleting, item, onDelete, onSelect }) {
   const canDelete = item.status !== "processing";
+  const linkedProjectNames = item.linked_project_names || [];
+  const recommendationProjectNames = item.recommendation_project_names || [];
+  const projectNames = linkedProjectNames.length ? linkedProjectNames : recommendationProjectNames;
+  const projectCount = linkedProjectNames.length ? item.linked_project_count : item.recommendation_project_count;
   return (
     <article className={`report-row ${active ? "active" : ""}`} onClick={() => onSelect(item.paper_id)} role="button" tabIndex={0}>
       <div className="report-row-main">
@@ -212,8 +216,8 @@ function ReaderRow({ active, deleting, item, onDelete, onSelect }) {
         <div className="report-row-meta">
           <span>{item.arxiv_id}</span>
           <span>TXT {item.text_status || "pending"}</span>
-          {item.project_names?.length ? <span>{item.project_names.slice(0, 2).join(", ")}</span> : null}
-          {item.project_count > 2 ? <span>{item.project_count} 个项目</span> : null}
+          {projectNames.length ? <span>{linkedProjectNames.length ? "已关联" : "推荐"} {projectNames.slice(0, 2).join(", ")}</span> : null}
+          {projectCount > 2 ? <span>{projectCount} 个项目</span> : null}
           {item.model ? <span>{item.model}</span> : null}
           {item.updated_at ? <span>{fmtDate(item.updated_at)}</span> : null}
         </div>
@@ -282,6 +286,31 @@ function ChatMessage({ deleting, message, onDelete }) {
   );
 }
 
+function ProjectLinkControl({ linkedProjects, linking, onLink, paperId, projects }) {
+  const linkedProjectIds = new Set((linkedProjects || []).map((item) => Number(item.project_id)));
+  const linkedProjectNames = (linkedProjects || []).map((item) => item.project_name).filter(Boolean);
+  const label = !projects.length ? "暂无项目" : linking ? "关联中..." : "手动关联到项目";
+  return (
+    <div className="project-link-control">
+      <select
+        aria-label="手动关联项目"
+        className="project-link-select"
+        disabled={!projects.length || linking}
+        onChange={(event) => onLink(paperId, event.target.value)}
+        title="手动关联到项目"
+        value=""
+      >
+        <option value="">{label}</option>
+        {projects.map((project) => (
+          <option disabled={linkedProjectIds.has(Number(project.id))} key={project.id} value={project.id}>
+            {linkedProjectIds.has(Number(project.id)) ? `已关联 ${project.name}` : project.name}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
 function readFileAsBase64(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -301,16 +330,19 @@ function ReaderDetail({
   deletingMessageId,
   detail,
   displayedMessages,
+  linkingProject,
   message,
   onChatModelChange,
   onCancel,
   onDeleteMessage,
   onGenerate,
+  onProjectLink,
   onRetry,
   onSave,
   onSendMessage,
   onSendQuestion,
   onTabChange,
+  projects,
   savingChatModel,
   setMessage
 }) {
@@ -376,6 +408,8 @@ function ReaderDetail({
   const report = detail.paper_report || {};
   const ready = report.status === "done" && String(report.report_markdown || "").trim();
   const canRetry = ["done", "failed", "cancelled"].includes(report.status);
+  const linkedProjects = detail.linked_projects || [];
+  const recommendations = detail.project_recommendations || [];
   const chatModelOptions = chatModelList(chatSettings || {});
   const chatModelValue = currentChatModelValue(chatSettings || {});
   const selectedChatModelValue = chatModelOptions.some((option) => option.value === chatModelValue)
@@ -536,13 +570,27 @@ function ReaderDetail({
             </div>
             <div className="section">
               <h3>项目关联</h3>
+              <ProjectLinkControl
+                linkedProjects={linkedProjects}
+                linking={linkingProject}
+                onLink={onProjectLink}
+                paperId={paper.id}
+                projects={projects}
+              />
               <div className="evidence-list">
-                {(detail.project_recommendations || []).length ? detail.project_recommendations.map((recommendation) => (
+                {linkedProjects.map((project) => (
+                  <article className="evidence" key={`linked-${project.project_id}`}>
+                    <strong>{project.project_name} · {project.relation} · 已关联</strong>
+                    <p>{project.note || "手动关联到项目。"}</p>
+                  </article>
+                ))}
+                {recommendations.map((recommendation) => (
                   <article className="evidence" key={`${recommendation.project_id}-${recommendation.state}`}>
                     <strong>{recommendation.project_name} · {recommendation.relation_type} · {recommendation.state}</strong>
                     <p>{recommendation.reason || "暂无推荐理由。"}</p>
                   </article>
-                )) : <p className="summary">暂无项目级推荐。</p>}
+                ))}
+                {!linkedProjects.length && !recommendations.length ? <p className="summary">暂无项目级推荐。</p> : null}
               </div>
             </div>
             <div className="section">
@@ -671,6 +719,7 @@ export function ReaderView({ setStatusMessage }) {
   const [items, setItems] = useState([]);
   const [stats, setStats] = useState({});
   const [queueStatus, setQueueStatus] = useState({});
+  const [projects, setProjects] = useState([]);
   const [activePaperId, setActivePaperId] = useState(null);
   const [detail, setDetail] = useState(null);
   const [activeTab, setActiveTab] = useState("analysis");
@@ -685,6 +734,7 @@ export function ReaderView({ setStatusMessage }) {
   const [streamingAssistant, setStreamingAssistant] = useState(null);
   const [deletingMessageId, setDeletingMessageId] = useState(null);
   const [deletingReportId, setDeletingReportId] = useState(null);
+  const [linkingProjectPaperId, setLinkingProjectPaperId] = useState(null);
   const [readerSettings, setReaderSettings] = useState(null);
   const [savingChatModel, setSavingChatModel] = useState(false);
   const activePaperIdRef = useRef(null);
@@ -759,14 +809,20 @@ export function ReaderView({ setStatusMessage }) {
     setReaderSettings(data.settings || {});
   }, []);
 
+  const loadProjects = useCallback(async () => {
+    const data = await api("/api/projects");
+    setProjects(data.items || []);
+  }, []);
+
   useEffect(() => {
     refresh().catch((error) => setStatusMessage(error.message));
     loadReaderSettings().catch((error) => setStatusMessage(error.message));
+    loadProjects().catch((error) => setStatusMessage(error.message));
     const timer = setInterval(() => {
       refresh().catch((error) => setStatusMessage(error.message));
     }, 3000);
     return () => clearInterval(timer);
-  }, [loadReaderSettings, refresh, setStatusMessage]);
+  }, [loadProjects, loadReaderSettings, refresh, setStatusMessage]);
 
   async function generateReport(paperId, force = false) {
     setBusy(true);
@@ -824,6 +880,27 @@ export function ReaderView({ setStatusMessage }) {
       setStatusMessage(error.message);
     } finally {
       setDeletingReportId(null);
+    }
+  }
+
+  async function linkPaperToProject(paperId, projectId) {
+    const numericPaperId = Number(paperId);
+    const numericProjectId = Number(projectId);
+    if (!numericPaperId || !numericProjectId) return;
+    setLinkingProjectPaperId(numericPaperId);
+    try {
+      const project = projects.find((item) => Number(item.id) === numericProjectId);
+      await postJson(`/api/projects/${numericProjectId}/papers`, {
+        paper_id: numericPaperId,
+        relation: "reading",
+        note: "manual_from_report_queue"
+      });
+      setStatusMessage(`已关联到项目${project?.name ? `：${project.name}` : ""}`);
+      await refresh();
+    } catch (error) {
+      setStatusMessage(error.message);
+    } finally {
+      setLinkingProjectPaperId(null);
     }
   }
 
@@ -1098,16 +1175,19 @@ export function ReaderView({ setStatusMessage }) {
             deletingMessageId={deletingMessageId}
             detail={detail}
             displayedMessages={displayedMessages}
+            linkingProject={linkingProjectPaperId === detail?.paper?.id}
             message={message}
             onChatModelChange={changeReaderChatModel}
             onCancel={cancelReport}
             onDeleteMessage={deleteMessage}
             onGenerate={generateReport}
+            onProjectLink={linkPaperToProject}
             onRetry={retryReport}
             onSave={saveToObsidian}
             onSendQuestion={(question) => sendReaderMessage(question, { restoreOnFailure: false })}
             onSendMessage={sendMessage}
             onTabChange={setActiveTab}
+            projects={projects}
             savingChatModel={savingChatModel}
             setMessage={setMessage}
           />

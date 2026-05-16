@@ -3896,6 +3896,29 @@ tbody tr:hover {
   align-items: flex-end;
 }
 
+.project-link-control {
+  display: grid;
+  grid-template-columns: minmax(220px, 320px);
+  align-items: center;
+  gap: 10px;
+}
+
+.project-link-select {
+  width: 100%;
+  min-height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #ffffff;
+  color: var(--ink);
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.project-link-select:disabled {
+  color: var(--muted);
+  background: var(--panel-soft);
+}
+
 .reader-view .queue-delete-button {
   min-height: 30px;
   padding: 0 10px;
@@ -4096,5 +4119,13 @@ tbody tr:hover {
   .queue-list-header {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .reader-view .report-row-actions {
+    align-items: stretch;
+  }
+
+  .project-link-control {
+    grid-template-columns: 1fr;
   }
 }

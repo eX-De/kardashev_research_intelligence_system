@@ -17,6 +17,7 @@ from worker.api import (
     export_project_to_obsidian,
     link_project_note,
     link_project_paper,
+    paper_detail,
     paper_reports_queue,
     project_detail,
     projects,
@@ -1854,6 +1855,21 @@ class WorkerTests(unittest.TestCase):
         init_db(conn)
         conn.execute(
             """
+            INSERT INTO research_projects(
+              name, status, keywords_json, obsidian_project_path, obsidian_output_dir,
+              obsidian_folder, obsidian_status_tag, discovery_source, source_tags_json,
+              arxiv_categories_json, automation_json, created_at, updated_at
+            )
+            VALUES (
+              'Manual Queue Project', 'active', '[]', 'Research/Queue.md',
+              'Research', 'Research', 'Status/进行中',
+              'manual', '[]', '[]', '{}', 'now', 'now'
+            )
+            """
+        )
+        project_id = conn.execute("SELECT id FROM research_projects").fetchone()["id"]
+        conn.execute(
+            """
             INSERT INTO arxiv_papers(
               arxiv_id, title, authors_json, summary, categories_json, published_at,
               updated_at, link, pdf_link, text_status, fetched_batch_id, created_at
@@ -1867,6 +1883,13 @@ class WorkerTests(unittest.TestCase):
             """
         )
         paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO project_papers(project_id, paper_id, relation, note, created_at, updated_at)
+            VALUES (?, ?, 'reading', 'manual_from_report_queue', 'now', 'now')
+            """,
+            (project_id, paper_id),
+        )
         conn.execute(
             """
             INSERT INTO paper_reading_reports(
@@ -1885,7 +1908,12 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(result["stats"]["total"], 1)
         self.assertEqual(result["items"][0]["paper_id"], paper_id)
         self.assertEqual(result["items"][0]["status"], "done")
+        self.assertEqual(result["items"][0]["linked_project_ids"], [project_id])
+        self.assertEqual(result["items"][0]["linked_project_names"], ["Manual Queue Project"])
         self.assertIn("队列报告内容", result["items"][0]["report_excerpt"])
+        detail = paper_detail(conn, int(paper_id))
+        self.assertEqual(detail["linked_projects"][0]["project_id"], project_id)
+        self.assertEqual(detail["linked_projects"][0]["project_name"], "Manual Queue Project")
 
     def test_remove_paper_report_hides_single_queue_item_without_requeueing(self) -> None:
         conn = sqlite3.connect(":memory:")

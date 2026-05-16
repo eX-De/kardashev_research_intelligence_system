@@ -518,6 +518,40 @@ def _claim_queued_report(
     paper_ids: list[int] | tuple[int, ...] | set[int] | None,
 ) -> int | None:
     paper_clause, paper_params = _paper_filter("r", paper_ids)
+    if getattr(conn, "dialect", "") == "postgres":
+        conn.execute("BEGIN")
+        row = conn.execute(
+            f"""
+            SELECT r.paper_id
+            FROM paper_reading_reports r
+            JOIN arxiv_papers p ON p.id = r.paper_id
+            WHERE r.status = 'queued'
+              {paper_clause}
+            ORDER BY r.updated_at, p.published_at DESC
+            LIMIT 1
+            FOR UPDATE OF r SKIP LOCKED
+            """,
+            paper_params,
+        ).fetchone()
+        if not row:
+            conn.commit()
+            return None
+        paper_id = int(row["paper_id"])
+        now = utc_now()
+        conn.execute(
+            """
+            UPDATE paper_reading_reports
+            SET status = 'processing',
+                error_message = '',
+                started_at = ?,
+                updated_at = ?
+            WHERE paper_id = ?
+              AND status = 'queued'
+            """,
+            (now, now, paper_id),
+        )
+        conn.commit()
+        return paper_id
     try:
         conn.execute("BEGIN IMMEDIATE")
     except sqlite3.OperationalError as exc:

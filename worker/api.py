@@ -70,6 +70,32 @@ def _row_value(row: sqlite3.Row, key: str, default: object = "") -> object:
     return default if value is None else clean_unicode(value)
 
 
+def _group_concat_values(value: object) -> list[str]:
+    return [item for item in str(value or "").split(",") if item]
+
+
+def _group_concat_ints(value: object) -> list[int]:
+    ids: list[int] = []
+    for item in _group_concat_values(value):
+        try:
+            ids.append(int(item))
+        except ValueError:
+            continue
+    return ids
+
+
+def _dedupe_list(values: list[object]) -> list[object]:
+    seen = set()
+    result = []
+    for value in values:
+        key = str(value)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+    return result
+
+
 def _project_row(row: sqlite3.Row) -> dict[str, object]:
     automation = {
         **DEFAULT_PROJECT_AUTOMATION,
@@ -800,12 +826,27 @@ def paper_reports_queue(conn: sqlite3.Connection, limit: int = 300) -> dict[str,
           SELECT
             r.paper_id,
             COUNT(*) AS project_count,
+            group_concat(DISTINCT r.project_id || '') AS project_ids,
             group_concat(DISTINCT rp.name) AS project_names,
             group_concat(DISTINCT r.relation_type) AS relation_types
           FROM project_paper_recommendations r
           JOIN research_projects rp ON rp.id = r.project_id
           WHERE r.state IN ('pending', 'accepted')
           GROUP BY r.paper_id
+        ),
+        linked_projects AS (
+          SELECT
+            pp.paper_id,
+            COUNT(*) AS project_count,
+            group_concat(DISTINCT pp.project_id || '') AS project_ids,
+            group_concat(DISTINCT rp.name) AS project_names
+          FROM project_papers pp
+          JOIN research_projects rp ON rp.id = pp.project_id
+          WHERE NOT (
+            pp.relation = 'candidate'
+            AND pp.note = 'auto_matched_by_project_context'
+          )
+          GROUP BY pp.paper_id
         )
         SELECT
           rr.paper_id,
@@ -826,11 +867,16 @@ def paper_reports_queue(conn: sqlite3.Connection, limit: int = 300) -> dict[str,
           p.link,
           p.text_status,
           COALESCE(rp.project_count, 0) AS project_count,
+          COALESCE(rp.project_ids, '') AS project_ids,
           COALESCE(rp.project_names, '') AS project_names,
-          COALESCE(rp.relation_types, '') AS relation_types
+          COALESCE(rp.relation_types, '') AS relation_types,
+          COALESCE(lp.project_count, 0) AS linked_project_count,
+          COALESCE(lp.project_ids, '') AS linked_project_ids,
+          COALESCE(lp.project_names, '') AS linked_project_names
         FROM paper_reading_reports rr
         JOIN arxiv_papers p ON p.id = rr.paper_id
         LEFT JOIN rec_projects rp ON rp.paper_id = rr.paper_id
+        LEFT JOIN linked_projects lp ON lp.paper_id = rr.paper_id
         WHERE rr.status != 'removed'
         ORDER BY
           CASE rr.status
@@ -846,9 +892,15 @@ def paper_reports_queue(conn: sqlite3.Connection, limit: int = 300) -> dict[str,
         """,
         (row_limit,),
     ).fetchall()
-    return {
-        "stats": stats,
-        "items": [
+    items = []
+    for row in rows:
+        recommendation_project_ids = _group_concat_ints(row["project_ids"])
+        recommendation_project_names = _group_concat_values(row["project_names"])
+        linked_project_ids = _group_concat_ints(row["linked_project_ids"])
+        linked_project_names = _group_concat_values(row["linked_project_names"])
+        combined_project_ids = _dedupe_list([*linked_project_ids, *recommendation_project_ids])
+        combined_project_names = _dedupe_list([*linked_project_names, *recommendation_project_names])
+        items.append(
             {
                 "paper_id": int(row["paper_id"]),
                 "id": int(row["paper_id"]),
@@ -860,13 +912,16 @@ def paper_reports_queue(conn: sqlite3.Connection, limit: int = 300) -> dict[str,
                 "published_at": row["published_at"],
                 "link": row["link"],
                 "text_status": row["text_status"],
-                "project_count": int(row["project_count"] or 0),
-                "project_names": [
-                    name for name in str(row["project_names"] or "").split(",") if name
-                ],
-                "relation_types": [
-                    relation for relation in str(row["relation_types"] or "").split(",") if relation
-                ],
+                "project_count": len(combined_project_ids) or len(combined_project_names),
+                "project_ids": combined_project_ids,
+                "project_names": combined_project_names,
+                "recommendation_project_count": int(row["project_count"] or 0),
+                "recommendation_project_ids": recommendation_project_ids,
+                "recommendation_project_names": recommendation_project_names,
+                "linked_project_count": int(row["linked_project_count"] or 0),
+                "linked_project_ids": linked_project_ids,
+                "linked_project_names": linked_project_names,
+                "relation_types": _group_concat_values(row["relation_types"]),
                 "model_provider_id": row["model_provider_id"],
                 "model": row["model"],
                 "error_message": row["error_message"],
@@ -876,8 +931,10 @@ def paper_reports_queue(conn: sqlite3.Connection, limit: int = 300) -> dict[str,
                 "started_at": row["started_at"],
                 "finished_at": row["finished_at"],
             }
-            for row in rows
-        ],
+        )
+    return {
+        "stats": stats,
+        "items": items,
     }
 
 
@@ -978,6 +1035,27 @@ def paper_detail(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
         """,
         (paper_id,),
     ).fetchall()
+    linked_project_rows = conn.execute(
+        """
+        SELECT
+          pp.project_id,
+          rp.name AS project_name,
+          rp.obsidian_project_path,
+          rp.obsidian_folder,
+          pp.relation,
+          pp.note,
+          pp.updated_at
+        FROM project_papers pp
+        JOIN research_projects rp ON rp.id = pp.project_id
+        WHERE pp.paper_id = ?
+          AND NOT (
+            pp.relation = 'candidate'
+            AND pp.note = 'auto_matched_by_project_context'
+          )
+        ORDER BY pp.updated_at DESC, rp.name
+        """,
+        (paper_id,),
+    ).fetchall()
     return {
         "paper": {
             "id": int(paper["id"]),
@@ -1034,6 +1112,18 @@ def paper_detail(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
                 "confidence": float(row["confidence"] or 0),
             }
             for row in recommendation_rows
+        ],
+        "linked_projects": [
+            {
+                "project_id": int(row["project_id"]),
+                "project_name": row["project_name"],
+                "obsidian_project_path": row["obsidian_project_path"],
+                "obsidian_folder": row["obsidian_folder"],
+                "relation": row["relation"],
+                "note": row["note"],
+                "updated_at": row["updated_at"],
+            }
+            for row in linked_project_rows
         ],
         "paper_report": paper_report_payload(conn, paper_id),
         "evidence": [

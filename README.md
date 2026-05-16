@@ -3,8 +3,8 @@
 这是一个本地运行的科研信息自动化 dashboard MVP。主界面是“项目中心”，但 Obsidian 才是人类可读信息中心：dashboard 负责配置、调度、监控和少量确认，论文卡片、项目索引、实验记录整理等可读内容应写回 Obsidian。
 
 - 前端使用 Vite + React；Node 提供 API 服务，并在普通使用模式下托管构建后的前端静态文件。
-- Python worker 负责 SQLite、Obsidian 导入、arXiv 抓取、PDF 转 TXT、正文分段匹配、相关性排序和解释生成。
-- SQLite 数据库默认位于 `./data/research_intelligence.sqlite`。
+- Python worker 负责数据库、Obsidian 导入、arXiv 抓取、PDF 转 TXT、正文分段匹配、相关性排序和解释生成。
+- SQLite 数据库默认位于 `./data/research_intelligence.sqlite`；设置 `DATABASE_URL` 后可切换到 PostgreSQL。
 - Obsidian vault 是最终输出位置。系统会按项目配置写入自动生成的 Markdown，例如项目索引；导入流程仍只读取用户已有笔记。
 
 ## 快速开始
@@ -109,7 +109,19 @@ npm run check
 
 - `PORT`：dashboard 监听端口。
 - `APP_DB_PATH`：SQLite 数据库路径。
+- `DATABASE_URL`：PostgreSQL 连接串；留空时使用 SQLite，例如 `postgresql://research_app:password@localhost:5432/research_intelligence`。
 - `PYTHON_BIN`：Node 调用 Python worker 的命令。
+
+## PostgreSQL 迁移
+
+先停止 dashboard/API server，避免迁移时 SQLite 仍在写入。确认目标 PostgreSQL 数据库为空或可以重建后执行：
+
+```powershell
+$env:DATABASE_URL="postgresql://research_app:password@localhost:5432/research_intelligence"
+python migrate_sqlite_to_postgres.py --reset
+```
+
+迁移脚本会在目标库创建 schema、导入 SQLite 数据、校验每张表行数并重置自增序列。迁移完成后，把同一个 `DATABASE_URL` 写入 `.env` 并重启 dashboard，即可让 worker 使用 PostgreSQL。
 
 业务配置可以在 dashboard 的“配置与任务”里修改：
 
