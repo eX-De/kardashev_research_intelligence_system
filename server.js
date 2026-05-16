@@ -18,6 +18,10 @@ const PAPER_REPORT_QUEUE_DEFAULT_CONCURRENCY = Math.max(
   1,
   Number(process.env.PAPER_REPORT_QUEUE_CONCURRENCY || process.env.PAPER_REPORT_QUEUE_LIMIT || 1)
 );
+const IN_MEMORY_JOB_RECONCILE_GRACE_MS = Math.max(
+  5000,
+  Number(process.env.IN_MEMORY_JOB_RECONCILE_GRACE_MS || 60000)
+);
 
 const jobRuntime = {
   currentJob: null,
@@ -264,6 +268,48 @@ async function cleanupStaleJobs() {
   }
 }
 
+function jobAgeMs(job) {
+  const startedAt = new Date(job?.started_at || 0).getTime();
+  return Number.isFinite(startedAt) ? Date.now() - startedAt : Number.POSITIVE_INFINITY;
+}
+
+async function runningDatabaseJob() {
+  await cleanupStaleJobs();
+  const history = await jsonFromWorker(["api-jobs-history", "--limit", "100"]);
+  return (history.items || []).find((job) => job.status === "running") || null;
+}
+
+async function reconcileCurrentJobWithDatabase() {
+  const current = jobRuntime.currentJob;
+  if (!current) return null;
+
+  const running = await runningDatabaseJob();
+  if (running) return running;
+
+  if (jobAgeMs(current) < IN_MEMORY_JOB_RECONCILE_GRACE_MS) {
+    return null;
+  }
+
+  const finishedAt = new Date().toISOString();
+  const message = "Cleared stale in-memory job state after database cleanup found no running job";
+  jobRuntime.lastJob = {
+    command: current.command,
+    source: current.source,
+    args: current.args || [],
+    status: "failed",
+    started_at: current.started_at,
+    finished_at: finishedAt,
+    message
+  };
+  jobRuntime.currentJob = null;
+  if (current.source === "paper-report-queue") {
+    paperReportQueueRuntime.lastError = { message, at: finishedAt };
+  } else {
+    schedulerRuntime.lastError = { message, at: finishedAt };
+  }
+  return null;
+}
+
 function clearSchedulerTimer() {
   if (schedulerRuntime.timer) {
     clearTimeout(schedulerRuntime.timer);
@@ -312,6 +358,9 @@ async function stopScheduler({ persist = true } = {}) {
 
 async function runManagedJob(command, source = "manual", args = []) {
   if (jobRuntime.currentJob) {
+    await reconcileCurrentJobWithDatabase();
+  }
+  if (jobRuntime.currentJob) {
     const err = new Error(`Another job is already running: ${jobRuntime.currentJob.command}`);
     err.statusCode = 409;
     throw err;
@@ -322,9 +371,7 @@ async function runManagedJob(command, source = "manual", args = []) {
     throw err;
   }
   if (source !== "paper-report-queue") {
-    await cleanupStaleJobs();
-    const history = await jsonFromWorker(["api-jobs-history", "--limit", "20"]);
-    const running = (history.items || []).find((job) => job.status === "running");
+    const running = await runningDatabaseJob();
     if (running) {
       const err = new Error(`Database job is already running: ${running.job_type} #${running.id}`);
       err.statusCode = 409;
@@ -416,7 +463,16 @@ async function runPaperReportQueueOnce() {
   paperReportQueueRuntime.lastCheckAt = new Date().toISOString();
   paperReportQueueRuntime.lastSkipReason = null;
   if (jobRuntime.currentJob) {
+    await reconcileCurrentJobWithDatabase();
+  }
+  const running = jobRuntime.currentJob ? null : await runningDatabaseJob();
+  if (jobRuntime.currentJob) {
     paperReportQueueRuntime.lastSkipReason = `busy:${jobRuntime.currentJob.command}`;
+    schedulePaperReportQueue();
+    return schedulerStatus();
+  }
+  if (running) {
+    paperReportQueueRuntime.lastSkipReason = `busy:${running.job_type}`;
     schedulePaperReportQueue();
     return schedulerStatus();
   }
@@ -506,7 +562,15 @@ async function runDailyOnDashboardOpenIfNeeded(settings) {
     return { triggered: false, reason: "trigger_in_flight", scheduler: schedulerStatus() };
   }
   if (jobRuntime.currentJob) {
+    await reconcileCurrentJobWithDatabase();
+  }
+  const running = jobRuntime.currentJob ? null : await runningDatabaseJob();
+  if (jobRuntime.currentJob) {
     startupDailyRuntime.lastSkipReason = `busy:${jobRuntime.currentJob.command}`;
+    return { triggered: false, reason: startupDailyRuntime.lastSkipReason, scheduler: schedulerStatus() };
+  }
+  if (running) {
+    startupDailyRuntime.lastSkipReason = `busy:${running.job_type}`;
     return { triggered: false, reason: startupDailyRuntime.lastSkipReason, scheduler: schedulerStatus() };
   }
   if (paperReportQueueRuntime.active > 0) {
@@ -1018,6 +1082,13 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  const readerReportMatch = url.pathname.match(/^\/api\/reader\/papers\/(\d+)\/report$/);
+  if (req.method === "DELETE" && readerReportMatch) {
+    const data = await jsonFromWorker(["api-delete-paper-report", readerReportMatch[1]]);
+    sendJson(res, 200, data);
+    return;
+  }
+
   const paperMatch = url.pathname.match(/^\/api\/papers\/(\d+)$/);
   if (req.method === "GET" && paperMatch) {
     const data = await jsonFromWorker(["api-paper", paperMatch[1]]);
@@ -1054,6 +1125,15 @@ async function routeApi(req, res, url) {
   }
 
   const paperReportMatch = url.pathname.match(/^\/api\/papers\/(\d+)\/report$/);
+  if (req.method === "DELETE" && paperReportMatch) {
+    const data = await jsonFromWorker([
+      "api-delete-paper-report",
+      paperReportMatch[1]
+    ]);
+    sendJson(res, 200, data);
+    return;
+  }
+
   if (req.method === "POST" && paperReportMatch) {
     const body = await readRequestJson(req);
     const data = await jsonFromWorker([

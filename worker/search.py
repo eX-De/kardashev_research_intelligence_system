@@ -15,6 +15,7 @@ from .embeddings import (
     ensure_arxiv_paper_embeddings,
     ensure_missing_arxiv_chunk_embeddings,
 )
+from .project_status import run_daily_project_status_sql
 
 TOKEN_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_\-]{2,}")
 STOPWORDS = {
@@ -551,9 +552,10 @@ def rank_project_papers(
     chunk_result = ensure_arxiv_chunks(conn, paper_ids=paper_ids)
     embedding_result = ensure_missing_arxiv_chunk_embeddings(conn, settings, paper_ids=paper_ids)
     projects = conn.execute(
-        """
+        f"""
         SELECT id, name
-        FROM research_projects
+        FROM research_projects rp
+        WHERE {run_daily_project_status_sql("rp")}
         ORDER BY updated_at DESC
         """
     ).fetchall()
@@ -562,7 +564,6 @@ def rank_project_papers(
     papers_considered = 0
     arxiv_chunks_scored = 0
     project_paper_matches_created = 0
-    project_papers_linked = 0
 
     for project in projects:
         projects_considered += 1
@@ -696,17 +697,6 @@ def rank_project_papers(
             )
             if cur.rowcount:
                 project_paper_matches_created += 1
-            link_cur = conn.execute(
-                """
-                INSERT OR IGNORE INTO project_papers(
-                  project_id, paper_id, relation, note, created_at, updated_at
-                )
-                VALUES (?, ?, 'candidate', 'auto_matched_by_project_context', ?, ?)
-                """,
-                (project_id, int(paper["id"]), now, now),
-            )
-            if link_cur.rowcount:
-                project_papers_linked += 1
             conn.commit()
 
     maintenance_result = {
@@ -720,5 +710,5 @@ def rank_project_papers(
         "project_rank_papers_considered": papers_considered,
         "project_rank_arxiv_chunks_scored": arxiv_chunks_scored,
         "project_paper_matches_created": project_paper_matches_created,
-        "project_papers_linked": project_papers_linked,
+        "project_papers_linked": 0,
     }

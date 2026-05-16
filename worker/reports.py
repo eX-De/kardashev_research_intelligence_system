@@ -13,6 +13,7 @@ from .llm import (
     PROJECT_JUDGMENT_REPORT_USEFULNESS_THRESHOLD,
     call_chat_json,
 )
+from .project_status import run_daily_project_status_sql
 
 
 DAILY_REPORT_DIR = Path("Research Intelligence") / "Daily"
@@ -87,7 +88,7 @@ def _project_match_rows(
     where, params = _paper_filter(
         paper_ids,
         "p",
-        [_report_judgment_condition("j")],
+        [_report_judgment_condition("j"), run_daily_project_status_sql("rp")],
         [PROJECT_JUDGMENT_REPORT_CONFIDENCE_THRESHOLD, PROJECT_JUDGMENT_REPORT_USEFULNESS_THRESHOLD],
     )
     return conn.execute(
@@ -325,6 +326,7 @@ def _llm_daily_report_markdown(
         settings,
         _llm_report_prompt(payload),
         system="你是严谨的中文科研情报编辑，只根据输入事实生成可读 Markdown 日报。",
+        response_format={"type": "json_object"},
     )
     if not isinstance(response, dict):
         raise RuntimeError("LLM daily report generation failed: no valid JSON response")

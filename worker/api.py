@@ -14,6 +14,8 @@ from .paper_reports import (
     paper_report_payload,
     process_paper_report_queue,
     queue_paper_report,
+    remove_paper_report_from_queue,
+    sync_paper_report_for_recommendation_state,
 )
 from .recommendations import (
     accept_recommendations_for_paper,
@@ -108,7 +110,12 @@ def projects(conn: sqlite3.Connection) -> dict[str, object]:
           COUNT(DISTINCT pa.id) AS artifact_count,
           MAX(pa.updated_at) AS latest_artifact_at
         FROM research_projects p
-        LEFT JOIN project_papers pp ON pp.project_id = p.id
+        LEFT JOIN project_papers pp
+          ON pp.project_id = p.id
+         AND NOT (
+           pp.relation = 'candidate'
+           AND pp.note = 'auto_matched_by_project_context'
+         )
         LEFT JOIN project_notes pn ON pn.project_id = p.id
         LEFT JOIN project_artifacts pa ON pa.project_id = p.id
         GROUP BY p.id
@@ -134,7 +141,12 @@ def project_detail(conn: sqlite3.Connection, project_id: int) -> dict[str, objec
           COUNT(DISTINCT pp.paper_id) AS paper_count,
           COUNT(DISTINCT pn.note_id) AS note_count
         FROM research_projects p
-        LEFT JOIN project_papers pp ON pp.project_id = p.id
+        LEFT JOIN project_papers pp
+          ON pp.project_id = p.id
+         AND NOT (
+           pp.relation = 'candidate'
+           AND pp.note = 'auto_matched_by_project_context'
+         )
         LEFT JOIN project_notes pn ON pn.project_id = p.id
         WHERE p.id = ?
         GROUP BY p.id
@@ -159,6 +171,10 @@ def project_detail(conn: sqlite3.Connection, project_id: int) -> dict[str, objec
         LEFT JOIN project_paper_matches ppm
           ON ppm.project_id = pp.project_id AND ppm.paper_id = pp.paper_id
         WHERE pp.project_id = ?
+          AND NOT (
+            pp.relation = 'candidate'
+            AND pp.note = 'auto_matched_by_project_context'
+          )
         ORDER BY COALESCE(ppm.score, 0) DESC, pp.updated_at DESC
         """,
         (project_id,),
@@ -187,6 +203,10 @@ def project_detail(conn: sqlite3.Connection, project_id: int) -> dict[str, objec
         WHERE NOT EXISTS (
           SELECT 1 FROM project_papers pp
           WHERE pp.project_id = ? AND pp.paper_id = p.id
+            AND NOT (
+              pp.relation = 'candidate'
+              AND pp.note = 'auto_matched_by_project_context'
+            )
         )
         GROUP BY p.id
         ORDER BY score DESC, p.published_at DESC
@@ -767,7 +787,7 @@ def paper_reports_queue(conn: sqlite3.Connection, limit: int = 300) -> dict[str,
     ensure_paper_reports_for_recommendations(conn)
     stats = {"queued": 0, "processing": 0, "done": 0, "failed": 0, "total": 0}
     for row in conn.execute(
-        "SELECT status, COUNT(*) AS count FROM paper_reading_reports GROUP BY status"
+        "SELECT status, COUNT(*) AS count FROM paper_reading_reports WHERE status != 'removed' GROUP BY status"
     ).fetchall():
         status = str(row["status"] or "")
         count = int(row["count"] or 0)
@@ -811,6 +831,7 @@ def paper_reports_queue(conn: sqlite3.Connection, limit: int = 300) -> dict[str,
         FROM paper_reading_reports rr
         JOIN arxiv_papers p ON p.id = rr.paper_id
         LEFT JOIN rec_projects rp ON rp.paper_id = rr.paper_id
+        WHERE rr.status != 'removed'
         ORDER BY
           CASE rr.status
             WHEN 'processing' THEN 0
@@ -858,6 +879,11 @@ def paper_reports_queue(conn: sqlite3.Connection, limit: int = 300) -> dict[str,
             for row in rows
         ],
     }
+
+
+def remove_paper_report(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
+    result = remove_paper_report_from_queue(conn, paper_id)
+    return {"ok": True, "paper_id": paper_id, **result}
 
 
 def paper_detail(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
@@ -1080,8 +1106,9 @@ def update_paper_recommendation(
         raw_project_ids = payload.get("project_ids")
         project_ids = [int(project_id) for project_id in raw_project_ids] if isinstance(raw_project_ids, list) else None
         discard_recommendations_for_paper(conn, paper_id, project_ids)
+        report_result = sync_paper_report_for_recommendation_state(conn, paper_id)
         conn.commit()
-        return {"ok": True, "paper_id": paper_id, "action": "discard"}
+        return {"ok": True, "paper_id": paper_id, "action": "discard", **report_result}
     raise RuntimeError("action must be accept or discard")
 
 

@@ -113,10 +113,10 @@ export function ProjectsView({ onOpenProject, onNewProject, setStatusMessage }) 
   const stats = useMemo(() => {
     const activeCount = projects.filter((project) => ["active", "exploring", "writing"].includes(project.status)).length;
     return [
-      ["项目", projects.length, `${activeCount} active`],
-      ["论文", sumProject(projects, "paper_count"), "linked"],
+      ["项目", projects.length, `${activeCount} 个活跃`],
+      ["论文", sumProject(projects, "paper_count"), "已关联"],
       ["笔记", sumProject(projects, "note_count"), "Obsidian"],
-      ["生成产物", sumProject(projects, "artifact_count"), "synced"]
+      ["生成产物", sumProject(projects, "artifact_count"), "已同步"]
     ];
   }, [projects]);
 
@@ -125,7 +125,7 @@ export function ProjectsView({ onOpenProject, onNewProject, setStatusMessage }) 
       <header className="project-dashboard-header">
         <div>
           <h1>项目中心</h1>
-          <p>{projects.length} projects</p>
+          <p>{projects.length} 个项目正在跟踪</p>
         </div>
         <button className="primary" onClick={onNewProject} type="button">
           新建项目
@@ -136,8 +136,8 @@ export function ProjectsView({ onOpenProject, onNewProject, setStatusMessage }) 
         <section className="project-stats-panel" aria-label="项目统计">
           <PanelTitle title="运行概览" subtitle="只保留项目中心需要的全局规模。" />
           <div className="project-stats">
-            {stats.map(([label, value, hint]) => (
-              <div className="project-stat-card" key={label}>
+            {stats.map(([label, value, hint], index) => (
+              <div className={`project-stat-card project-stat-${index}`} key={label}>
                 <span>{label}</span>
                 <strong>{value}</strong>
                 <p>{hint}</p>

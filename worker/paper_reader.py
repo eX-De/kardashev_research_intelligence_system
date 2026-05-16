@@ -46,6 +46,51 @@ def _reader_message_payload(row: sqlite3.Row) -> dict[str, object]:
     }
 
 
+def _report_seed_messages(conn: sqlite3.Connection, paper_id: int) -> list[dict[str, object]]:
+    report = paper_report_payload(conn, paper_id)
+    if not report:
+        return []
+    prompt = clean_unicode(str(report.get("prompt") or "")).strip()
+    markdown = clean_unicode(str(report.get("report_markdown") or "")).strip()
+    if not markdown:
+        return []
+    created_at = report.get("finished_at") or report.get("updated_at") or report.get("created_at") or ""
+    messages: list[dict[str, object]] = []
+    if prompt:
+        messages.append(
+            {
+                "id": -(int(paper_id) * 10 + 1),
+                "paper_id": int(paper_id),
+                "role": "user",
+                "content": prompt,
+                "source": "analysis_prompt",
+                "model_provider_id": "",
+                "model": "",
+                "created_at": created_at,
+            }
+        )
+    messages.append(
+        {
+            "id": -(int(paper_id) * 10 + 2),
+            "paper_id": int(paper_id),
+            "role": "assistant",
+            "content": markdown,
+            "source": "analysis_report",
+            "model_provider_id": report.get("model_provider_id") or "",
+            "model": report.get("model") or "",
+            "created_at": created_at,
+        }
+    )
+    return messages
+
+
+def _report_seed_message(conn: sqlite3.Connection, paper_id: int, message_id: int) -> dict[str, object] | None:
+    for message in _report_seed_messages(conn, paper_id):
+        if int(message["id"]) == int(message_id):
+            return dict(message)
+    return None
+
+
 def _model_choice(settings: Settings, provider_id: str, model: str) -> tuple[str, str]:
     next_provider = clean_unicode(str(provider_id or "")).strip() or settings.llm_chat_provider_id
     next_model = clean_unicode(str(model or "")).strip() or settings.llm_chat_model
@@ -81,6 +126,11 @@ def paper_reader_messages(conn: sqlite3.Connection, paper_id: int) -> list[dict[
         (paper_id,),
     ).fetchall()
     return [_reader_message_payload(row) for row in rows]
+
+
+def paper_reader_display_messages(conn: sqlite3.Connection, paper_id: int) -> list[dict[str, object]]:
+    messages = paper_reader_messages(conn, paper_id)
+    return _report_seed_messages(conn, paper_id) + messages
 
 
 def _reader_file_stem(prefix: str, identity: str) -> str:
@@ -398,28 +448,40 @@ def _history_for_model(rows: list[dict[str, object]]) -> list[dict[str, str]]:
     return messages
 
 
-def _build_chat_messages(paper_text: str, history: list[dict[str, object]], message: str) -> list[dict[str, str]]:
+def _build_chat_messages(
+    paper_text: str,
+    history: list[dict[str, object]],
+    message: str,
+    report_seed_messages: list[dict[str, object]] | None = None,
+) -> list[dict[str, str]]:
     messages = [
         {
             "role": "system",
             "content": "You are a research paper reading assistant. Answer from the supplied full PDF text whenever possible.",
         },
-        {
-            "role": "user",
-            "content": (
-                "下面是 PyMuPDF 从论文 PDF 中解析出的完整文本，按页保留。"
-                "后续对话都应优先基于这份文本回答。\n\n"
-                "<paper_text>\n"
-                f"{paper_text}\n"
-                "</paper_text>"
-            ),
-        },
-        {"role": "assistant", "content": "我已收到完整 PDF 解析文本。"},
     ]
+    seed_messages = _history_for_model(report_seed_messages or [])
+    if seed_messages:
+        messages.extend(seed_messages)
+    messages.extend(
+        [
+            {
+                "role": "user",
+                "content": (
+                    "下面是 PyMuPDF 从论文 PDF 中解析出的完整文本，按页保留。"
+                    "后续对话都应优先基于这份文本回答。\n\n"
+                    "<paper_text>\n"
+                    f"{paper_text}\n"
+                    "</paper_text>"
+                ),
+            },
+            {"role": "assistant", "content": "我已收到完整 PDF 解析文本。"},
+        ]
+    )
     normalized = _history_for_model(history)
     if normalized:
         messages.extend(normalized)
-    else:
+    elif not seed_messages:
         messages.append({"role": "user", "content": "Please summarize this paper."})
     messages.append({"role": "user", "content": message})
     return messages
@@ -429,7 +491,7 @@ def paper_reader_detail(conn: sqlite3.Connection, paper_id: int) -> dict[str, ob
     from .api import paper_detail
 
     detail = paper_detail(conn, paper_id)
-    detail["reader_messages"] = paper_reader_messages(conn, paper_id)
+    detail["reader_messages"] = paper_reader_display_messages(conn, paper_id)
     return detail
 
 
@@ -464,7 +526,7 @@ def paper_reader_chat(
     )
     conn.commit()
 
-    model_messages = _build_chat_messages(paper_text, history, message)
+    model_messages = _build_chat_messages(paper_text, history, message, _report_seed_messages(conn, paper_id))
     provider_id, model = _reader_chat_model(settings)
     answer = _call_chat_text(
         settings,
@@ -527,7 +589,7 @@ def paper_reader_chat_stream(
 
     provider_id, model = _reader_chat_model(settings)
     emit("start", {"model": {"provider_id": provider_id, "model": model}})
-    model_messages = _build_chat_messages(paper_text, history, message)
+    model_messages = _build_chat_messages(paper_text, history, message, _report_seed_messages(conn, paper_id))
     answer_parts: list[str] = []
     for chunk in _iter_chat_text_chunks(
         settings,
@@ -849,13 +911,23 @@ def generate_reader_followup_questions(
         """,
         (anchor_message_id, paper_id),
     ).fetchone()
-    if not anchor:
+    if not anchor and anchor_message_id < 0:
+        anchor_payload = _report_seed_message(conn, paper_id, anchor_message_id)
+    elif anchor:
+        anchor_payload = _reader_message_payload(anchor)
+    else:
+        anchor_payload = None
+    if not anchor_payload:
         raise RuntimeError("Anchor message was not found for this paper")
     paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
     if not paper:
         raise RuntimeError(f"Paper not found: {paper_id}")
-    anchor_payload = _reader_message_payload(anchor)
-    anchor_payload["context_text"] = payload.get("context_text") or payload.get("contextText") or anchor["content"]
+    anchor_payload["context_text"] = (
+        payload.get("context_text")
+        or payload.get("contextText")
+        or anchor_payload.get("content")
+        or ""
+    )
     provider_id, model = _reader_question_model(settings)
     text = _call_chat_text(
         settings,

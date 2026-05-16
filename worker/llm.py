@@ -9,6 +9,7 @@ from typing import Any
 
 from .config import Settings
 from .db import clean_unicode, from_json, to_json, utc_now
+from .project_status import run_daily_project_status_sql
 
 
 PROJECT_JUDGMENT_PROMPT_VERSION = "project_judgment_v1"
@@ -83,6 +84,7 @@ def call_chat_json(
     settings: Settings,
     prompt: str,
     system: str = "You judge whether papers are useful for a specific research project.",
+    response_format: dict[str, object] | None = None,
 ) -> dict[str, object] | None:
     provider = settings.chat_provider()
     if not provider or not provider.api_key or not provider.base_url or not settings.llm_chat_model:
@@ -94,7 +96,7 @@ def call_chat_json(
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.1,
-        "response_format": {"type": "json_object"},
+        "response_format": response_format or {"type": "json_object"},
     }
     request = urllib.request.Request(
         f"{provider.base_url}/chat/completions",
@@ -272,6 +274,7 @@ def _candidate_rows(
         LEFT JOIN project_paper_judgments j
           ON j.project_id = ppm.project_id AND j.paper_id = ppm.paper_id
         WHERE COALESCE(NULLIF(ppm.quality_score, 0), ppm.score) >= ?
+          AND {run_daily_project_status_sql("rp")}
           {paper_filter}
         ORDER BY ppm.project_id, retrieval_quality DESC, ppm.updated_at DESC
         """,

@@ -107,6 +107,10 @@ def _fetch_page(search_query: str, start: int, max_results: int) -> str:
             except ValueError:
                 delay = ARXIV_RETRY_BACKOFF_SECONDS[attempt]
             time.sleep(max(1, min(delay, 300)))
+        except (urllib.error.URLError, TimeoutError, OSError):
+            if attempt >= len(ARXIV_RETRY_BACKOFF_SECONDS):
+                raise
+            time.sleep(ARXIV_RETRY_BACKOFF_SECONDS[attempt])
     raise RuntimeError("arXiv request retry loop exhausted")
 
 

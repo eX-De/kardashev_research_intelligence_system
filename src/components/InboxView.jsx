@@ -16,7 +16,7 @@ function reportStatusLabel(status) {
 
 function PaperList({ papers, activePaperId, onSelect }) {
   if (!papers.length) {
-    return <div className="paper-card"><h2>还没有推荐</h2><div className="card-meta">先在“配置与任务”里保存配置，再执行 run-daily。</div></div>;
+    return <div className="paper-card paper-card-empty"><h2>还没有推荐</h2><div className="card-meta">先在“配置与任务”里保存配置，再执行每日流程。</div></div>;
   }
   return papers.map((paper) => (
     <button className={`paper-card ${paper.id === activePaperId ? "active" : ""}`} key={paper.id} onClick={() => onSelect(paper.id)} type="button">
@@ -251,7 +251,7 @@ export function InboxView({ setStatusMessage }) {
         <header className="panel-header">
           <div>
             <h1>论文推荐</h1>
-            <p>{papers.length} recommendations</p>
+            <p>{papers.length} 篇待判断论文</p>
           </div>
           <button className="icon-button" title="刷新" aria-label="刷新" onClick={() => loadInbox().catch((error) => setStatusMessage(error.message))} type="button">
             <span aria-hidden="true">↻</span>

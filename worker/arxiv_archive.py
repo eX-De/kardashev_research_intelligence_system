@@ -6,6 +6,7 @@ from typing import Any
 
 from .config import Settings
 from .db import utc_now
+from .project_status import run_daily_project_status_sql
 
 
 def _delete_cached_file(path_text: str) -> tuple[int, int]:
@@ -62,8 +63,10 @@ def archive_zero_match_papers(
           )
           AND NOT EXISTS (
             SELECT 1 FROM project_paper_recommendations r
+            JOIN research_projects rp ON rp.id = r.project_id
             WHERE r.paper_id = p.id
               AND r.state IN ('pending', 'accepted')
+              AND {run_daily_project_status_sql("rp")}
           )
         """,
         params,

@@ -7,6 +7,7 @@ from .llm import (
     PROJECT_JUDGMENT_REPORT_RELATIONS,
     PROJECT_JUDGMENT_REPORT_USEFULNESS_THRESHOLD,
 )
+from .project_status import run_daily_project_status_sql
 
 
 VALID_RECOMMENDATION_STATES = {"pending", "accepted", "discarded"}
@@ -48,12 +49,14 @@ def sync_project_paper_recommendations(
           j.input_hash,
           r.state AS existing_state
         FROM project_paper_judgments j
+        JOIN research_projects rp ON rp.id = j.project_id
         LEFT JOIN project_paper_recommendations r
           ON r.project_id = j.project_id AND r.paper_id = j.paper_id
         WHERE j.relation_type IN ({placeholders})
           AND j.suggested_action != 'ignore'
           AND j.confidence >= ?
           AND j.usefulness_score >= ?
+          AND {run_daily_project_status_sql("rp")}
           {paper_clause}
         """,
         params,

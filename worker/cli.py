@@ -18,6 +18,7 @@ from .api import (
     link_project_note,
     link_project_paper,
     paper_detail,
+    remove_paper_report,
     paper_reports_queue,
     project_detail,
     projects,
@@ -36,6 +37,7 @@ from .db import clean_unicode, connect, from_json, init_db, job_run, mark_stale_
 from .llm import generate_missing_project_judgments
 from .obsidian import sync_obsidian
 from .paper_reports import ensure_paper_reports_for_recommendations, process_paper_report_queue
+from .project_status import run_daily_project_status_sql
 from .paper_reader import (
     cancel_reader_report,
     delete_reader_message,
@@ -923,12 +925,17 @@ def _retry_papers_for_run(conn, settings) -> tuple[list[sqlite3.Row], dict[int, 
                 WHERE EXISTS (
                     SELECT 1
                     FROM project_notes pn
+                    JOIN research_projects rp ON rp.id = pn.project_id
                     JOIN research_chunks rc ON rc.note_id = pn.note_id
+                    WHERE {run_daily_project_status_sql("rp")}
                     LIMIT 1
                   )
                   AND NOT EXISTS (
-                    SELECT 1 FROM project_paper_matches ppm
+                    SELECT 1
+                    FROM project_paper_matches ppm
+                    JOIN research_projects rp_match ON rp_match.id = ppm.project_id
                     WHERE ppm.paper_id = p.id
+                      AND {run_daily_project_status_sql("rp_match")}
                   )
                   {tombstone_filter}
                 ORDER BY p.published_at DESC, p.id DESC
@@ -946,9 +953,11 @@ def _retry_papers_for_run(conn, settings) -> tuple[list[sqlite3.Row], dict[int, 
                 SELECT DISTINCT p.*
                 FROM arxiv_papers p
                 JOIN project_paper_matches ppm ON ppm.paper_id = p.id
+                JOIN research_projects rp ON rp.id = ppm.project_id
                 LEFT JOIN project_paper_judgments j
                   ON j.project_id = ppm.project_id AND j.paper_id = ppm.paper_id
                 WHERE j.paper_id IS NULL
+                  AND {run_daily_project_status_sql("rp")}
                   {tombstone_filter}
                 ORDER BY p.published_at DESC, p.id DESC
                 LIMIT ?
@@ -965,9 +974,11 @@ def _retry_papers_for_run(conn, settings) -> tuple[list[sqlite3.Row], dict[int, 
                 SELECT DISTINCT p.*
                 FROM arxiv_papers p
                 JOIN project_paper_judgments j ON j.paper_id = p.id
+                JOIN research_projects rp ON rp.id = j.project_id
                 LEFT JOIN project_paper_recommendations r
                   ON r.project_id = j.project_id AND r.paper_id = j.paper_id
                 WHERE r.paper_id IS NULL
+                  AND {run_daily_project_status_sql("rp")}
                   {tombstone_filter}
                 ORDER BY p.published_at DESC, p.id DESC
                 LIMIT ?
@@ -984,8 +995,10 @@ def _retry_papers_for_run(conn, settings) -> tuple[list[sqlite3.Row], dict[int, 
                 SELECT DISTINCT p.*
                 FROM arxiv_papers p
                 JOIN project_paper_recommendations r ON r.paper_id = p.id
+                JOIN research_projects rp ON rp.id = r.project_id
                 LEFT JOIN paper_reading_reports rr ON rr.paper_id = p.id
                 WHERE (rr.paper_id IS NULL OR rr.status != 'done')
+                  AND {run_daily_project_status_sql("rp")}
                   {tombstone_filter}
                 ORDER BY p.published_at DESC, p.id DESC
                 LIMIT ?
@@ -1488,6 +1501,11 @@ def cmd_api_paper_report(args: argparse.Namespace) -> None:
     _print_json(result)
 
 
+def cmd_api_delete_paper_report(args: argparse.Namespace) -> None:
+    result = _with_db(lambda conn, settings: remove_paper_report(conn, int(args.paper_id)))
+    _print_json(result)
+
+
 def cmd_api_paper_reports(args: argparse.Namespace) -> None:
     result = _with_db(lambda conn, settings: paper_reports_queue(conn, int(args.limit)))
     _print_json(result)
@@ -1821,6 +1839,10 @@ def build_parser() -> argparse.ArgumentParser:
     api_paper_report = sub.add_parser("api-paper-report")
     api_paper_report.add_argument("paper_id")
     api_paper_report.set_defaults(func=cmd_api_paper_report)
+
+    api_delete_paper_report = sub.add_parser("api-delete-paper-report")
+    api_delete_paper_report.add_argument("paper_id")
+    api_delete_paper_report.set_defaults(func=cmd_api_delete_paper_report)
 
     api_paper_reports = sub.add_parser("api-paper-reports")
     api_paper_reports.add_argument("--limit", default="300")

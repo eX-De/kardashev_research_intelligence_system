@@ -17,6 +17,7 @@ from .arxiv_text import (
 )
 from .config import Settings
 from .db import clean_unicode, from_json, to_json, utc_now
+from .project_status import run_daily_project_status_sql
 
 
 PAPER_READER_DEFAULT_PROMPT = """请阅读这篇论文 PDF，输出结构化解读：
@@ -33,7 +34,7 @@ PAPER_READER_ANALYSIS_SYSTEM = (
     "You are a research paper reading assistant. Read the supplied full PDF text and answer accurately from it."
 )
 
-VALID_REPORT_STATUSES = {"queued", "processing", "done", "failed"}
+VALID_REPORT_STATUSES = {"queued", "processing", "done", "failed", "cancelled", "removed"}
 
 
 def _paper_filter(
@@ -58,7 +59,9 @@ def _source_projects_for_recommended_papers(
         f"""
         SELECT r.paper_id, r.project_id
         FROM project_paper_recommendations r
+        JOIN research_projects rp ON rp.id = r.project_id
         WHERE r.state IN ('pending', 'accepted')
+          AND {run_daily_project_status_sql("rp")}
           {paper_clause}
         ORDER BY r.paper_id, r.project_id
         """,
@@ -135,6 +138,48 @@ def ensure_paper_reports_for_recommendations(
     }
 
 
+def sync_paper_report_for_recommendation_state(conn: sqlite3.Connection, paper_id: int) -> dict[str, int]:
+    project_ids = _source_projects_for_recommended_papers(conn, [paper_id]).get(int(paper_id), [])
+    existing = conn.execute(
+        """
+        SELECT
+          rr.source_project_ids_json,
+          p.arxiv_id,
+          p.categories_json
+        FROM paper_reading_reports rr
+        JOIN arxiv_papers p ON p.id = rr.paper_id
+        WHERE rr.paper_id = ?
+        """,
+        (paper_id,),
+    ).fetchone()
+    if not existing:
+        return {"paper_reports_deleted": 0, "paper_reports_refreshed": 0}
+
+    if not project_ids:
+        source_project_ids = from_json(existing["source_project_ids_json"], [])
+        categories = set(from_json(existing["categories_json"], []))
+        arxiv_id = str(existing["arxiv_id"] or "")
+        if "reader" in categories or arxiv_id.startswith("reader-") or not source_project_ids:
+            return {"paper_reports_deleted": 0, "paper_reports_refreshed": 0}
+        deleted = conn.execute(
+            "DELETE FROM paper_reading_reports WHERE paper_id = ?",
+            (paper_id,),
+        ).rowcount
+        return {"paper_reports_deleted": int(deleted or 0), "paper_reports_refreshed": 0}
+
+    source_project_ids_json = to_json(project_ids)
+    updated = conn.execute(
+        """
+        UPDATE paper_reading_reports
+        SET source_project_ids_json = ?,
+            updated_at = ?
+        WHERE paper_id = ?
+        """,
+        (source_project_ids_json, utc_now(), paper_id),
+    ).rowcount
+    return {"paper_reports_deleted": 0, "paper_reports_refreshed": int(updated or 0)}
+
+
 def _settings_report_prompt(settings: Settings) -> str:
     prompt = clean_unicode(str(settings.paper_reader_default_prompt or "")).strip()
     return prompt or PAPER_READER_DEFAULT_PROMPT
@@ -151,7 +196,7 @@ def queue_paper_report(
         raise RuntimeError(f"Paper not found: {paper_id}")
     ensure_paper_reports_for_recommendations(conn, [paper_id])
     existing = conn.execute(
-        "SELECT paper_id FROM paper_reading_reports WHERE paper_id = ?",
+        "SELECT paper_id, status FROM paper_reading_reports WHERE paper_id = ?",
         (paper_id,),
     ).fetchone()
     now = utc_now()
@@ -166,6 +211,24 @@ def queue_paper_report(
             VALUES (?, 'queued', ?, ?, '[]', ?, ?)
             """,
             (paper_id, prompt_text, PAPER_READER_ANALYSIS_SYSTEM, now, now),
+        )
+        conn.commit()
+        return {"paper_reports_queued": 1}
+    if str(existing["status"] or "") == "removed":
+        conn.execute(
+            """
+            UPDATE paper_reading_reports
+            SET status = 'queued',
+                prompt = ?,
+                system_prompt = ?,
+                report_markdown = '',
+                error_message = '',
+                started_at = NULL,
+                finished_at = NULL,
+                updated_at = ?
+            WHERE paper_id = ?
+            """,
+            (prompt_text, PAPER_READER_ANALYSIS_SYSTEM, now, paper_id),
         )
         conn.commit()
         return {"paper_reports_queued": 1}
@@ -203,6 +266,8 @@ def paper_report_payload(conn: sqlite3.Connection, paper_id: int) -> dict[str, o
     ).fetchone()
     if not row:
         return None
+    if str(row["status"] or "") == "removed":
+        return None
     return {
         "paper_id": int(row["paper_id"]),
         "status": row["status"],
@@ -218,6 +283,34 @@ def paper_report_payload(conn: sqlite3.Connection, paper_id: int) -> dict[str, o
         "started_at": row["started_at"],
         "finished_at": row["finished_at"],
     }
+
+
+def remove_paper_report_from_queue(conn: sqlite3.Connection, paper_id: int) -> dict[str, int]:
+    row = conn.execute(
+        "SELECT status FROM paper_reading_reports WHERE paper_id = ?",
+        (paper_id,),
+    ).fetchone()
+    if not row:
+        return {"paper_reports_removed": 0}
+    status = str(row["status"] or "")
+    if status == "processing":
+        raise RuntimeError("Processing reports cannot be removed from the queue")
+    now = utc_now()
+    updated = conn.execute(
+        """
+        UPDATE paper_reading_reports
+        SET status = 'removed',
+            report_markdown = '',
+            error_message = '',
+            started_at = NULL,
+            finished_at = ?,
+            updated_at = ?
+        WHERE paper_id = ?
+        """,
+        (now, now, paper_id),
+    ).rowcount
+    conn.commit()
+    return {"paper_reports_removed": int(updated or 0)}
 
 
 def _read_existing_text(paper: sqlite3.Row) -> str:
@@ -268,6 +361,9 @@ def _analysis_messages(paper_text: str, prompt: str) -> list[dict[str, str]]:
     user_message = (
         "下面是 PyMuPDF 从论文 PDF 中解析出的完整文本，按页保留。"
         "请基于这份文本完成用户要求；不要声称无法读取正文，除非文本本身确实缺失。\n\n"
+        "请只返回一个 JSON 对象，不要输出 JSON 之外的文字。JSON 字段：\n"
+        "- title: 论文正式标题，使用论文正文中的标题，去掉换行和多余空格。\n"
+        "- markdown: 完整中文解读报告，使用 Markdown。\n\n"
         "<paper_text>\n"
         f"{paper_text}\n"
         "</paper_text>\n\n"
@@ -278,6 +374,28 @@ def _analysis_messages(paper_text: str, prompt: str) -> list[dict[str, str]]:
         {"role": "system", "content": PAPER_READER_ANALYSIS_SYSTEM},
         {"role": "user", "content": user_message},
     ]
+
+
+def _parse_report_generation_response(raw_text: str, fallback_title: str) -> tuple[str, str]:
+    text = clean_unicode(str(raw_text or "")).strip()
+    fallback_title = " ".join(clean_unicode(str(fallback_title or "")).split())
+    if not text:
+        raise RuntimeError("Full paper report LLM request failed: empty response")
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return fallback_title, text
+    if not isinstance(payload, dict):
+        raise RuntimeError("Full paper report LLM request failed: JSON response must be an object")
+    title = " ".join(
+        clean_unicode(str(payload.get("title") or payload.get("paper_title") or fallback_title)).split()
+    )
+    markdown = clean_unicode(
+        str(payload.get("markdown") or payload.get("report_markdown") or payload.get("report") or "")
+    ).strip()
+    if not markdown:
+        raise RuntimeError("Full paper report LLM request failed: JSON response is missing markdown")
+    return title or fallback_title, markdown
 
 
 def _call_chat_text(
@@ -489,15 +607,24 @@ def process_paper_report_queue(
             prompt = clean_unicode(str(report["prompt"] if report else "")).strip() or _settings_report_prompt(settings)
             provider_id = settings.paper_report_provider_id or settings.llm_chat_provider_id
             model = settings.paper_report_model or settings.llm_chat_model
+            paper = conn.execute("SELECT title FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
+            current_title = str(paper["title"] if paper else "").strip()
             messages = _analysis_messages(paper_text, prompt)
-            markdown = _call_chat_text(
+            raw_response = _call_chat_text(
                 settings,
                 messages,
+                response_format={"type": "json_object"},
                 provider_id=provider_id,
                 model=model,
                 purpose="Full paper report generation",
             )
+            generated_title, markdown = _parse_report_generation_response(raw_response, current_title)
             finished = utc_now()
+            if generated_title and generated_title != current_title:
+                conn.execute(
+                    "UPDATE arxiv_papers SET title = ? WHERE id = ?",
+                    (generated_title, paper_id),
+                )
             conn.execute(
                 """
                 UPDATE paper_reading_reports
