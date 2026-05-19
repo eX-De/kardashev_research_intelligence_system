@@ -266,7 +266,15 @@ export function providerPayload(providers = []) {
     .filter((provider) => provider.id);
 }
 
-export function SettingsForm({ settings, providers, onSettingChange, onProviderChange, onAddProvider, onRemoveProvider, onPickPath, onSubmit }) {
+const SAVE_STATUS_LABELS = {
+  idle: "未修改",
+  dirty: "保存中",
+  saving: "保存中",
+  saved: "已保存",
+  error: "保存失败"
+};
+
+export function SettingsForm({ settings, providers, onSettingChange, onProviderChange, onAddProvider, onRemoveProvider, onPickPath, onSubmit, saveStatus = "idle" }) {
   return (
     <form className="settings-form" onSubmit={onSubmit}>
       <SettingsSection
@@ -350,8 +358,11 @@ export function SettingsForm({ settings, providers, onSettingChange, onProviderC
       </SettingsSection>
 
       <div className="settings-save-bar">
+        <span className="muted" aria-live="polite">
+          {SAVE_STATUS_LABELS[saveStatus] || SAVE_STATUS_LABELS.idle}
+        </span>
         <button type="submit" className="primary">
-          保存配置
+          立即保存
         </button>
       </div>
     </form>

@@ -5,19 +5,26 @@ import hashlib
 import json
 import sqlite3
 import sys
+import time
 import traceback
 from dataclasses import replace
 from typing import Any, Callable
 
 from .api import (
+    artifact_detail,
+    artifacts_index,
+    export_artifact,
     export_project_to_obsidian,
     generate_paper_reading_report,
+    generate_project_index,
     health,
     inbox,
     job_history,
+    library_paper_detail,
     link_project_note,
     link_project_paper,
     paper_detail,
+    paper_library,
     remove_paper_report,
     paper_reports_queue,
     project_detail,
@@ -25,6 +32,7 @@ from .api import (
     reminders,
     save_feedback,
     save_project,
+    update_library_paper_status,
     update_paper_recommendation,
     unlink_project_note,
     unlink_project_paper,
@@ -33,8 +41,20 @@ from .arxiv_archive import archive_zero_match_papers
 from .arxiv_client import fetch_arxiv
 from .arxiv_text import cache_arxiv_full_texts
 from .config import load_settings
-from .db import clean_unicode, connect, from_json, init_db, job_run, mark_stale_job_runs, to_json, update_job_meta, utc_now
+from .db import (
+    clean_unicode,
+    connect,
+    database_target,
+    from_json,
+    init_db,
+    job_run,
+    mark_stale_job_runs,
+    to_json,
+    update_job_meta,
+    utc_now,
+)
 from .llm import generate_missing_project_judgments
+from .knowledge import sync_project_context_documents_from_project_notes
 from .obsidian import sync_obsidian
 from .paper_reports import ensure_paper_reports_for_recommendations, process_paper_report_queue
 from .project_status import run_daily_project_status_sql
@@ -86,8 +106,32 @@ def _with_db(handler: Callable, cleanup_stale: bool = True):
         conn.close()
 
 
+def _is_postgres_deadlock(exc: Exception) -> bool:
+    sqlstate = str(getattr(exc, "sqlstate", "") or "")
+    if sqlstate == "40P01":
+        return True
+    name = exc.__class__.__name__.lower()
+    text = str(exc).lower()
+    return "deadlock" in name or "deadlock" in text or "死锁" in text
+
+
+def _with_deadlock_retry(conn, handler: Callable[[], dict[str, int]], *, attempts: int = 3) -> dict[str, int]:
+    for attempt in range(1, attempts + 1):
+        try:
+            return handler()
+        except Exception as exc:
+            if attempt >= attempts or not _is_postgres_deadlock(exc):
+                raise
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            time.sleep(0.4 * attempt)
+    return handler()
+
+
 DAILY_STEPS = [
-    ("sync_obsidian", "同步 Obsidian"),
+    ("sync_context_sources", "同步上下文来源"),
     ("fetch_arxiv", "抓取 arXiv"),
     ("snapshot", "生成论文快照"),
     ("cache_text", "缓存 PDF/TXT"),
@@ -97,7 +141,7 @@ DAILY_STEPS = [
     ("paper_recommendations", "生成论文推荐"),
     ("paper_reports", "生成全文报告"),
     ("archive_zero_match", "归档未通过论文"),
-    ("reports", "生成每日总报告"),
+    ("generate_daily_report_artifact", "生成日报产物"),
 ]
 DAILY_JOB_TYPES = ("run-daily", "resume-daily", "retry-daily")
 DAILY_STAGE_COLUMNS = (
@@ -205,11 +249,21 @@ def _run_daily_step(
     try:
         result = handler()
     except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         step["status"] = "failed"
         step["error"] = str(exc)
         step["finished_at"] = utc_now()
-        _record_daily_step(conn, job_id, step["key"], "failed", error=str(exc))
-        _update_daily_progress(conn, job_id, steps, index, "failed", accumulated)
+        try:
+            _record_daily_step(conn, job_id, step["key"], "failed", error=str(exc))
+            _update_daily_progress(conn, job_id, steps, index, "failed", accumulated)
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         raise
     step["status"] = "completed"
     step["finished_at"] = utc_now()
@@ -475,6 +529,77 @@ def _selected_snapshot_paper_ids(conn, job_id: int) -> list[int]:
     return [int(row["id"]) for row in _selected_snapshot_papers(conn, job_id)]
 
 
+def _unselected_snapshot_paper_ids(conn, job_id: int) -> list[int]:
+    return [
+        int(row["paper_id"])
+        for row in conn.execute(
+            """
+            SELECT paper_id
+            FROM daily_run_papers
+            WHERE job_id = ? AND selected = 0
+            ORDER BY prefilter_rank, paper_id
+            """,
+            (job_id,),
+        ).fetchall()
+    ]
+
+
+def _mark_daily_archive_statuses(conn, job_id: int, paper_ids: list[int]) -> None:
+    if not paper_ids:
+        return
+    placeholders = ", ".join("?" for _ in paper_ids)
+    archived_ids = {
+        int(row["id"])
+        for row in conn.execute(
+            f"""
+            SELECT p.id
+            FROM arxiv_papers p
+            JOIN arxiv_paper_tombstones t ON t.arxiv_id = p.arxiv_id
+            WHERE p.id IN ({placeholders})
+            """,
+            paper_ids,
+        ).fetchall()
+    }
+    now = utc_now()
+    for paper_id in paper_ids:
+        conn.execute(
+            """
+            UPDATE daily_run_papers
+            SET archive_status = ?, updated_at = ?
+            WHERE job_id = ? AND paper_id = ?
+            """,
+            ("done" if paper_id in archived_ids else "skipped", now, job_id, paper_id),
+        )
+    conn.commit()
+
+
+def _archive_daily_filtered_papers(
+    conn,
+    settings,
+    job_id: int,
+    selected_paper_ids: list[int],
+) -> dict[str, int]:
+    zero_match_result = archive_zero_match_papers(conn, settings, selected_paper_ids)
+    unselected_paper_ids = _unselected_snapshot_paper_ids(conn, job_id)
+    prefilter_result = archive_zero_match_papers(
+        conn,
+        settings,
+        unselected_paper_ids,
+        require_text_complete=False,
+        reason="prefilter_rejected",
+    )
+    _mark_daily_archive_statuses(conn, job_id, [*selected_paper_ids, *unselected_paper_ids])
+    return {
+        **zero_match_result,
+        "prefilter_rejected_papers_considered": prefilter_result["zero_match_papers_considered"],
+        "prefilter_rejected_papers_archived": prefilter_result["zero_match_papers_archived"],
+        "prefilter_rejected_files_deleted": prefilter_result["zero_match_files_deleted"],
+        "prefilter_rejected_file_delete_errors": prefilter_result["zero_match_file_delete_errors"],
+        "daily_filtered_papers_archived": zero_match_result["zero_match_papers_archived"]
+        + prefilter_result["zero_match_papers_archived"],
+    }
+
+
 def _refresh_daily_paper_statuses(conn, job_id: int, step_key: str | None = None) -> None:
     columns = STEP_STAGE_COLUMNS.get(step_key or "", DAILY_STAGE_COLUMNS)
     selected_rows = conn.execute(
@@ -565,10 +690,14 @@ def _refresh_daily_paper_statuses(conn, job_id: int, step_key: str | None = None
         int(row["paper_id"])
         for row in conn.execute(
             f"""
-            SELECT DISTINCT paper_id
-            FROM paper_reading_reports
-            WHERE paper_id IN ({placeholders})
-              AND status = 'done'
+            SELECT DISTINCT p.id AS paper_id
+            FROM arxiv_papers p
+            JOIN paper_sources ps ON ps.source_identifier = p.arxiv_id
+            JOIN artifacts af ON af.scope_id = ps.paper_id
+            WHERE p.id IN ({placeholders})
+              AND af.scope_type = 'paper'
+              AND af.artifact_type = 'paper_report'
+              AND af.status IN ('done', 'ready')
             """,
             paper_ids,
         ).fetchall()
@@ -821,10 +950,24 @@ def _prefilter_daily_papers(conn, settings, batch_id: str, selected_papers: list
     papers, candidate_result = _daily_papers_for_run(conn, settings, batch_id)
     papers, result = prefilter_papers(conn, settings, papers)
     selected_papers[:] = papers
+    selected_ids = {int(paper["id"]) for paper in papers}
+    rejected_ids = [
+        int(paper["id"])
+        for paper in _daily_papers_for_run(conn, settings, batch_id)[0]
+        if int(paper["id"]) not in selected_ids
+    ]
+    archive_result = archive_zero_match_papers(
+        conn,
+        settings,
+        rejected_ids,
+        require_text_complete=False,
+        reason="prefilter_rejected",
+    )
     result = {
         **result,
         "daily_selected_papers": len(papers),
         "prefilter_resume_bypassed": 0,
+        "prefilter_rejected_papers_archived": archive_result["zero_match_papers_archived"],
     }
     return {**candidate_result, **result}
 
@@ -996,8 +1139,15 @@ def _retry_papers_for_run(conn, settings) -> tuple[list[sqlite3.Row], dict[int, 
                 FROM arxiv_papers p
                 JOIN project_paper_recommendations r ON r.paper_id = p.id
                 JOIN research_projects rp ON rp.id = r.project_id
-                LEFT JOIN paper_reading_reports rr ON rr.paper_id = p.id
-                WHERE (rr.paper_id IS NULL OR rr.status != 'done')
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM paper_sources ps
+                    JOIN artifacts af ON af.scope_id = ps.paper_id
+                    WHERE ps.source_identifier = p.arxiv_id
+                      AND af.scope_type = 'paper'
+                      AND af.artifact_type = 'paper_report'
+                      AND af.status IN ('done', 'ready')
+                )
                   AND {run_daily_project_status_sql("rp")}
                   {tombstone_filter}
                 ORDER BY p.published_at DESC, p.id DESC
@@ -1147,12 +1297,30 @@ def _daily_step_status_map(conn, job_id: int) -> dict[str, str]:
     }
 
 
+def sync_context_sources(conn: sqlite3.Connection, settings) -> dict[str, int]:
+    result = {
+        "context_sources_synced": 0,
+        "context_sources_skipped": 0,
+        "obsidian_enabled": 1 if settings.obsidian_vault_path else 0,
+    }
+    if settings.obsidian_vault_path:
+        obsidian_result = _with_deadlock_retry(conn, lambda: sync_obsidian(conn, settings))
+        result.update({f"obsidian_{key}": int(value) for key, value in obsidian_result.items()})
+        result["context_sources_synced"] += 1
+    else:
+        result["context_sources_skipped"] += 1
+    linked = sync_project_context_documents_from_project_notes(conn)
+    result["project_context_documents_synced"] = linked
+    return result
+
+
 def cmd_init_db(_: argparse.Namespace) -> None:
     settings = load_settings()
     conn = connect(settings.db_path)
     init_db(conn)
+    database = database_target(conn, settings.db_path)
     conn.close()
-    _print_json({"ok": True, "message": f"Initialized {settings.db_path}"})
+    _print_json({"ok": True, "message": f"Initialized {database['target']}", "database": database})
 
 
 def cmd_sync_obsidian(_: argparse.Namespace) -> None:
@@ -1293,9 +1461,9 @@ def cmd_run_daily(args: argparse.Namespace) -> None:
                     steps,
                     0,
                     accumulated,
-                    lambda: sync_obsidian(conn, settings),
+                    lambda: sync_context_sources(conn, settings),
                 )
-                accumulated.update({f"sync_{key}": value for key, value in sync_result.items()})
+                accumulated.update({f"context_{key}": value for key, value in sync_result.items()})
 
                 if requested_mode == "run-daily":
                     arxiv_result = _run_daily_step(
@@ -1441,7 +1609,7 @@ def cmd_run_daily(args: argparse.Namespace) -> None:
 
             archive_result = run_or_resume(
                 9,
-                lambda: archive_zero_match_papers(conn, settings, selected_paper_ids),
+                lambda: _archive_daily_filtered_papers(conn, settings, job_id, selected_paper_ids),
             )
             accumulated.update(archive_result)
 
@@ -1508,6 +1676,61 @@ def cmd_api_delete_paper_report(args: argparse.Namespace) -> None:
 
 def cmd_api_paper_reports(args: argparse.Namespace) -> None:
     result = _with_db(lambda conn, settings: paper_reports_queue(conn, int(args.limit)))
+    _print_json(result)
+
+
+def cmd_api_paper_library(args: argparse.Namespace) -> None:
+    project_id = int(args.project_id) if str(args.project_id or "").strip() else None
+    result = _with_db(
+        lambda conn, settings: paper_library(
+            conn,
+            library_status=args.status or None,
+            source_type=args.source_type or None,
+            project_id=project_id,
+            query=args.query or "",
+            date_from=args.date_from or "",
+            date_to=args.date_to or "",
+            limit=int(args.limit),
+            offset=int(args.offset),
+        )
+    )
+    _print_json(result)
+
+
+def cmd_api_paper_library_detail(args: argparse.Namespace) -> None:
+    result = _with_db(lambda conn, settings: library_paper_detail(conn, int(args.paper_id)))
+    _print_json(result)
+
+
+def cmd_api_paper_library_status(args: argparse.Namespace) -> None:
+    payload = _read_json_stdin("paper library status")
+    result = _with_db(lambda conn, settings: update_library_paper_status(conn, int(args.paper_id), payload))
+    _print_json(result)
+
+
+def cmd_api_artifacts(args: argparse.Namespace) -> None:
+    scope_id = int(args.scope_id) if str(args.scope_id or "").strip() else None
+    result = _with_db(
+        lambda conn, settings: artifacts_index(
+            conn,
+            scope_type=args.scope_type or None,
+            scope_id=scope_id,
+            artifact_type=args.artifact_type or None,
+            status=args.status or None,
+            limit=int(args.limit),
+        )
+    )
+    _print_json(result)
+
+
+def cmd_api_artifact(args: argparse.Namespace) -> None:
+    result = _with_db(lambda conn, settings: artifact_detail(conn, int(args.artifact_id)))
+    _print_json(result)
+
+
+def cmd_api_artifact_export(args: argparse.Namespace) -> None:
+    payload = _read_json_stdin("artifact export")
+    result = _with_db(lambda conn, settings: export_artifact(conn, settings, int(args.artifact_id), payload))
     _print_json(result)
 
 
@@ -1618,6 +1841,12 @@ def cmd_api_project_export(args: argparse.Namespace) -> None:
     result = _with_db(
         lambda conn, settings: export_project_to_obsidian(conn, settings, int(args.project_id))
     )
+    _print_json(result)
+
+
+def cmd_api_project_index(args: argparse.Namespace) -> None:
+    payload = _read_json_stdin("project index")
+    result = _with_db(lambda conn, settings: generate_project_index(conn, settings, int(args.project_id), payload))
     _print_json(result)
 
 
@@ -1848,6 +2077,41 @@ def build_parser() -> argparse.ArgumentParser:
     api_paper_reports.add_argument("--limit", default="300")
     api_paper_reports.set_defaults(func=cmd_api_paper_reports)
 
+    api_paper_library = sub.add_parser("api-paper-library")
+    api_paper_library.add_argument("--status", default="")
+    api_paper_library.add_argument("--source-type", default="")
+    api_paper_library.add_argument("--project-id", default="")
+    api_paper_library.add_argument("--query", default="")
+    api_paper_library.add_argument("--date-from", default="")
+    api_paper_library.add_argument("--date-to", default="")
+    api_paper_library.add_argument("--limit", default="100")
+    api_paper_library.add_argument("--offset", default="0")
+    api_paper_library.set_defaults(func=cmd_api_paper_library)
+
+    api_paper_library_detail = sub.add_parser("api-paper-library-detail")
+    api_paper_library_detail.add_argument("paper_id")
+    api_paper_library_detail.set_defaults(func=cmd_api_paper_library_detail)
+
+    api_paper_library_status = sub.add_parser("api-paper-library-status")
+    api_paper_library_status.add_argument("paper_id")
+    api_paper_library_status.set_defaults(func=cmd_api_paper_library_status)
+
+    api_artifacts = sub.add_parser("api-artifacts")
+    api_artifacts.add_argument("--scope-type", default="")
+    api_artifacts.add_argument("--scope-id", default="")
+    api_artifacts.add_argument("--artifact-type", default="")
+    api_artifacts.add_argument("--status", default="")
+    api_artifacts.add_argument("--limit", default="100")
+    api_artifacts.set_defaults(func=cmd_api_artifacts)
+
+    api_artifact = sub.add_parser("api-artifact")
+    api_artifact.add_argument("artifact_id")
+    api_artifact.set_defaults(func=cmd_api_artifact)
+
+    api_artifact_export = sub.add_parser("api-artifact-export")
+    api_artifact_export.add_argument("artifact_id")
+    api_artifact_export.set_defaults(func=cmd_api_artifact_export)
+
     api_reader_papers = sub.add_parser("api-reader-papers")
     api_reader_papers.add_argument("--limit", default="300")
     api_reader_papers.set_defaults(func=cmd_api_reader_papers)
@@ -1904,6 +2168,10 @@ def build_parser() -> argparse.ArgumentParser:
     api_project_export = sub.add_parser("api-project-export")
     api_project_export.add_argument("project_id")
     api_project_export.set_defaults(func=cmd_api_project_export)
+
+    api_project_index = sub.add_parser("api-project-index")
+    api_project_index.add_argument("project_id")
+    api_project_index.set_defaults(func=cmd_api_project_index)
 
     api_project_link_paper = sub.add_parser("api-project-link-paper")
     api_project_link_paper.add_argument("project_id")

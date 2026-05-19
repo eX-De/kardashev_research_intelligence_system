@@ -1,10 +1,12 @@
 import { lazy, Suspense } from "react";
 
+import { MarkdownReportLoader } from "./Loading.jsx";
+
 const MarkdownReport = lazy(() => import("./MarkdownReport.jsx"));
 
 export function LazyMarkdownReport({ markdown }) {
   return (
-    <Suspense fallback={<div className="paper-report markdown-report"><p className="muted">报告渲染中...</p></div>}>
+    <Suspense fallback={<MarkdownReportLoader />}>
       <MarkdownReport markdown={markdown} />
     </Suspense>
   );

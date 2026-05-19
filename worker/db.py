@@ -8,10 +8,12 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
+from urllib.parse import urlsplit, urlunsplit
 
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 JOB_STALE_AFTER_SECONDS = 30 * 60
 LEGACY_JOB_STALE_AFTER_SECONDS = 15 * 60
+POSTGRES_INIT_LOCK_KEY = 7240185732501
 
 
 SCHEMA = """
@@ -28,16 +30,31 @@ CREATE TABLE IF NOT EXISTS obsidian_notes (
   indexed_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS knowledge_documents (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_type TEXT NOT NULL,
+  source_uri TEXT NOT NULL DEFAULT '',
+  title TEXT NOT NULL DEFAULT '',
+  raw_content TEXT NOT NULL DEFAULT '',
+  content_hash TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  indexed_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS research_chunks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  note_id INTEGER NOT NULL REFERENCES obsidian_notes(id) ON DELETE CASCADE,
+  note_id INTEGER REFERENCES obsidian_notes(id) ON DELETE CASCADE,
+  document_id INTEGER REFERENCES knowledge_documents(id) ON DELETE CASCADE,
   chunk_index INTEGER NOT NULL,
   heading TEXT NOT NULL DEFAULT '',
   text TEXT NOT NULL,
   token_count INTEGER NOT NULL DEFAULT 0,
   source TEXT NOT NULL DEFAULT 'obsidian',
   created_at TEXT NOT NULL,
-  UNIQUE(note_id, chunk_index)
+  UNIQUE(note_id, chunk_index),
+  UNIQUE(document_id, chunk_index)
 );
 
 CREATE TABLE IF NOT EXISTS chunk_embeddings (
@@ -112,6 +129,68 @@ CREATE TABLE IF NOT EXISTS arxiv_paper_embeddings (
   embedding_json TEXT NOT NULL,
   created_at TEXT NOT NULL,
   PRIMARY KEY(paper_id, model)
+);
+
+CREATE TABLE IF NOT EXISTS papers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  canonical_key TEXT NOT NULL UNIQUE,
+  title TEXT NOT NULL,
+  authors_json TEXT NOT NULL DEFAULT '[]',
+  abstract TEXT NOT NULL DEFAULT '',
+  published_at TEXT NOT NULL DEFAULT '',
+  year INTEGER,
+  venue TEXT NOT NULL DEFAULT '',
+  doi TEXT NOT NULL DEFAULT '',
+  arxiv_id TEXT NOT NULL DEFAULT '',
+  library_status TEXT NOT NULL DEFAULT 'candidate',
+  reading_state TEXT NOT NULL DEFAULT 'unread',
+  user_tags_json TEXT NOT NULL DEFAULT '[]',
+  user_note TEXT NOT NULL DEFAULT '',
+  saved_at TEXT,
+  last_read_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS paper_sources (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  paper_id INTEGER NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+  source_type TEXT NOT NULL,
+  source_identifier TEXT NOT NULL DEFAULT '',
+  source_url TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  fetched_batch_id TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(paper_id, source_type, source_identifier)
+);
+
+CREATE TABLE IF NOT EXISTS paper_assets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  paper_id INTEGER NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+  asset_type TEXT NOT NULL,
+  path TEXT NOT NULL DEFAULT '',
+  url TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  error_message TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS paper_chunks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  paper_id INTEGER NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+  asset_id INTEGER REFERENCES paper_assets(id) ON DELETE SET NULL,
+  chunk_index INTEGER NOT NULL,
+  source TEXT NOT NULL DEFAULT 'full_text',
+  page_start INTEGER,
+  page_end INTEGER,
+  text TEXT NOT NULL,
+  token_count INTEGER NOT NULL DEFAULT 0,
+  char_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  UNIQUE(paper_id, asset_id, chunk_index)
 );
 
 CREATE TABLE IF NOT EXISTS paper_prefilter_runs (
@@ -242,6 +321,16 @@ CREATE TABLE IF NOT EXISTS project_papers (
   PRIMARY KEY(project_id, paper_id)
 );
 
+CREATE TABLE IF NOT EXISTS project_context_documents (
+  project_id INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+  document_id INTEGER NOT NULL REFERENCES knowledge_documents(id) ON DELETE CASCADE,
+  relation TEXT NOT NULL DEFAULT 'source',
+  weight REAL NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(project_id, document_id, relation)
+);
+
 CREATE TABLE IF NOT EXISTS project_paper_matches (
   project_id INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
   paper_id INTEGER NOT NULL REFERENCES arxiv_papers(id) ON DELETE CASCADE,
@@ -293,23 +382,6 @@ CREATE TABLE IF NOT EXISTS project_paper_recommendations (
   PRIMARY KEY(project_id, paper_id)
 );
 
-CREATE TABLE IF NOT EXISTS paper_reading_reports (
-  paper_id INTEGER PRIMARY KEY REFERENCES arxiv_papers(id) ON DELETE CASCADE,
-  status TEXT NOT NULL DEFAULT 'queued',
-  prompt TEXT NOT NULL DEFAULT '',
-  system_prompt TEXT NOT NULL DEFAULT '',
-  model_provider_id TEXT NOT NULL DEFAULT '',
-  model TEXT NOT NULL DEFAULT '',
-  source_text_hash TEXT NOT NULL DEFAULT '',
-  source_project_ids_json TEXT NOT NULL DEFAULT '[]',
-  report_markdown TEXT NOT NULL DEFAULT '',
-  error_message TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  started_at TEXT,
-  finished_at TEXT
-);
-
 CREATE TABLE IF NOT EXISTS paper_reader_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   paper_id INTEGER NOT NULL REFERENCES arxiv_papers(id) ON DELETE CASCADE,
@@ -331,23 +403,34 @@ CREATE TABLE IF NOT EXISTS project_notes (
   PRIMARY KEY(project_id, note_id)
 );
 
-CREATE TABLE IF NOT EXISTS project_artifacts (
+CREATE TABLE IF NOT EXISTS artifacts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  project_id INTEGER NOT NULL REFERENCES research_projects(id) ON DELETE CASCADE,
+  scope_type TEXT NOT NULL,
+  scope_id INTEGER,
   artifact_type TEXT NOT NULL,
   title TEXT NOT NULL,
-  obsidian_path TEXT NOT NULL DEFAULT '',
-  status TEXT NOT NULL DEFAULT 'planned',
+  content_markdown TEXT NOT NULL DEFAULT '',
+  content_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'draft',
   source_json TEXT NOT NULL DEFAULT '{}',
+  model_provider_id TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  input_hash TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  UNIQUE(project_id, artifact_type, obsidian_path)
+  updated_at TEXT NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_knowledge_documents_source ON knowledge_documents(source_type, source_uri);
 CREATE INDEX IF NOT EXISTS idx_research_chunks_note ON research_chunks(note_id);
+CREATE INDEX IF NOT EXISTS idx_research_chunks_document ON research_chunks(document_id, chunk_index);
 CREATE INDEX IF NOT EXISTS idx_arxiv_papers_published ON arxiv_papers(published_at);
 CREATE INDEX IF NOT EXISTS idx_arxiv_paper_tombstones_reason ON arxiv_paper_tombstones(reason, tombstoned_at DESC);
 CREATE INDEX IF NOT EXISTS idx_arxiv_text_chunks_paper ON arxiv_text_chunks(paper_id, chunk_index);
+CREATE INDEX IF NOT EXISTS idx_papers_status ON papers(library_status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_papers_arxiv_id ON papers(arxiv_id);
+CREATE INDEX IF NOT EXISTS idx_paper_sources_paper ON paper_sources(paper_id, source_type);
+CREATE INDEX IF NOT EXISTS idx_paper_assets_paper ON paper_assets(paper_id, asset_type);
+CREATE INDEX IF NOT EXISTS idx_paper_chunks_paper ON paper_chunks(paper_id, chunk_index);
 CREATE INDEX IF NOT EXISTS idx_paper_prefilter_runs_paper ON paper_prefilter_runs(paper_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_matches_paper_score ON matches(paper_id, score DESC);
 CREATE INDEX IF NOT EXISTS idx_daily_run_meta_mode ON daily_run_meta(mode, created_at DESC);
@@ -357,19 +440,21 @@ CREATE INDEX IF NOT EXISTS idx_daily_run_papers_stage ON daily_run_papers(job_id
 CREATE INDEX IF NOT EXISTS idx_daily_run_papers_paper ON daily_run_papers(paper_id);
 CREATE INDEX IF NOT EXISTS idx_research_projects_status ON research_projects(status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_research_projects_obsidian_note ON research_projects(obsidian_note_id);
+CREATE INDEX IF NOT EXISTS idx_project_context_documents_document ON project_context_documents(document_id);
 CREATE INDEX IF NOT EXISTS idx_project_paper_matches_project_score ON project_paper_matches(project_id, score DESC);
 CREATE INDEX IF NOT EXISTS idx_project_paper_matches_paper ON project_paper_matches(paper_id);
 CREATE INDEX IF NOT EXISTS idx_project_paper_judgments_project_action ON project_paper_judgments(project_id, suggested_action, confidence DESC);
 CREATE INDEX IF NOT EXISTS idx_project_paper_judgments_paper ON project_paper_judgments(paper_id);
 CREATE INDEX IF NOT EXISTS idx_project_paper_recommendations_state ON project_paper_recommendations(state, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_project_paper_recommendations_paper ON project_paper_recommendations(paper_id);
-CREATE INDEX IF NOT EXISTS idx_paper_reading_reports_status ON paper_reading_reports(status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_paper_reader_messages_paper ON paper_reader_messages(paper_id, id);
-CREATE INDEX IF NOT EXISTS idx_project_artifacts_project ON project_artifacts(project_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_artifacts_scope ON artifacts(scope_type, scope_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_artifacts_type ON artifacts(artifact_type, updated_at DESC);
 """
 
 REQUIRED_TABLES = {
     "obsidian_notes",
+    "knowledge_documents",
     "research_chunks",
     "chunk_embeddings",
     "arxiv_papers",
@@ -377,6 +462,10 @@ REQUIRED_TABLES = {
     "arxiv_text_chunks",
     "arxiv_chunk_embeddings",
     "arxiv_paper_embeddings",
+    "papers",
+    "paper_sources",
+    "paper_assets",
+    "paper_chunks",
     "paper_prefilter_runs",
     "matches",
     "user_feedback",
@@ -387,20 +476,27 @@ REQUIRED_TABLES = {
     "app_settings",
     "research_projects",
     "project_papers",
+    "project_context_documents",
     "project_paper_matches",
     "project_paper_judgments",
     "project_paper_recommendations",
-    "paper_reading_reports",
     "paper_reader_messages",
     "project_notes",
-    "project_artifacts",
+    "artifacts",
 }
 
 REQUIRED_INDEXES = {
+    "idx_knowledge_documents_source",
     "idx_research_chunks_note",
+    "idx_research_chunks_document",
     "idx_arxiv_papers_published",
     "idx_arxiv_paper_tombstones_reason",
     "idx_arxiv_text_chunks_paper",
+    "idx_papers_status",
+    "idx_papers_arxiv_id",
+    "idx_paper_sources_paper",
+    "idx_paper_assets_paper",
+    "idx_paper_chunks_paper",
     "idx_paper_prefilter_runs_paper",
     "idx_matches_paper_score",
     "idx_daily_run_meta_mode",
@@ -410,18 +506,30 @@ REQUIRED_INDEXES = {
     "idx_daily_run_papers_paper",
     "idx_research_projects_status",
     "idx_research_projects_obsidian_note",
+    "idx_project_context_documents_document",
     "idx_project_paper_matches_project_score",
     "idx_project_paper_matches_paper",
     "idx_project_paper_judgments_project_action",
     "idx_project_paper_judgments_paper",
     "idx_project_paper_recommendations_state",
     "idx_project_paper_recommendations_paper",
-    "idx_paper_reading_reports_status",
     "idx_paper_reader_messages_paper",
-    "idx_project_artifacts_project",
+    "idx_artifacts_scope",
+    "idx_artifacts_type",
+}
+
+POSTGRES_REQUIRED_INDEXES = REQUIRED_INDEXES | {
+    "idx_research_chunks_document_unique",
+    "idx_matches_unique_paper_chunk",
+    "idx_user_feedback_unique_paper_status",
+    "idx_project_notes_unique_project_note",
+    "idx_project_context_documents_unique",
+    "idx_paper_sources_unique",
+    "idx_paper_chunks_unique",
 }
 
 REQUIRED_COLUMNS = {
+    "research_chunks": {"document_id"},
     "arxiv_papers": {
         "pdf_path",
         "text_path",
@@ -451,18 +559,6 @@ REQUIRED_COLUMNS = {
         "attachment_path",
         "source_judgment_hash",
         "synced_at",
-    },
-    "paper_reading_reports": {
-        "prompt",
-        "system_prompt",
-        "model_provider_id",
-        "model",
-        "source_text_hash",
-        "source_project_ids_json",
-        "report_markdown",
-        "error_message",
-        "started_at",
-        "finished_at",
     },
     "job_runs": {
         "pid",
@@ -506,7 +602,7 @@ REQUIRED_COLUMNS = {
     },
 }
 
-OBSOLETE_TABLES = {"llm_explanations"}
+OBSOLETE_TABLES = {"llm_explanations", "paper_reading_reports", "project_artifacts"}
 
 
 def utc_now() -> str:
@@ -545,16 +641,60 @@ def from_json(value: str | None, default: Any) -> Any:
         return default
 
 
-def postgres_schema_sql() -> str:
+def _redacted_database_url(url: str) -> str:
+    cleaned = str(url or "").strip().strip("'\"")
+    if not cleaned:
+        return "postgres"
+    parsed = urlsplit(cleaned)
+    if not parsed.scheme or not parsed.netloc:
+        return "postgres"
+    host = parsed.hostname or ""
+    try:
+        port = f":{parsed.port}" if parsed.port else ""
+    except ValueError:
+        port = ""
+    userinfo = f"{parsed.username}:***@" if parsed.username else ""
+    return urlunsplit((parsed.scheme, f"{userinfo}{host}{port}", parsed.path, "", ""))
+
+
+def database_target(conn: Any, db_path: Path) -> dict[str, str]:
+    dialect = str(getattr(conn, "dialect", "") or "sqlite")
+    if dialect == "postgres":
+        target = _redacted_database_url(os.environ.get("DATABASE_URL", ""))
+        return {"dialect": "postgres", "target": target, "path": target}
+    target = str(db_path)
+    return {"dialect": "sqlite", "target": target, "path": target}
+
+
+def _postgres_schema_lines(include_indexes: bool) -> list[str]:
     lines = [
         line
         for line in SCHEMA.splitlines()
         if not line.strip().upper().startswith("PRAGMA ")
     ]
-    return "\n".join(lines).replace(
+    if not include_indexes:
+        lines = [
+            line
+            for line in lines
+            if not line.strip().upper().startswith("CREATE INDEX ")
+        ]
+    return lines
+
+
+def postgres_schema_sql(include_indexes: bool = True) -> str:
+    return "\n".join(_postgres_schema_lines(include_indexes)).replace(
         "INTEGER PRIMARY KEY AUTOINCREMENT",
         "INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY",
     )
+
+
+def postgres_index_sql() -> str:
+    lines = [
+        line
+        for line in _postgres_schema_lines(include_indexes=True)
+        if line.strip().upper().startswith("CREATE INDEX ")
+    ]
+    return "\n".join(lines)
 
 
 def connect(db_path: Path):
@@ -574,8 +714,24 @@ def connect(db_path: Path):
 
 def init_db(conn) -> None:
     if getattr(conn, "dialect", "") == "postgres":
-        conn.executescript(postgres_schema_sql())
-        conn.commit()
+        if _postgres_schema_current(conn):
+            conn.commit()
+            return
+        try:
+            conn.execute("SELECT pg_advisory_xact_lock(?)", (POSTGRES_INIT_LOCK_KEY,))
+            if _postgres_schema_current(conn):
+                conn.commit()
+                return
+            conn.executescript(postgres_schema_sql(include_indexes=False))
+            _migrate_postgres_db(conn)
+            conn.executescript(postgres_index_sql())
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
         return
     if _schema_current(conn):
         return
@@ -627,10 +783,255 @@ def _schema_current(conn: sqlite3.Connection) -> bool:
     for table, required_columns in REQUIRED_COLUMNS.items():
         if not required_columns.issubset(_table_columns(conn, table)):
             return False
+    if "research_chunks" in tables and _research_chunks_requires_generic_migration(conn):
+        return False
     return True
 
 
+def _research_chunks_requires_generic_migration(conn: sqlite3.Connection) -> bool:
+    rows = conn.execute("PRAGMA table_info(research_chunks)").fetchall()
+    if not rows:
+        return False
+    by_name = {str(row["name"]): row for row in rows}
+    note_id = by_name.get("note_id")
+    return "document_id" not in by_name or bool(note_id and int(note_id["notnull"] or 0))
+
+
+def _ensure_generic_research_chunks(conn: sqlite3.Connection) -> None:
+    rows = conn.execute("PRAGMA table_info(research_chunks)").fetchall()
+    if not rows:
+        return
+    by_name = {str(row["name"]): row for row in rows}
+    note_id = by_name.get("note_id")
+    has_document_id = "document_id" in by_name
+    note_is_required = bool(note_id and int(note_id["notnull"] or 0))
+    if has_document_id and not note_is_required:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_research_chunks_document ON research_chunks(document_id, chunk_index)"
+        )
+        return
+
+    document_expr = "document_id" if has_document_id else "NULL"
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("DROP TABLE IF EXISTS research_chunks__system_refactor")
+        conn.execute(
+            """
+            CREATE TABLE research_chunks__system_refactor (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              note_id INTEGER REFERENCES obsidian_notes(id) ON DELETE CASCADE,
+              document_id INTEGER REFERENCES knowledge_documents(id) ON DELETE CASCADE,
+              chunk_index INTEGER NOT NULL,
+              heading TEXT NOT NULL DEFAULT '',
+              text TEXT NOT NULL,
+              token_count INTEGER NOT NULL DEFAULT 0,
+              source TEXT NOT NULL DEFAULT 'obsidian',
+              created_at TEXT NOT NULL,
+              UNIQUE(note_id, chunk_index),
+              UNIQUE(document_id, chunk_index)
+            )
+            """
+        )
+        conn.execute(
+            f"""
+            INSERT INTO research_chunks__system_refactor(
+              id, note_id, document_id, chunk_index, heading, text,
+              token_count, source, created_at
+            )
+            SELECT id, note_id, {document_expr}, chunk_index, heading, text,
+                   token_count, source, created_at
+            FROM research_chunks
+            """
+        )
+        conn.execute("DROP TABLE research_chunks")
+        conn.execute("ALTER TABLE research_chunks__system_refactor RENAME TO research_chunks")
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_research_chunks_note ON research_chunks(note_id)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_research_chunks_document ON research_chunks(document_id, chunk_index)"
+    )
+
+
+def _postgres_columns(conn, table: str) -> dict[str, dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT column_name, is_nullable
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = ?
+        """,
+        (table,),
+    ).fetchall()
+    return {str(row["column_name"]): {"is_nullable": str(row["is_nullable"])} for row in rows}
+
+
+def _postgres_names(conn, object_type: str) -> set[str]:
+    if object_type == "table":
+        rows = conn.execute(
+            """
+            SELECT table_name AS name
+            FROM information_schema.tables
+            WHERE table_schema = current_schema()
+              AND table_type = 'BASE TABLE'
+            """
+        ).fetchall()
+    elif object_type == "index":
+        rows = conn.execute(
+            """
+            SELECT indexname AS name
+            FROM pg_indexes
+            WHERE schemaname = current_schema()
+            """
+        ).fetchall()
+    else:
+        return set()
+    return {str(row["name"]) for row in rows}
+
+
+def _postgres_schema_current(conn) -> bool:
+    tables = _postgres_names(conn, "table")
+    if not REQUIRED_TABLES.issubset(tables):
+        return False
+    if OBSOLETE_TABLES.intersection(tables):
+        return False
+    indexes = _postgres_names(conn, "index")
+    if not POSTGRES_REQUIRED_INDEXES.issubset(indexes):
+        return False
+    for table, required_columns in REQUIRED_COLUMNS.items():
+        if not required_columns.issubset(_postgres_columns(conn, table)):
+            return False
+    research_chunk_columns = _postgres_columns(conn, "research_chunks")
+    if research_chunk_columns.get("note_id", {}).get("is_nullable") == "NO":
+        return False
+    return True
+
+
+def _postgres_add_column_if_missing(conn, table: str, column: str, definition: str) -> None:
+    if column not in _postgres_columns(conn, table):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
+
+
+def _postgres_drop_not_null_if_present(conn, table: str, column: str) -> None:
+    columns = _postgres_columns(conn, table)
+    if columns.get(column, {}).get("is_nullable") == "NO":
+        conn.execute(f"ALTER TABLE {table} ALTER COLUMN {column} DROP NOT NULL")
+
+
+def _migrate_postgres_db(conn) -> None:
+    _postgres_add_column_if_missing(
+        conn,
+        "research_chunks",
+        "document_id",
+        "document_id INTEGER REFERENCES knowledge_documents(id) ON DELETE CASCADE",
+    )
+    _postgres_drop_not_null_if_present(conn, "research_chunks", "note_id")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_research_chunks_document ON research_chunks(document_id, chunk_index)")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_research_chunks_document_unique ON research_chunks(document_id, chunk_index)"
+    )
+
+    column_migrations = {
+        "job_runs": {
+            "pid": "pid INTEGER",
+            "heartbeat_at": "heartbeat_at TEXT",
+        },
+        "arxiv_papers": {
+            "pdf_path": "pdf_path TEXT NOT NULL DEFAULT ''",
+            "text_path": "text_path TEXT NOT NULL DEFAULT ''",
+            "text_extracted_at": "text_extracted_at TEXT",
+            "text_status": "text_status TEXT NOT NULL DEFAULT 'pending'",
+            "text_error": "text_error TEXT NOT NULL DEFAULT ''",
+            "text_char_count": "text_char_count INTEGER NOT NULL DEFAULT 0",
+        },
+        "matches": {
+            "arxiv_chunk_id": "arxiv_chunk_id INTEGER REFERENCES arxiv_text_chunks(id) ON DELETE SET NULL",
+        },
+        "project_paper_matches": {
+            "rank_score": "rank_score REAL NOT NULL DEFAULT 0",
+            "quality_score": "quality_score REAL NOT NULL DEFAULT 0",
+        },
+        "research_projects": {
+            "obsidian_project_path": "obsidian_project_path TEXT NOT NULL DEFAULT ''",
+            "obsidian_output_dir": "obsidian_output_dir TEXT NOT NULL DEFAULT ''",
+            "obsidian_note_id": "obsidian_note_id INTEGER REFERENCES obsidian_notes(id) ON DELETE SET NULL",
+            "obsidian_folder": "obsidian_folder TEXT NOT NULL DEFAULT ''",
+            "obsidian_status_tag": "obsidian_status_tag TEXT NOT NULL DEFAULT ''",
+            "discovery_source": "discovery_source TEXT NOT NULL DEFAULT 'manual'",
+            "source_tags_json": "source_tags_json TEXT NOT NULL DEFAULT '[]'",
+            "arxiv_categories_json": "arxiv_categories_json TEXT NOT NULL DEFAULT '[]'",
+            "automation_json": "automation_json TEXT NOT NULL DEFAULT '{}'",
+        },
+        "project_paper_recommendations": {
+            "importance": "importance TEXT NOT NULL DEFAULT ''",
+            "relation_type": "relation_type TEXT NOT NULL DEFAULT 'indirect'",
+            "reason": "reason TEXT NOT NULL DEFAULT ''",
+            "obsidian_path": "obsidian_path TEXT NOT NULL DEFAULT ''",
+            "attachment_path": "attachment_path TEXT NOT NULL DEFAULT ''",
+            "source_judgment_hash": "source_judgment_hash TEXT NOT NULL DEFAULT ''",
+            "synced_at": "synced_at TEXT",
+        },
+        "daily_run_meta": {
+            "source_job_id": "source_job_id INTEGER REFERENCES job_runs(id) ON DELETE SET NULL",
+            "arxiv_batch_id": "arxiv_batch_id TEXT NOT NULL DEFAULT ''",
+            "mode": "mode TEXT NOT NULL DEFAULT 'run-daily'",
+            "settings_hash": "settings_hash TEXT NOT NULL DEFAULT ''",
+            "searchers_json": "searchers_json TEXT NOT NULL DEFAULT '[]'",
+            "embedding_model": "embedding_model TEXT NOT NULL DEFAULT ''",
+            "created_at": "created_at TEXT NOT NULL DEFAULT ''",
+        },
+        "daily_run_steps": {
+            "status": "status TEXT NOT NULL DEFAULT 'pending'",
+            "started_at": "started_at TEXT",
+            "finished_at": "finished_at TEXT",
+            "error": "error TEXT NOT NULL DEFAULT ''",
+            "meta_json": "meta_json TEXT NOT NULL DEFAULT '{}'",
+        },
+        "daily_run_papers": {
+            "source": "source TEXT NOT NULL DEFAULT 'new_arxiv'",
+            "retry_reason": "retry_reason TEXT NOT NULL DEFAULT ''",
+            "published_at": "published_at TEXT NOT NULL DEFAULT ''",
+            "prefilter_score": "prefilter_score REAL",
+            "prefilter_rank": "prefilter_rank INTEGER",
+            "prefilter_passed": "prefilter_passed INTEGER NOT NULL DEFAULT 0",
+            "selected": "selected INTEGER NOT NULL DEFAULT 0",
+            "selection_reason": "selection_reason TEXT NOT NULL DEFAULT ''",
+            "text_status": "text_status TEXT NOT NULL DEFAULT 'pending'",
+            "embedding_status": "embedding_status TEXT NOT NULL DEFAULT 'pending'",
+            "global_match_status": "global_match_status TEXT NOT NULL DEFAULT 'pending'",
+            "project_match_status": "project_match_status TEXT NOT NULL DEFAULT 'pending'",
+            "judgment_status": "judgment_status TEXT NOT NULL DEFAULT 'pending'",
+            "recommendation_status": "recommendation_status TEXT NOT NULL DEFAULT 'pending'",
+            "report_status": "report_status TEXT NOT NULL DEFAULT 'pending'",
+            "archive_status": "archive_status TEXT NOT NULL DEFAULT 'pending'",
+            "error": "error TEXT NOT NULL DEFAULT ''",
+            "updated_at": "updated_at TEXT NOT NULL DEFAULT ''",
+        },
+    }
+    for table, columns in column_migrations.items():
+        existing = _postgres_columns(conn, table)
+        for column, definition in columns.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
+
+    unique_indexes = [
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_matches_unique_paper_chunk ON matches(paper_id, chunk_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_feedback_unique_paper_status ON user_feedback(paper_id, status)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_project_notes_unique_project_note ON project_notes(project_id, note_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_project_context_documents_unique ON project_context_documents(project_id, document_id, relation)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_sources_unique ON paper_sources(paper_id, source_type, source_identifier)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_chunks_unique ON paper_chunks(paper_id, asset_id, chunk_index)",
+    ]
+    for sql in unique_indexes:
+        conn.execute(sql)
+    from .artifacts import migrate_legacy_artifact_tables
+
+    migrate_legacy_artifact_tables(conn, drop_legacy=True)
+
+
 def _migrate_db(conn: sqlite3.Connection) -> None:
+    _ensure_generic_research_chunks(conn)
+
     job_columns = {
         row["name"]
         for row in conn.execute("PRAGMA table_info(job_runs)").fetchall()
@@ -763,52 +1164,6 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS paper_reading_reports (
-          paper_id INTEGER PRIMARY KEY REFERENCES arxiv_papers(id) ON DELETE CASCADE,
-          status TEXT NOT NULL DEFAULT 'queued',
-          prompt TEXT NOT NULL DEFAULT '',
-          system_prompt TEXT NOT NULL DEFAULT '',
-          model_provider_id TEXT NOT NULL DEFAULT '',
-          model TEXT NOT NULL DEFAULT '',
-          source_text_hash TEXT NOT NULL DEFAULT '',
-          source_project_ids_json TEXT NOT NULL DEFAULT '[]',
-          report_markdown TEXT NOT NULL DEFAULT '',
-          error_message TEXT NOT NULL DEFAULT '',
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL,
-          started_at TEXT,
-          finished_at TEXT
-        )
-        """
-    )
-    report_columns = {
-        row["name"]
-        for row in conn.execute("PRAGMA table_info(paper_reading_reports)").fetchall()
-    }
-    report_migrations = {
-        "prompt": "ALTER TABLE paper_reading_reports ADD COLUMN prompt TEXT NOT NULL DEFAULT ''",
-        "system_prompt": "ALTER TABLE paper_reading_reports ADD COLUMN system_prompt TEXT NOT NULL DEFAULT ''",
-        "model_provider_id": "ALTER TABLE paper_reading_reports ADD COLUMN model_provider_id TEXT NOT NULL DEFAULT ''",
-        "model": "ALTER TABLE paper_reading_reports ADD COLUMN model TEXT NOT NULL DEFAULT ''",
-        "source_text_hash": "ALTER TABLE paper_reading_reports ADD COLUMN source_text_hash TEXT NOT NULL DEFAULT ''",
-        "source_project_ids_json": "ALTER TABLE paper_reading_reports ADD COLUMN source_project_ids_json TEXT NOT NULL DEFAULT '[]'",
-        "report_markdown": "ALTER TABLE paper_reading_reports ADD COLUMN report_markdown TEXT NOT NULL DEFAULT ''",
-        "error_message": "ALTER TABLE paper_reading_reports ADD COLUMN error_message TEXT NOT NULL DEFAULT ''",
-        "started_at": "ALTER TABLE paper_reading_reports ADD COLUMN started_at TEXT",
-        "finished_at": "ALTER TABLE paper_reading_reports ADD COLUMN finished_at TEXT",
-    }
-    for column, sql in report_migrations.items():
-        if column not in report_columns:
-            try:
-                conn.execute(sql)
-            except sqlite3.OperationalError as exc:
-                if "duplicate column name" not in str(exc).lower():
-                    raise
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_paper_reading_reports_status ON paper_reading_reports(status, updated_at DESC)"
-    )
-    conn.execute(
-        """
         CREATE TABLE IF NOT EXISTS paper_reader_messages (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           paper_id INTEGER NOT NULL REFERENCES arxiv_papers(id) ON DELETE CASCADE,
@@ -824,6 +1179,9 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_paper_reader_messages_paper ON paper_reader_messages(paper_id, id)"
     )
+    from .artifacts import migrate_legacy_artifact_tables
+
+    migrate_legacy_artifact_tables(conn, drop_legacy=True)
     conn.execute("DROP TABLE IF EXISTS llm_explanations")
 
 
@@ -866,14 +1224,15 @@ def _process_is_alive(pid: int) -> bool:
             result = subprocess.run(
                 ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
                 capture_output=True,
-                text=True,
                 timeout=5,
                 check=False,
             )
         except (OSError, subprocess.SubprocessError):
             return True
-        output = result.stdout.strip()
-        return str(pid) in output and "No tasks" not in output and "INFO:" not in output
+        output = (result.stdout or b"").strip()
+        if not output:
+            return False
+        return str(pid).encode("ascii") in output
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -954,15 +1313,25 @@ def job_run(conn: sqlite3.Connection, job_type: str) -> Iterator[int]:
     try:
         yield job_id
     except Exception as exc:
-        conn.execute(
-            """
-            UPDATE job_runs
-            SET status = 'failed', finished_at = ?, message = ?, heartbeat_at = ?
-            WHERE id = ?
-            """,
-            (utc_now(), str(exc), utc_now(), job_id),
-        )
-        conn.commit()
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        try:
+            conn.execute(
+                """
+                UPDATE job_runs
+                SET status = 'failed', finished_at = ?, message = ?, heartbeat_at = ?
+                WHERE id = ?
+                """,
+                (utc_now(), str(exc), utc_now(), job_id),
+            )
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         raise
     else:
         conn.execute(

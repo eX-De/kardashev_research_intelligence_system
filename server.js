@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { createReadStream, existsSync, readFileSync } from "node:fs";
-import { extname, isAbsolute, join, normalize, relative, resolve } from "node:path";
+import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -103,14 +103,21 @@ function worker(args, input = null) {
             console.error(stderr.trimEnd());
           }
           let message = error.message;
+          const stderrText = String(stderr || "").trim();
+          const stdoutText = String(stdout || "").trim();
           try {
             const parsed = JSON.parse(stdout || "{}");
             if (parsed.error) message = parsed.error;
           } catch {
-            message = stderr || stdout || error.message;
+            message = stderrText || stdoutText || error.message;
+          }
+          if (stderrText && !String(message).includes(stderrText)) {
+            message = `${message}\n${stderrText}`.trim();
           }
           const err = new Error(message);
           err.statusCode = 500;
+          err.stdout = stdoutText;
+          err.stderr = stderrText;
           reject(err);
           return;
         }
@@ -753,24 +760,43 @@ function sendJson(res, status, body) {
 
 async function serveStatic(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
-  const requestedPath = url.pathname === "/" ? "/index.html" : decodeURIComponent(url.pathname);
-  const filePath = normalize(join(PUBLIC_DIR, requestedPath));
+  const filePath = resolvePublicPath(url.pathname);
 
-  if (!filePath.startsWith(PUBLIC_DIR)) {
+  if (!filePath) {
     res.writeHead(403);
     res.end("Forbidden");
     return;
   }
 
+  if (await tryServeStaticFile(filePath, res)) return;
+
+  if (!extname(url.pathname)) {
+    const indexPath = resolvePublicPath("/index.html");
+    if (indexPath && await tryServeStaticFile(indexPath, res)) return;
+  }
+
+  res.writeHead(404);
+  res.end("Not found");
+}
+
+function resolvePublicPath(pathname) {
+  const decodedPath = decodeURIComponent(pathname === "/" ? "/index.html" : pathname);
+  const relativePath = decodedPath.replace(/^[\\/]+/, "");
+  const filePath = resolve(PUBLIC_DIR, relativePath);
+  return isPathInside(filePath, PUBLIC_DIR) ? filePath : null;
+}
+
+async function tryServeStaticFile(filePath, res) {
   try {
     const body = await readFile(filePath);
     res.writeHead(200, {
       "content-type": MIME_TYPES[extname(filePath)] || "application/octet-stream"
     });
     res.end(body);
-  } catch {
-    res.writeHead(404);
-    res.end("Not found");
+    return true;
+  } catch (error) {
+    if (!["ENOENT", "ENOTDIR", "EISDIR"].includes(error.code)) throw error;
+    return false;
   }
 }
 
@@ -807,6 +833,14 @@ async function routeApi(req, res, url) {
   const projectExportMatch = url.pathname.match(/^\/api\/projects\/(\d+)\/export-obsidian$/);
   if (req.method === "POST" && projectExportMatch) {
     const data = await jsonFromWorker(["api-project-export", projectExportMatch[1]]);
+    sendJson(res, 200, data);
+    return;
+  }
+
+  const projectIndexMatch = url.pathname.match(/^\/api\/projects\/(\d+)\/artifacts\/project-index$/);
+  if (req.method === "POST" && projectIndexMatch) {
+    const body = await readRequestJson(req);
+    const data = await jsonFromWorker(["api-project-index", projectIndexMatch[1]], JSON.stringify(body));
     sendJson(res, 200, data);
     return;
   }
@@ -962,6 +996,80 @@ async function routeApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/paper-reports") {
     const limit = url.searchParams.get("limit") || "300";
     const data = await jsonFromWorker(["api-paper-reports", "--limit", limit]);
+    sendJson(res, 200, data);
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/library") {
+    const args = [
+      "api-paper-library",
+      "--status",
+      url.searchParams.get("status") || "",
+      "--source-type",
+      url.searchParams.get("source_type") || "",
+      "--project-id",
+      url.searchParams.get("project_id") || "",
+      "--query",
+      url.searchParams.get("q") || "",
+      "--date-from",
+      url.searchParams.get("date_from") || "",
+      "--date-to",
+      url.searchParams.get("date_to") || "",
+      "--limit",
+      url.searchParams.get("limit") || "100",
+      "--offset",
+      url.searchParams.get("offset") || "0"
+    ];
+    const data = await jsonFromWorker(args);
+    sendJson(res, 200, data);
+    return;
+  }
+
+  const libraryPaperMatch = url.pathname.match(/^\/api\/library\/(\d+)$/);
+  if (req.method === "GET" && libraryPaperMatch) {
+    const data = await jsonFromWorker(["api-paper-library-detail", libraryPaperMatch[1]]);
+    sendJson(res, 200, data);
+    return;
+  }
+
+  const libraryStatusMatch = url.pathname.match(/^\/api\/library\/(\d+)\/status$/);
+  if (req.method === "POST" && libraryStatusMatch) {
+    const body = await readRequestJson(req);
+    const data = await jsonFromWorker(["api-paper-library-status", libraryStatusMatch[1]], JSON.stringify(body));
+    sendJson(res, 200, data);
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/artifacts") {
+    const args = [
+      "api-artifacts",
+      "--scope-type",
+      url.searchParams.get("scope_type") || "",
+      "--scope-id",
+      url.searchParams.get("scope_id") || "",
+      "--artifact-type",
+      url.searchParams.get("artifact_type") || "",
+      "--status",
+      url.searchParams.get("status") || "",
+      "--limit",
+      url.searchParams.get("limit") || "100"
+    ];
+    const data = await jsonFromWorker(args);
+    sendJson(res, 200, data);
+    return;
+  }
+
+  const artifactMatch = url.pathname.match(/^\/api\/artifacts\/(\d+)$/);
+  if (req.method === "GET" && artifactMatch) {
+    const data = await jsonFromWorker(["api-artifact", artifactMatch[1]]);
+    sendJson(res, 200, data);
+    return;
+  }
+
+  const artifactExportMatch = url.pathname.match(/^\/api\/artifacts\/(\d+)\/export-obsidian$/);
+  if (req.method === "POST" && artifactExportMatch) {
+    const body = await readRequestJson(req);
+    const data = await jsonFromWorker(["api-artifact-export", artifactExportMatch[1]], JSON.stringify(body));
     sendJson(res, 200, data);
     return;
   }

@@ -10,6 +10,7 @@ from pathlib import Path
 from .config import Settings
 from .db import clean_unicode, to_json, utc_now
 from .embeddings import embed_text, ensure_missing_note_chunk_embeddings
+from .knowledge import sync_project_context_documents_from_project_notes, upsert_knowledge_document
 
 TAG_PATTERN = re.compile(r"(?<![\w/])#([^\s#]+)")
 HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
@@ -23,6 +24,7 @@ STATUS_TAG_TO_PROJECT_STATUS = {
     value.lower(): key for key, value in PROJECT_STATUS_TAGS.items()
 }
 SKIPPED_DIR_NAMES = {".trash"}
+POSTGRES_OBSIDIAN_SYNC_LOCK_KEY = 7240185732502
 
 
 @dataclass
@@ -32,6 +34,7 @@ class ParsedNote:
     frontmatter: dict[str, object]
     tags: list[str]
     body: str
+    raw_content: str
     sha256: str
     mtime: float
 
@@ -160,6 +163,7 @@ def parse_note(vault: Path, path: Path) -> ParsedNote:
         frontmatter=frontmatter,
         tags=tags,
         body=body,
+        raw_content=text,
         sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         mtime=stat.st_mtime,
     )
@@ -512,12 +516,63 @@ def _sync_project_folder_memberships(conn: sqlite3.Connection) -> int:
     return synced
 
 
+def _mirror_note_to_knowledge(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    note: ParsedNote,
+    note_id: int,
+) -> dict[str, object]:
+    return upsert_knowledge_document(
+        conn,
+        settings,
+        source_type="obsidian",
+        source_uri=note.path,
+        title=note.title,
+        raw_content=note.raw_content,
+        content_hash_value=note.sha256,
+        metadata={
+            "path": note.path,
+            "frontmatter": note.frontmatter,
+            "tags": note.tags,
+            "mtime": note.mtime,
+        },
+        chunks=chunk_note(note),
+        legacy_note_id=note_id,
+        chunk_source="obsidian",
+        embedder=embed_text,
+        commit=False,
+    )
+
+
 def sync_obsidian(conn: sqlite3.Connection, settings: Settings) -> dict[str, int]:
+    if getattr(conn, "dialect", "") != "postgres":
+        return _sync_obsidian_unlocked(conn, settings)
+    conn.execute("SELECT pg_advisory_lock(?)", (POSTGRES_OBSIDIAN_SYNC_LOCK_KEY,))
+    conn.commit()
+    try:
+        return _sync_obsidian_unlocked(conn, settings)
+    finally:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        try:
+            conn.execute("SELECT pg_advisory_unlock(?)", (POSTGRES_OBSIDIAN_SYNC_LOCK_KEY,))
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+
+
+def _sync_obsidian_unlocked(conn: sqlite3.Connection, settings: Settings) -> dict[str, int]:
     notes = discover_notes(settings)
     indexed = 0
     skipped = 0
     projects_synced = 0
     project_notes_synced = 0
+    project_context_documents_synced = 0
     chunks_created = 0
     embeddings_created = 0
 
@@ -527,6 +582,9 @@ def sync_obsidian(conn: sqlite3.Connection, settings: Settings) -> dict[str, int
             (note.path,),
         ).fetchone()
         if existing and existing["sha256"] == note.sha256:
+            mirror_result = _mirror_note_to_knowledge(conn, settings, note, int(existing["id"]))
+            chunks_created += int(mirror_result["chunks_created"])
+            embeddings_created += int(mirror_result["embeddings_created"])
             if _sync_project_from_note(conn, note, int(existing["id"]), settings):
                 projects_synced += 1
                 conn.commit()
@@ -536,7 +594,6 @@ def sync_obsidian(conn: sqlite3.Connection, settings: Settings) -> dict[str, int
         now = utc_now()
         if existing:
             note_id = int(existing["id"])
-            conn.execute("DELETE FROM research_chunks WHERE note_id = ?", (note_id,))
             conn.execute(
                 """
                 UPDATE obsidian_notes
@@ -574,36 +631,14 @@ def sync_obsidian(conn: sqlite3.Connection, settings: Settings) -> dict[str, int
         if _sync_project_from_note(conn, note, note_id, settings):
             projects_synced += 1
 
-        for index, chunk in enumerate(chunk_note(note)):
-            cur = conn.execute(
-                """
-                INSERT INTO research_chunks(note_id, chunk_index, heading, text, token_count, source, created_at)
-                VALUES (?, ?, ?, ?, ?, 'obsidian', ?)
-                """,
-                (
-                    note_id,
-                    index,
-                    chunk["heading"],
-                    chunk["text"],
-                    chunk["token_count"],
-                    now,
-                ),
-            )
-            chunks_created += 1
-            embedding = embed_text(settings, str(chunk["text"]))
-            if embedding is not None:
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO chunk_embeddings(chunk_id, model, embedding_json, created_at)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (int(cur.lastrowid), settings.llm_embedding_model, to_json(embedding), now),
-                )
-                embeddings_created += 1
+        mirror_result = _mirror_note_to_knowledge(conn, settings, note, note_id)
+        chunks_created += int(mirror_result["chunks_created"])
+        embeddings_created += int(mirror_result["embeddings_created"])
         indexed += 1
         conn.commit()
 
     project_notes_synced = _sync_project_folder_memberships(conn)
+    project_context_documents_synced = sync_project_context_documents_from_project_notes(conn, commit=False)
     embedding_backfill = ensure_missing_note_chunk_embeddings(conn, settings)
     conn.commit()
 
@@ -613,6 +648,7 @@ def sync_obsidian(conn: sqlite3.Connection, settings: Settings) -> dict[str, int
         "notes_skipped": skipped,
         "projects_synced": projects_synced,
         "project_notes_synced": project_notes_synced,
+        "project_context_documents_synced": project_context_documents_synced,
         "chunks_created": chunks_created,
         "embeddings_created": embeddings_created,
         **embedding_backfill,

@@ -116,7 +116,14 @@ def _activity_rows(conn: sqlite3.Connection, limit: int = 20) -> list[dict[str, 
 def _paper_report_stats(conn: sqlite3.Connection) -> dict[str, int]:
     stats = {"queued": 0, "processing": 0, "done": 0, "failed": 0, "total": 0}
     for row in conn.execute(
-        "SELECT status, COUNT(*) AS count FROM paper_reading_reports GROUP BY status"
+        """
+        SELECT status, COUNT(*) AS count
+        FROM artifacts
+        WHERE scope_type = 'paper'
+          AND artifact_type = 'paper_report'
+          AND status != 'removed'
+        GROUP BY status
+        """
     ).fetchall():
         status = str(row["status"] or "")
         count = int(row["count"] or 0)

@@ -69,7 +69,7 @@ function PaperDetail({ detail, onRecommendation, onGenerateReport }) {
     ["medium", "中"],
     ["low", "低"]
   ];
-  const canAccept = Boolean(importance) && selectedProjectIds.length > 0 && pendingRecommendations.length > 0 && reportReady;
+  const canAccept = Boolean(importance) && selectedProjectIds.length > 0 && pendingRecommendations.length > 0;
 
   function toggleProject(projectId) {
     setSelectedProjectIds((current) => (
@@ -116,7 +116,7 @@ function PaperDetail({ detail, onRecommendation, onGenerateReport }) {
               ))}
             </div>
             <div className="detail-actions">
-              <button className="primary" disabled={!canAccept} onClick={() => onRecommendation({ action: "accept", importance, project_ids: selectedProjectIds })} type="button">保存到 Obsidian</button>
+              <button className="primary" disabled={!canAccept} onClick={() => onRecommendation({ action: "accept", importance, project_ids: selectedProjectIds })} type="button">保存到论文仓库</button>
               <button className="danger" onClick={() => onRecommendation({ action: "discard" })} type="button">遗弃</button>
             </div>
           </div>
@@ -197,7 +197,7 @@ function PaperDetail({ detail, onRecommendation, onGenerateReport }) {
   );
 }
 
-export function InboxView({ setStatusMessage }) {
+export function InboxView({ onSelectPaper, selectedPaperId, setStatusMessage }) {
   const [papers, setPapers] = useState([]);
   const [activePaperId, setActivePaperId] = useState(null);
   const [detail, setDetail] = useState(null);
@@ -212,9 +212,17 @@ export function InboxView({ setStatusMessage }) {
     const data = await api("/api/inbox");
     const items = data.items || [];
     setPapers(items);
-    const nextId = activePaperId && items.some((paper) => paper.id === activePaperId) ? activePaperId : items[0]?.id;
-    if (nextId) await loadPaper(nextId);
-  }, [activePaperId, loadPaper]);
+    const routePaperId = Number(selectedPaperId || 0);
+    const routePaperInInbox = routePaperId && items.some((paper) => Number(paper.id) === routePaperId);
+    const nextId = routePaperInInbox ? routePaperId : items[0]?.id;
+    if (nextId) {
+      if (Number(nextId) !== routePaperId) onSelectPaper?.(nextId, { replace: true });
+      await loadPaper(nextId);
+      return;
+    }
+    setDetail(null);
+    setActivePaperId(null);
+  }, [loadPaper, onSelectPaper, selectedPaperId]);
 
   useEffect(() => {
     loadInbox().catch((error) => setStatusMessage(error.message));
@@ -224,7 +232,7 @@ export function InboxView({ setStatusMessage }) {
     if (!activePaperId) return;
     try {
       await postJson(`/api/papers/${activePaperId}/recommendation`, payload);
-      setStatusMessage(payload.action === "discard" ? "已遗弃推荐" : "已保存到 Obsidian");
+      setStatusMessage(payload.action === "discard" ? "已遗弃推荐" : "已保存到论文仓库");
       await loadInbox();
     } catch (error) {
       setStatusMessage(error.message);
@@ -258,7 +266,17 @@ export function InboxView({ setStatusMessage }) {
           </button>
         </header>
         <div className="paper-list">
-          <PaperList papers={papers} activePaperId={activePaperId} onSelect={(id) => loadPaper(id).catch((error) => setStatusMessage(error.message))} />
+          <PaperList
+            papers={papers}
+            activePaperId={activePaperId}
+            onSelect={(id) => {
+              if (onSelectPaper) {
+                onSelectPaper(id);
+                return;
+              }
+              loadPaper(id).catch((error) => setStatusMessage(error.message));
+            }}
+          />
         </div>
       </section>
 

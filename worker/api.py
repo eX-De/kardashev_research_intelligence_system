@@ -4,8 +4,16 @@ import re
 import sqlite3
 from pathlib import Path
 
-from .db import clean_unicode, from_json, to_json, utc_now
+from .db import clean_unicode, database_target, from_json, to_json, utc_now
 from .config import Settings
+from .artifacts import (
+    PAPER_REPORT_ARTIFACT_TYPE,
+    export_artifact_to_obsidian,
+    generate_project_index_artifact,
+    get_artifact,
+    list_artifacts,
+)
+from .knowledge import save_manual_project_context
 from .obsidian import status_tag_for_project_status, update_markdown_status_tag
 from .obsidian_library import sync_accepted_paper_to_obsidian
 from .paper_reports import (
@@ -17,9 +25,17 @@ from .paper_reports import (
     remove_paper_report_from_queue,
     sync_paper_report_for_recommendation_state,
 )
+from .papers import (
+    list_paper_library,
+    paper_id_for_arxiv_paper_id,
+    paper_library_detail,
+    set_arxiv_paper_library_status,
+    set_library_status,
+)
 from .recommendations import (
     accept_recommendations_for_paper,
     discard_recommendations_for_paper,
+    project_recommendation_paper_rows,
     sync_project_paper_recommendations,
 )
 from .reminders import reminders
@@ -96,6 +112,67 @@ def _dedupe_list(values: list[object]) -> list[object]:
     return result
 
 
+def _project_names_for_ids(conn: sqlite3.Connection, project_ids: list[int]) -> list[str]:
+    ids = []
+    for project_id in project_ids:
+        try:
+            parsed = int(project_id)
+        except (TypeError, ValueError):
+            continue
+        if parsed:
+            ids.append(parsed)
+    if not ids:
+        return []
+    placeholders = ", ".join("?" for _ in ids)
+    rows = conn.execute(
+        f"SELECT id, name FROM research_projects WHERE id IN ({placeholders})",
+        ids,
+    ).fetchall()
+    names_by_id = {int(row["id"]): str(row["name"] or "") for row in rows}
+    return [names_by_id[project_id] for project_id in ids if names_by_id.get(project_id)]
+
+
+def _project_context_payload(conn: sqlite3.Connection, project_id: int) -> list[dict[str, object]]:
+    rows = conn.execute(
+        """
+        SELECT
+          kd.id,
+          kd.source_type,
+          kd.source_uri,
+          kd.title,
+          kd.raw_content,
+          kd.indexed_at,
+          kd.updated_at,
+          pcd.relation,
+          pcd.weight,
+          COUNT(c.id) AS chunk_count
+        FROM project_context_documents pcd
+        JOIN knowledge_documents kd ON kd.id = pcd.document_id
+        LEFT JOIN research_chunks c ON c.document_id = kd.id
+        WHERE pcd.project_id = ?
+        GROUP BY kd.id, pcd.relation, pcd.weight
+        ORDER BY pcd.weight DESC, kd.updated_at DESC
+        """,
+        (project_id,),
+    ).fetchall()
+    return [
+        {
+            "id": int(row["id"]),
+            "document_id": int(row["id"]),
+            "source_type": row["source_type"],
+            "source_uri": row["source_uri"],
+            "title": row["title"],
+            "excerpt": clean_unicode(str(row["raw_content"] or "")).strip()[:600],
+            "relation": row["relation"],
+            "weight": float(row["weight"] or 0),
+            "chunk_count": int(row["chunk_count"] or 0),
+            "indexed_at": row["indexed_at"],
+            "updated_at": row["updated_at"],
+        }
+        for row in rows
+    ]
+
+
 def _project_row(row: sqlite3.Row) -> dict[str, object]:
     automation = {
         **DEFAULT_PROJECT_AUTOMATION,
@@ -133,8 +210,8 @@ def projects(conn: sqlite3.Connection) -> dict[str, object]:
           p.*,
           COUNT(DISTINCT pp.paper_id) AS paper_count,
           COUNT(DISTINCT pn.note_id) AS note_count,
-          COUNT(DISTINCT pa.id) AS artifact_count,
-          MAX(pa.updated_at) AS latest_artifact_at
+          COUNT(DISTINCT af.id) AS artifact_count,
+          MAX(af.updated_at) AS latest_artifact_at
         FROM research_projects p
         LEFT JOIN project_papers pp
           ON pp.project_id = p.id
@@ -143,7 +220,7 @@ def projects(conn: sqlite3.Connection) -> dict[str, object]:
            AND pp.note = 'auto_matched_by_project_context'
          )
         LEFT JOIN project_notes pn ON pn.project_id = p.id
-        LEFT JOIN project_artifacts pa ON pa.project_id = p.id
+        LEFT JOIN artifacts af ON af.scope_type = 'project' AND af.scope_id = p.id
         GROUP BY p.id
         ORDER BY
           CASE p.status
@@ -215,31 +292,13 @@ def project_detail(conn: sqlite3.Connection, project_id: int) -> dict[str, objec
         """,
         (project_id,),
     ).fetchall()
-    candidate_papers = conn.execute(
-        """
-        SELECT
-          p.id,
-          p.arxiv_id,
-          p.title,
-          p.published_at,
-          p.text_status,
-          MAX(m.score) AS score
-        FROM arxiv_papers p
-        LEFT JOIN matches m ON m.paper_id = p.id
-        WHERE NOT EXISTS (
-          SELECT 1 FROM project_papers pp
-          WHERE pp.project_id = ? AND pp.paper_id = p.id
-            AND NOT (
-              pp.relation = 'candidate'
-              AND pp.note = 'auto_matched_by_project_context'
-            )
-        )
-        GROUP BY p.id
-        ORDER BY score DESC, p.published_at DESC
-        LIMIT 80
-        """,
-        (project_id,),
-    ).fetchall()
+    recommended_papers = project_recommendation_paper_rows(
+        conn,
+        project_id,
+        states=("pending", "accepted"),
+        exclude_linked=True,
+        limit=80,
+    )
     candidate_notes = conn.execute(
         """
         SELECT n.id, n.path, n.title, n.tags_json, COUNT(c.id) AS chunk_count
@@ -257,9 +316,9 @@ def project_detail(conn: sqlite3.Connection, project_id: int) -> dict[str, objec
     ).fetchall()
     artifacts = conn.execute(
         """
-        SELECT id, artifact_type, title, obsidian_path, status, source_json, updated_at
-        FROM project_artifacts
-        WHERE project_id = ?
+        SELECT id, artifact_type, title, content_markdown, '' AS obsidian_path, status, source_json, updated_at
+        FROM artifacts
+        WHERE scope_type = 'project' AND scope_id = ?
         ORDER BY updated_at DESC
         """,
         (project_id,),
@@ -288,8 +347,10 @@ def project_detail(conn: sqlite3.Connection, project_id: int) -> dict[str, objec
           ac.text AS arxiv_text,
           c.heading AS obsidian_heading,
           c.text AS obsidian_text,
-          n.title AS note_title,
-          n.path AS note_path,
+          COALESCE(n.title, kd.title) AS note_title,
+          COALESCE(n.path, kd.source_uri) AS note_path,
+          kd.source_type AS context_source_type,
+          kd.id AS context_document_id,
           j.relation_type,
           j.relevance_score,
           j.usefulness_score,
@@ -304,6 +365,7 @@ def project_detail(conn: sqlite3.Connection, project_id: int) -> dict[str, objec
         LEFT JOIN arxiv_text_chunks ac ON ac.id = ppm.best_arxiv_chunk_id
         LEFT JOIN research_chunks c ON c.id = ppm.best_obsidian_chunk_id
         LEFT JOIN obsidian_notes n ON n.id = c.note_id
+        LEFT JOIN knowledge_documents kd ON kd.id = c.document_id
         LEFT JOIN project_paper_judgments j
           ON j.project_id = ppm.project_id AND j.paper_id = ppm.paper_id
         WHERE ppm.project_id = ?
@@ -338,6 +400,7 @@ def project_detail(conn: sqlite3.Connection, project_id: int) -> dict[str, objec
             }
             for note in notes
         ],
+        "context_documents": _project_context_payload(conn, project_id),
         "candidate_papers": [
             {
                 "id": int(paper["id"]),
@@ -345,9 +408,32 @@ def project_detail(conn: sqlite3.Connection, project_id: int) -> dict[str, objec
                 "title": paper["title"],
                 "published_at": paper["published_at"],
                 "text_status": paper["text_status"],
-                "score": float(paper["score"] or 0),
+                "score": float(paper["usefulness_score"] or 0),
+                "recommendation_state": paper["recommendation_state"],
+                "importance": paper["importance"],
+                "relation_type": paper["relation_type"],
+                "reason": paper["recommendation_reason"],
+                "confidence": float(paper["confidence"] or 0),
+                "recommendation_updated_at": paper["recommendation_updated_at"],
             }
-            for paper in candidate_papers
+            for paper in recommended_papers
+        ],
+        "recommended_papers": [
+            {
+                "id": int(paper["id"]),
+                "arxiv_id": paper["arxiv_id"],
+                "title": paper["title"],
+                "published_at": paper["published_at"],
+                "text_status": paper["text_status"],
+                "score": float(paper["usefulness_score"] or 0),
+                "recommendation_state": paper["recommendation_state"],
+                "importance": paper["importance"],
+                "relation_type": paper["relation_type"],
+                "reason": paper["recommendation_reason"],
+                "confidence": float(paper["confidence"] or 0),
+                "recommendation_updated_at": paper["recommendation_updated_at"],
+            }
+            for paper in recommended_papers
         ],
         "candidate_notes": [
             {
@@ -364,14 +450,15 @@ def project_detail(conn: sqlite3.Connection, project_id: int) -> dict[str, objec
                 "id": int(artifact["id"]),
                 "artifact_type": artifact["artifact_type"],
                 "title": artifact["title"],
-                "obsidian_path": artifact["obsidian_path"],
+                "obsidian_path": artifact["obsidian_path"] if "obsidian_path" in artifact.keys() else "",
+                "content_markdown": artifact["content_markdown"] if "content_markdown" in artifact.keys() else "",
                 "status": artifact["status"],
                 "source": from_json(artifact["source_json"], {}),
                 "updated_at": artifact["updated_at"],
             }
             for artifact in artifacts
         ],
-        "project_matches": [
+        "retrieval_hits": [
             {
                 "paper_id": int(match["paper_id"]),
                 "arxiv_id": match["arxiv_id"],
@@ -398,6 +485,8 @@ def project_detail(conn: sqlite3.Connection, project_id: int) -> dict[str, objec
                 "obsidian_text": match["obsidian_text"],
                 "note_title": match["note_title"],
                 "note_path": match["note_path"],
+                "context_source_type": match["context_source_type"],
+                "context_document_id": int(match["context_document_id"]) if match["context_document_id"] is not None else None,
                 "rank_score": float(match["rank_score"] or 0),
                 "quality_score": float(match["quality_score"] or 0),
                 "judgment": None
@@ -451,6 +540,9 @@ def save_project(
     source_tags = _tag_payload(payload.get("source_tags", []))
     arxiv_categories = _csv_payload(payload.get("arxiv_categories", []))
     automation = _automation_payload(payload.get("automation", {}))
+    raw_context = clean_unicode(
+        str(payload.get("raw_context") or payload.get("context") or payload.get("project_context") or "")
+    ).strip()
     obsidian_status_tag = status_tag_for_project_status(status)
     now = utc_now()
     project_id = payload.get("id")
@@ -534,6 +626,17 @@ def save_project(
             ),
         )
         project_id = int(cur.lastrowid)
+    if raw_context:
+        if settings is None:
+            raise RuntimeError("Settings are required to save project context")
+        save_manual_project_context(
+            conn,
+            settings,
+            int(project_id),
+            raw_context,
+            title=f"{name} context",
+            commit=False,
+        )
     conn.commit()
     return project_detail(conn, int(project_id))
 
@@ -633,30 +736,9 @@ def export_project_to_obsidian(
     project_id: int,
 ) -> dict[str, object]:
     detail = project_detail(conn, project_id)
-    target, relative_path = _resolve_vault_markdown_path(settings, detail["project"])
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(_project_markdown(detail), encoding="utf-8")
-    now = utc_now()
-    conn.execute(
-        """
-        INSERT INTO project_artifacts(
-          project_id, artifact_type, title, obsidian_path, status, source_json, created_at, updated_at
-        )
-        VALUES (?, 'project_index', 'Project index', ?, 'synced', ?, ?, ?)
-        ON CONFLICT(project_id, artifact_type, obsidian_path) DO UPDATE SET
-          status = excluded.status,
-          source_json = excluded.source_json,
-          updated_at = excluded.updated_at
-        """,
-        (
-            project_id,
-            relative_path,
-            to_json({"paper_count": len(detail.get("papers", [])), "note_count": len(detail.get("notes", []))}),
-            now,
-            now,
-        ),
-    )
-    conn.commit()
+    _, relative_path = _resolve_vault_markdown_path(settings, detail["project"])
+    artifact = generate_project_index_artifact(conn, project_id)
+    export_artifact_to_obsidian(conn, settings, int(artifact["id"]), relative_path=relative_path)
     updated = project_detail(conn, project_id)
     updated["export"] = {"obsidian_path": relative_path, "status": "synced"}
     return updated
@@ -687,6 +769,12 @@ def link_project_paper(conn: sqlite3.Connection, project_id: int, payload: dict[
         """,
         (project_id, paper_id, relation, note, now, now),
     )
+    if relation == "reading":
+        set_arxiv_paper_library_status(conn, paper_id, "reading")
+    elif relation in {"core", "background", "candidate"}:
+        set_arxiv_paper_library_status(conn, paper_id, "saved")
+    elif relation == "rejected":
+        set_arxiv_paper_library_status(conn, paper_id, "discarded")
     conn.commit()
     return project_detail(conn, project_id)
 
@@ -765,14 +853,39 @@ def inbox(conn: sqlite3.Connection) -> dict[str, object]:
           j.usefulness_score,
           j.confidence,
           rr.status AS report_status,
-          rr.error_message AS report_error,
+          rr.content_json AS report_content_json,
           rr.updated_at AS report_updated_at
         FROM arxiv_papers p
         JOIN pending_recommendations r ON r.paper_id = p.id AND r.rn = 1
         JOIN research_projects rp ON rp.id = r.project_id
         LEFT JOIN project_paper_judgments j
           ON j.project_id = r.project_id AND j.paper_id = r.paper_id
-        LEFT JOIN paper_reading_reports rr ON rr.paper_id = p.id
+        LEFT JOIN (
+          SELECT ps.source_identifier AS arxiv_id, af.status, af.content_json, af.updated_at
+          FROM artifacts af
+          JOIN paper_sources ps ON ps.paper_id = af.scope_id
+          WHERE af.scope_type = 'paper'
+            AND af.artifact_type = ?
+            AND af.status != 'removed'
+        ) rr ON rr.arxiv_id = p.arxiv_id
+        WHERE NOT EXISTS (
+            SELECT 1 FROM arxiv_paper_tombstones t
+            WHERE t.arxiv_id = p.arxiv_id
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM papers lp
+            WHERE lp.arxiv_id = p.arxiv_id
+              AND lp.library_status IN ('archived', 'discarded')
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM paper_sources ps
+            JOIN papers lp ON lp.id = ps.paper_id
+            WHERE ps.source_type = 'arxiv'
+              AND ps.source_identifier = p.arxiv_id
+              AND lp.library_status IN ('archived', 'discarded')
+          )
         ORDER BY
           CASE r.relation_type WHEN 'direct' THEN 0 ELSE 1 END,
           COALESCE(j.usefulness_score, 0) DESC,
@@ -780,9 +893,13 @@ def inbox(conn: sqlite3.Connection) -> dict[str, object]:
           p.published_at DESC
         LIMIT 100
         """,
+        (PAPER_REPORT_ARTIFACT_TYPE,),
     ).fetchall()
     items = []
     for row in rows:
+        report_content = from_json(row["report_content_json"], {})
+        if not isinstance(report_content, dict):
+            report_content = {}
         items.append(
             {
                 "id": int(row["id"]),
@@ -800,7 +917,7 @@ def inbox(conn: sqlite3.Connection) -> dict[str, object]:
                 "reason": row["reason"],
                 "project_count": int(row["project_count"] or 1),
                 "report_status": row["report_status"] or "",
-                "report_error": row["report_error"] or "",
+                "report_error": report_content.get("error_message") or "",
                 "report_updated_at": row["report_updated_at"],
                 "feedback_status": "",
             }
@@ -809,11 +926,17 @@ def inbox(conn: sqlite3.Connection) -> dict[str, object]:
 
 
 def paper_reports_queue(conn: sqlite3.Connection, limit: int = 300) -> dict[str, object]:
-    sync_project_paper_recommendations(conn)
-    ensure_paper_reports_for_recommendations(conn)
     stats = {"queued": 0, "processing": 0, "done": 0, "failed": 0, "total": 0}
     for row in conn.execute(
-        "SELECT status, COUNT(*) AS count FROM paper_reading_reports WHERE status != 'removed' GROUP BY status"
+        """
+        SELECT status, COUNT(*) AS count
+        FROM artifacts
+        WHERE scope_type = 'paper'
+          AND artifact_type = ?
+          AND status != 'removed'
+        GROUP BY status
+        """,
+        (PAPER_REPORT_ARTIFACT_TYPE,),
     ).fetchall():
         status = str(row["status"] or "")
         count = int(row["count"] or 0)
@@ -822,114 +945,93 @@ def paper_reports_queue(conn: sqlite3.Connection, limit: int = 300) -> dict[str,
     row_limit = max(1, min(int(limit or 300), 1000))
     rows = conn.execute(
         """
-        WITH rec_projects AS (
-          SELECT
-            r.paper_id,
-            COUNT(*) AS project_count,
-            group_concat(DISTINCT r.project_id || '') AS project_ids,
-            group_concat(DISTINCT rp.name) AS project_names,
-            group_concat(DISTINCT r.relation_type) AS relation_types
-          FROM project_paper_recommendations r
-          JOIN research_projects rp ON rp.id = r.project_id
-          WHERE r.state IN ('pending', 'accepted')
-          GROUP BY r.paper_id
-        ),
-        linked_projects AS (
-          SELECT
-            pp.paper_id,
-            COUNT(*) AS project_count,
-            group_concat(DISTINCT pp.project_id || '') AS project_ids,
-            group_concat(DISTINCT rp.name) AS project_names
-          FROM project_papers pp
-          JOIN research_projects rp ON rp.id = pp.project_id
-          WHERE NOT (
-            pp.relation = 'candidate'
-            AND pp.note = 'auto_matched_by_project_context'
-          )
-          GROUP BY pp.paper_id
-        )
         SELECT
-          rr.paper_id,
-          rr.status,
-          rr.model_provider_id,
-          rr.model,
-          rr.report_markdown,
-          rr.error_message,
-          rr.created_at,
-          rr.updated_at,
-          rr.started_at,
-          rr.finished_at,
-          p.arxiv_id,
-          p.title,
-          p.authors_json,
-          p.categories_json,
-          p.published_at,
-          p.link,
-          p.text_status,
-          COALESCE(rp.project_count, 0) AS project_count,
-          COALESCE(rp.project_ids, '') AS project_ids,
-          COALESCE(rp.project_names, '') AS project_names,
-          COALESCE(rp.relation_types, '') AS relation_types,
-          COALESCE(lp.project_count, 0) AS linked_project_count,
-          COALESCE(lp.project_ids, '') AS linked_project_ids,
-          COALESCE(lp.project_names, '') AS linked_project_names
-        FROM paper_reading_reports rr
-        JOIN arxiv_papers p ON p.id = rr.paper_id
-        LEFT JOIN rec_projects rp ON rp.paper_id = rr.paper_id
-        LEFT JOIN linked_projects lp ON lp.paper_id = rr.paper_id
-        WHERE rr.status != 'removed'
+          id, scope_id, status, model_provider_id, model, content_markdown,
+          content_json, source_json, created_at, updated_at
+        FROM artifacts
+        WHERE scope_type = 'paper'
+          AND artifact_type = ?
+          AND status != 'removed'
         ORDER BY
-          CASE rr.status
+          CASE status
             WHEN 'processing' THEN 0
             WHEN 'queued' THEN 1
             WHEN 'failed' THEN 2
             WHEN 'done' THEN 3
             ELSE 4
           END,
-          rr.updated_at DESC,
-          p.published_at DESC
+          updated_at DESC,
+          id DESC
         LIMIT ?
         """,
-        (row_limit,),
+        (PAPER_REPORT_ARTIFACT_TYPE, row_limit),
     ).fetchall()
     items = []
     for row in rows:
-        recommendation_project_ids = _group_concat_ints(row["project_ids"])
-        recommendation_project_names = _group_concat_values(row["project_names"])
-        linked_project_ids = _group_concat_ints(row["linked_project_ids"])
-        linked_project_names = _group_concat_values(row["linked_project_names"])
-        combined_project_ids = _dedupe_list([*linked_project_ids, *recommendation_project_ids])
-        combined_project_names = _dedupe_list([*linked_project_names, *recommendation_project_names])
+        content = from_json(row["content_json"], {})
+        source = from_json(row["source_json"], {})
+        if not isinstance(content, dict):
+            content = {}
+        if not isinstance(source, dict):
+            source = {}
+        paper_id = int(content.get("legacy_arxiv_paper_id") or source.get("legacy_arxiv_paper_id") or 0)
+        if not paper_id:
+            source_row = conn.execute(
+                """
+                SELECT ap.id
+                FROM arxiv_papers ap
+                JOIN paper_sources ps ON ps.source_identifier = ap.arxiv_id
+                WHERE ps.paper_id = ?
+                ORDER BY ap.id
+                LIMIT 1
+                """,
+                (int(row["scope_id"] or 0),),
+            ).fetchone()
+            paper_id = int(source_row["id"]) if source_row else 0
+        if not paper_id:
+            continue
+        paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
+        if not paper:
+            continue
+        source_project_ids = [
+            int(project_id)
+            for project_id in content.get("source_project_ids", [])
+            if str(project_id).strip().isdigit()
+        ]
+        source_project_names = _project_names_for_ids(conn, source_project_ids)
         items.append(
             {
-                "paper_id": int(row["paper_id"]),
-                "id": int(row["paper_id"]),
+                "paper_id": paper_id,
+                "id": paper_id,
+                "artifact_id": int(row["id"]),
                 "status": row["status"],
-                "title": row["title"],
-                "arxiv_id": row["arxiv_id"],
-                "authors": from_json(row["authors_json"], []),
-                "categories": from_json(row["categories_json"], []),
-                "published_at": row["published_at"],
-                "link": row["link"],
-                "text_status": row["text_status"],
-                "project_count": len(combined_project_ids) or len(combined_project_names),
-                "project_ids": combined_project_ids,
-                "project_names": combined_project_names,
-                "recommendation_project_count": int(row["project_count"] or 0),
-                "recommendation_project_ids": recommendation_project_ids,
-                "recommendation_project_names": recommendation_project_names,
-                "linked_project_count": int(row["linked_project_count"] or 0),
-                "linked_project_ids": linked_project_ids,
-                "linked_project_names": linked_project_names,
-                "relation_types": _group_concat_values(row["relation_types"]),
+                "title": paper["title"],
+                "arxiv_id": paper["arxiv_id"],
+                "authors": from_json(paper["authors_json"], []),
+                "categories": from_json(paper["categories_json"], []),
+                "published_at": paper["published_at"],
+                "link": paper["link"],
+                "text_status": paper["text_status"],
+                "project_count": len(source_project_ids),
+                "project_ids": source_project_ids,
+                "project_names": source_project_names,
+                "source_project_ids": source_project_ids,
+                "source_project_names": source_project_names,
+                "recommendation_project_count": 0,
+                "recommendation_project_ids": [],
+                "recommendation_project_names": [],
+                "linked_project_count": 0,
+                "linked_project_ids": [],
+                "linked_project_names": [],
+                "relation_types": [],
                 "model_provider_id": row["model_provider_id"],
                 "model": row["model"],
-                "error_message": row["error_message"],
-                "report_excerpt": clean_unicode(str(row["report_markdown"] or "")).strip()[:500],
+                "error_message": content.get("error_message") or "",
+                "report_excerpt": clean_unicode(str(row["content_markdown"] or "")).strip()[:500],
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
-                "started_at": row["started_at"],
-                "finished_at": row["finished_at"],
+                "started_at": content.get("started_at"),
+                "finished_at": content.get("finished_at"),
             }
         )
     return {
@@ -964,11 +1066,14 @@ def paper_detail(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
           ac.text AS arxiv_text,
           c.heading,
           c.text,
-          n.title AS note_title,
-          n.path AS note_path
+          COALESCE(n.title, kd.title) AS note_title,
+          COALESCE(n.path, kd.source_uri) AS note_path,
+          kd.source_type AS context_source_type,
+          kd.id AS context_document_id
         FROM matches m
         JOIN research_chunks c ON c.id = m.chunk_id
-        JOIN obsidian_notes n ON n.id = c.note_id
+        LEFT JOIN obsidian_notes n ON n.id = c.note_id
+        LEFT JOIN knowledge_documents kd ON kd.id = c.document_id
         LEFT JOIN arxiv_text_chunks ac ON ac.id = m.arxiv_chunk_id
         WHERE m.paper_id = ?
         ORDER BY m.score DESC
@@ -1142,6 +1247,8 @@ def paper_detail(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
                 "text": row["text"],
                 "note_title": row["note_title"],
                 "note_path": row["note_path"],
+                "context_source_type": row["context_source_type"],
+                "context_document_id": int(row["context_document_id"]) if row["context_document_id"] is not None else None,
             }
             for row in evidence_rows
         ],
@@ -1168,6 +1275,12 @@ def save_feedback(conn: sqlite3.Connection, paper_id: int, status: str, note: st
         """,
         (paper_id, status, note, now, now),
     )
+    if status in {"read_later", "favorite"}:
+        set_arxiv_paper_library_status(conn, paper_id, "saved")
+    elif status == "read":
+        set_arxiv_paper_library_status(conn, paper_id, "read")
+    elif status == "not_relevant":
+        set_arxiv_paper_library_status(conn, paper_id, "discarded")
     conn.commit()
     return {"ok": True, "paper_id": paper_id, "status": status}
 
@@ -1184,18 +1297,33 @@ def update_paper_recommendation(
         raw_project_ids = payload.get("project_ids", [])
         project_ids = [int(project_id) for project_id in raw_project_ids] if isinstance(raw_project_ids, list) else []
         importance = str(payload.get("importance") or "").strip().lower()
-        ensure_report_ready_for_paper(conn, settings, paper_id)
         accept_recommendations_for_paper(conn, paper_id, project_ids, importance)
-        sync_result = sync_accepted_paper_to_obsidian(conn, settings, paper_id)
+        library_result = set_arxiv_paper_library_status(conn, paper_id, "reading")
         conn.commit()
+        sync_result: dict[str, object] = {"skipped": True, "reason": "obsidian_not_configured"}
+        if settings.obsidian_vault_path:
+            try:
+                sync_result = sync_accepted_paper_to_obsidian(conn, settings, paper_id)
+                conn.commit()
+            except Exception as exc:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                sync_result = {"skipped": False, "failed": True, "reason": str(exc)}
         detail = paper_detail(conn, paper_id)
         detail["ok"] = True
         detail["sync"] = sync_result
+        detail["library"] = library_result
         return detail
     if action == "discard":
         raw_project_ids = payload.get("project_ids")
         project_ids = [int(project_id) for project_id in raw_project_ids] if isinstance(raw_project_ids, list) else None
         discard_recommendations_for_paper(conn, paper_id, project_ids)
+        try:
+            set_arxiv_paper_library_status(conn, paper_id, "discarded")
+        except RuntimeError:
+            pass
         report_result = sync_paper_report_for_recommendation_state(conn, paper_id)
         conn.commit()
         return {"ok": True, "paper_id": paper_id, "action": "discard", **report_result}
@@ -1219,6 +1347,128 @@ def generate_paper_reading_report(
     detail = paper_detail(conn, paper_id)
     detail["ok"] = True
     detail["paper_report_result"] = result
+    return detail
+
+
+def paper_library(
+    conn: sqlite3.Connection,
+    *,
+    library_status: str | None = None,
+    source_type: str | None = None,
+    project_id: int | None = None,
+    query: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, object]:
+    return list_paper_library(
+        conn,
+        library_status=library_status or None,
+        source_type=source_type or None,
+        project_id=project_id,
+        query=query,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+        offset=offset,
+    )
+
+
+def library_paper_detail(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
+    detail = paper_library_detail(conn, paper_id)
+    legacy_paper_id = detail.get("legacy_arxiv_paper_id")
+    detail["paper_report"] = paper_report_payload(conn, int(legacy_paper_id)) if legacy_paper_id else None
+    return detail
+
+
+def update_library_paper_status(
+    conn: sqlite3.Connection,
+    paper_id: int,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    status = clean_unicode(str(payload.get("status") or payload.get("library_status") or "")).strip()
+    if not status:
+        raise RuntimeError("status is required")
+    tags = payload.get("user_tags")
+    tag_list = [str(item) for item in tags] if isinstance(tags, list) else None
+    result = set_library_status(
+        conn,
+        paper_id,
+        status,
+        user_note=clean_unicode(str(payload.get("user_note") or "")) if "user_note" in payload else None,
+        user_tags=tag_list,
+    )
+    conn.commit()
+    detail = library_paper_detail(conn, paper_id)
+    detail.update(result)
+    return detail
+
+
+def artifacts_index(
+    conn: sqlite3.Connection,
+    *,
+    scope_type: str | None = None,
+    scope_id: int | None = None,
+    artifact_type: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+) -> dict[str, object]:
+    return list_artifacts(
+        conn,
+        scope_type=scope_type or None,
+        scope_id=scope_id,
+        artifact_type=artifact_type or None,
+        status=status or None,
+        limit=limit,
+    )
+
+
+def artifact_detail(conn: sqlite3.Connection, artifact_id: int) -> dict[str, object]:
+    artifact = get_artifact(conn, artifact_id)
+    if not artifact:
+        raise RuntimeError(f"Artifact not found: {artifact_id}")
+    return {"artifact": artifact}
+
+
+def export_artifact(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    artifact_id: int,
+    payload: dict[str, object] | None = None,
+) -> dict[str, object]:
+    payload = payload or {}
+    result = export_artifact_to_obsidian(
+        conn,
+        settings,
+        artifact_id,
+        relative_path=clean_unicode(str(payload.get("relative_path") or "")).strip() or None,
+    )
+    conn.commit()
+    return {"ok": True, "export": result, "artifact": get_artifact(conn, artifact_id)}
+
+
+def generate_project_index(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    project_id: int,
+    payload: dict[str, object] | None = None,
+) -> dict[str, object]:
+    payload = payload or {}
+    artifact = generate_project_index_artifact(conn, project_id)
+    export = None
+    if bool(payload.get("export_to_obsidian")):
+        export = export_artifact_to_obsidian(
+            conn,
+            settings,
+            int(artifact["id"]),
+            relative_path=clean_unicode(str(payload.get("relative_path") or "")).strip() or None,
+        )
+    conn.commit()
+    detail = project_detail(conn, project_id)
+    detail["generated_artifact"] = artifact
+    if export:
+        detail["export"] = export
     return detail
 
 
@@ -1252,6 +1502,25 @@ def job_history(conn: sqlite3.Connection, limit: int = 20) -> dict[str, object]:
 
 def health(conn: sqlite3.Connection, settings: Settings) -> dict[str, object]:
     def count(table: str) -> int:
+        if getattr(conn, "dialect", "") == "postgres":
+            exists = conn.execute(
+                """
+                SELECT table_name AS name
+                FROM information_schema.tables
+                WHERE table_schema = current_schema()
+                  AND table_name = ?
+                """,
+                (table,),
+            ).fetchone()
+            if not exists:
+                return 0
+        else:
+            exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table,),
+            ).fetchone()
+            if not exists:
+                return 0
         return int(conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()["count"])
 
     latest_job = conn.execute(
@@ -1265,10 +1534,11 @@ def health(conn: sqlite3.Connection, settings: Settings) -> dict[str, object]:
     vault = settings.obsidian_vault_path
     vault_path = str(vault or "")
     vault_exists = bool(vault and Path(vault).exists())
+    database = database_target(conn, settings.db_path)
     return {
         "database": {
             "ok": True,
-            "path": str(settings.db_path),
+            **database,
         },
         "obsidian": {
             "configured": bool(vault),
@@ -1299,21 +1569,36 @@ def health(conn: sqlite3.Connection, settings: Settings) -> dict[str, object]:
         },
         "counts": {
             "notes": count("obsidian_notes"),
+            "knowledge_documents": count("knowledge_documents"),
             "projects": count("research_projects"),
-            "project_artifacts": count("project_artifacts"),
+            "artifacts": count("artifacts"),
+            "legacy_project_artifacts": count("project_artifacts"),
             "project_paper_matches": count("project_paper_matches"),
             "project_paper_judgments": count("project_paper_judgments"),
             "project_paper_recommendations": count("project_paper_recommendations"),
-            "paper_reading_reports": count("paper_reading_reports"),
+            "paper_report_artifacts": int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM artifacts
+                    WHERE scope_type = 'paper'
+                      AND artifact_type = ?
+                    """,
+                    (PAPER_REPORT_ARTIFACT_TYPE,),
+                ).fetchone()["count"]
+            ),
+            "legacy_paper_reading_reports": count("paper_reading_reports"),
             "chunks": count("research_chunks"),
-            "papers": count("arxiv_papers"),
+            "papers": count("papers"),
+            "arxiv_papers": count("arxiv_papers"),
             "paper_embeddings": count("arxiv_paper_embeddings"),
             "paper_texts": int(
                 conn.execute(
                     "SELECT COUNT(*) AS count FROM arxiv_papers WHERE text_status = 'complete'"
                 ).fetchone()["count"]
             ),
-            "paper_chunks": count("arxiv_text_chunks"),
+            "paper_chunks": count("paper_chunks"),
+            "legacy_paper_chunks": count("arxiv_text_chunks"),
             "paper_chunk_embeddings": count("arxiv_chunk_embeddings"),
             "prefilter_runs": count("paper_prefilter_runs"),
             "matches": count("matches"),

@@ -6,16 +6,21 @@ from typing import Any, Iterable
 
 IDENTITY_TABLES = {
     "obsidian_notes",
+    "knowledge_documents",
     "research_chunks",
     "arxiv_papers",
     "arxiv_text_chunks",
+    "papers",
+    "paper_sources",
+    "paper_assets",
+    "paper_chunks",
     "paper_prefilter_runs",
     "matches",
     "user_feedback",
     "job_runs",
     "research_projects",
     "paper_reader_messages",
-    "project_artifacts",
+    "artifacts",
 }
 
 REPLACE_KEYS = {
@@ -25,13 +30,19 @@ REPLACE_KEYS = {
 }
 
 TABLE_ORDER = [
+    "knowledge_documents",
     "obsidian_notes",
     "arxiv_papers",
     "arxiv_paper_tombstones",
+    "papers",
+    "paper_sources",
+    "paper_assets",
     "research_projects",
+    "project_context_documents",
     "research_chunks",
     "chunk_embeddings",
     "arxiv_text_chunks",
+    "paper_chunks",
     "arxiv_chunk_embeddings",
     "arxiv_paper_embeddings",
     "paper_prefilter_runs",
@@ -46,10 +57,9 @@ TABLE_ORDER = [
     "project_paper_matches",
     "project_paper_judgments",
     "project_paper_recommendations",
-    "paper_reading_reports",
     "paper_reader_messages",
     "project_notes",
-    "project_artifacts",
+    "artifacts",
 ]
 
 

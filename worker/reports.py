@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
+from .artifacts import content_hash, export_artifact_to_obsidian, upsert_artifact
 from .db import clean_unicode, from_json, to_json, utc_now
 from .llm import (
     PROJECT_JUDGMENT_REPORT_CONFIDENCE_THRESHOLD,
@@ -78,6 +79,10 @@ def _resolve_daily_report_path(settings: Settings, report_date: str) -> tuple[Pa
     except ValueError as exc:
         raise RuntimeError("Daily report path must be inside the configured vault") from exc
     return target, rel_path
+
+
+def _daily_report_relative_path(report_date: str) -> str:
+    return (DAILY_REPORT_DIR / f"{_safe_filename(report_date)}.md").as_posix()
 
 
 def _project_match_rows(
@@ -342,15 +347,14 @@ def generate_daily_report(
     stats: dict[str, Any] | None = None,
     paper_ids: list[int] | None = None,
     limit: int | None = None,
+    export_to_obsidian: bool | None = None,
 ) -> dict[str, object]:
-    if not settings.obsidian_vault_path:
-        raise RuntimeError("Obsidian vault path is not configured")
     stats = clean_unicode(stats or {})
     report_date = date.today().isoformat()
     row_limit = limit or DAILY_REPORT_LIMIT
     project_rows = _project_match_rows(conn, paper_ids, row_limit)
     global_rows = _global_match_rows(conn, paper_ids, row_limit)
-    target, rel_path = _resolve_daily_report_path(settings, report_date)
+    rel_path = _daily_report_relative_path(report_date)
     body = _llm_daily_report_markdown(
         settings,
         report_date,
@@ -359,14 +363,39 @@ def generate_daily_report(
         project_rows,
         global_rows,
     )
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(_frontmatter(report_date) + body, encoding="utf-8")
+    source_payload = _report_source_payload(report_date, rel_path, stats, project_rows, global_rows)
+    artifact = upsert_artifact(
+        conn,
+        scope_type="system",
+        scope_id=None,
+        artifact_type="daily_report",
+        title=f"{report_date} 科研情报日报",
+        content_markdown=body,
+        content_json={"frontmatter": {"date": report_date, "source": "research_intelligence_system"}},
+        status="ready",
+        source_json=source_payload,
+        source_key=f"daily_report:{report_date}",
+        model_provider_id=settings.llm_chat_provider_id,
+        model=settings.llm_chat_model,
+        input_hash=content_hash(body, source_payload),
+    )
+    exported_path = ""
+    export_enabled = bool(settings.obsidian_vault_path) if export_to_obsidian is None else bool(export_to_obsidian)
+    if export_enabled:
+        try:
+            exported = export_artifact_to_obsidian(conn, settings, int(artifact["id"]), relative_path=rel_path)
+            exported_path = str(exported.get("path") or "")
+        except RuntimeError:
+            if export_to_obsidian:
+                raise
     return {
         "reports_considered": len(project_rows) + len(global_rows),
         "reports_created": 1,
         "reports_failed": 0,
         "daily_reports_created": 1,
-        "daily_report_path": rel_path,
+        "daily_report_artifact_id": int(artifact["id"]),
+        "daily_report_path": exported_path,
+        "daily_report_exported": bool(exported_path),
         "daily_report_mode": "llm",
         "daily_report_project_matches": len(project_rows),
         "daily_report_global_papers": len(global_rows),

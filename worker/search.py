@@ -15,6 +15,9 @@ from .embeddings import (
     ensure_arxiv_paper_embeddings,
     ensure_missing_arxiv_chunk_embeddings,
 )
+from .pgvector_search import ensure_pgvector_indexes, pgvector_embedding_search
+from .project_match_cache import ProjectMatchCache, load_project_match_cache
+from .project_match_policy import ProjectPaperMatchEarlyStopper
 from .project_status import run_daily_project_status_sql
 
 TOKEN_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_\-]{2,}")
@@ -74,9 +77,21 @@ def _chunks(
 ) -> list[sqlite3.Row]:
     rows = conn.execute(
         """
-        SELECT c.id, c.chunk_index, c.heading, c.text, n.title AS note_title, n.path AS note_path
+        SELECT
+          c.id,
+          c.note_id,
+          c.document_id,
+          c.chunk_index,
+          c.heading,
+          c.text,
+          COALESCE(n.title, kd.title, '') AS note_title,
+          COALESCE(n.path, kd.source_uri, '') AS note_path,
+          kd.title AS document_title,
+          kd.source_type AS source_type,
+          kd.source_uri AS source_uri
         FROM research_chunks c
-        JOIN obsidian_notes n ON n.id = c.note_id
+        LEFT JOIN obsidian_notes n ON n.id = c.note_id
+        LEFT JOIN knowledge_documents kd ON kd.id = c.document_id
         """
     ).fetchall()
     allowed = _chunk_id_set(chunk_ids)
@@ -160,30 +175,7 @@ def embedding_search_with_vector(
     return sorted(hits, key=lambda hit: hit.score, reverse=True)
 
 
-def hybrid_search(conn: sqlite3.Connection, settings: Settings, query: str, top_k: int) -> list[dict[str, object]]:
-    return hybrid_search_with_embedding(conn, settings, query, top_k, None)
-
-
-def hybrid_search_with_embedding(
-    conn: sqlite3.Connection,
-    settings: Settings,
-    query: str,
-    top_k: int,
-    query_embedding: list[float] | None,
-    chunk_ids: set[int] | list[int] | tuple[int, ...] | None = None,
-) -> list[dict[str, object]]:
-    searcher_hits: list[list[SearchHit]] = []
-    for searcher in settings.rag_searchers:
-        if searcher == "embedding_search":
-            if query_embedding is not None:
-                searcher_hits.append(embedding_search_with_vector(conn, query_embedding, chunk_ids))
-            else:
-                searcher_hits.append(embedding_search(conn, settings, query, chunk_ids))
-        elif searcher == "keyword_search":
-            searcher_hits.append(keyword_search(conn, query, chunk_ids))
-        elif searcher == "front_page_search":
-            searcher_hits.append(front_page_search(conn, query, chunk_ids))
-
+def _fuse_search_hits(searcher_hits: list[list[SearchHit]], top_k: int) -> list[dict[str, object]]:
     fused: dict[int, float] = defaultdict(float)
     details: dict[int, list[dict[str, object]]] = defaultdict(list)
     for hits in searcher_hits:
@@ -211,15 +203,124 @@ def hybrid_search_with_embedding(
     ]
 
 
+def hybrid_search(conn: sqlite3.Connection, settings: Settings, query: str, top_k: int) -> list[dict[str, object]]:
+    return hybrid_search_with_embedding(conn, settings, query, top_k, None)
+
+
+def hybrid_search_with_embedding(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    query: str,
+    top_k: int,
+    query_embedding: list[float] | None,
+    chunk_ids: set[int] | list[int] | tuple[int, ...] | None = None,
+) -> list[dict[str, object]]:
+    searcher_hits: list[list[SearchHit]] = []
+    for searcher in settings.rag_searchers:
+        if searcher == "embedding_search":
+            if query_embedding is not None:
+                searcher_hits.append(embedding_search_with_vector(conn, query_embedding, chunk_ids))
+            else:
+                searcher_hits.append(embedding_search(conn, settings, query, chunk_ids))
+        elif searcher == "keyword_search":
+            searcher_hits.append(keyword_search(conn, query, chunk_ids))
+        elif searcher == "front_page_search":
+            searcher_hits.append(front_page_search(conn, query, chunk_ids))
+
+    return _fuse_search_hits(searcher_hits, top_k)
+
+
+def _cached_keyword_search(cache: ProjectMatchCache, query: str) -> list[SearchHit]:
+    query_terms = set(tokenize(query))
+    if not query_terms:
+        return []
+    hits: list[SearchHit] = []
+    for chunk in cache.records_for_keyword_search():
+        overlap = query_terms & chunk.token_set
+        if not overlap:
+            continue
+        score = len(overlap) / max(len(query_terms), 1)
+        hits.append(SearchHit(int(chunk.id), score, "keyword_search"))
+    return sorted(hits, key=lambda hit: hit.score, reverse=True)
+
+
+def _cached_front_page_search(cache: ProjectMatchCache, query: str) -> list[SearchHit]:
+    query_terms = set(tokenize(query))
+    if not query_terms:
+        return []
+    hits: list[SearchHit] = []
+    for chunk in cache.records_for_front_page_search():
+        overlap = query_terms & chunk.token_set
+        if not overlap:
+            continue
+        position_bonus = 1.0 / (1 + int(chunk.chunk_index))
+        score = (len(overlap) / max(len(query_terms), 1)) * 0.7 + position_bonus * 0.3
+        hits.append(SearchHit(int(chunk.id), score, "front_page_search"))
+    return sorted(hits, key=lambda hit: hit.score, reverse=True)
+
+
+def _project_embedding_search_with_vector(
+    conn: sqlite3.Connection,
+    query_embedding: list[float] | None,
+    chunk_ids: set[int] | frozenset[int],
+    top_k: int,
+) -> list[SearchHit]:
+    if query_embedding is None:
+        return []
+    pgvector_hits = pgvector_embedding_search(
+        conn,
+        query_embedding,
+        chunk_ids,
+        max(top_k * 4, top_k),
+    )
+    if pgvector_hits:
+        return [
+            SearchHit(int(hit.chunk_id), float(hit.score), hit.searcher)
+            for hit in pgvector_hits
+            if float(hit.score) > 0
+        ]
+    return embedding_search_with_vector(conn, query_embedding, chunk_ids)
+
+
+def _hybrid_search_project_cache(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    query: str,
+    top_k: int,
+    query_embedding: list[float] | None,
+    cache: ProjectMatchCache,
+) -> list[dict[str, object]]:
+    searcher_hits: list[list[SearchHit]] = []
+    for searcher in settings.rag_searchers:
+        if searcher == "embedding_search":
+            if query_embedding is not None:
+                searcher_hits.append(
+                    _project_embedding_search_with_vector(conn, query_embedding, cache.chunk_ids, top_k)
+                )
+            else:
+                searcher_hits.append(embedding_search(conn, settings, query, cache.chunk_ids))
+        elif searcher == "keyword_search":
+            searcher_hits.append(_cached_keyword_search(cache, query))
+        elif searcher == "front_page_search":
+            searcher_hits.append(_cached_front_page_search(cache, query))
+
+    return _fuse_search_hits(searcher_hits, top_k)
+
+
 def _project_chunk_ids(conn: sqlite3.Connection, project_id: int) -> set[int]:
     rows = conn.execute(
         """
+        SELECT c.id
+        FROM project_context_documents pcd
+        JOIN research_chunks c ON c.document_id = pcd.document_id
+        WHERE pcd.project_id = ?
+        UNION
         SELECT c.id
         FROM project_notes pn
         JOIN research_chunks c ON c.note_id = pn.note_id
         WHERE pn.project_id = ?
         """,
-        (project_id,),
+        (project_id, project_id),
     ).fetchall()
     return {int(row["id"]) for row in rows}
 
@@ -227,13 +328,41 @@ def _project_chunk_ids(conn: sqlite3.Connection, project_id: int) -> set[int]:
 def _project_chunks_by_id(conn: sqlite3.Connection, project_id: int) -> dict[int, sqlite3.Row]:
     rows = conn.execute(
         """
-        SELECT c.id, c.heading, c.text, n.title AS note_title, n.path AS note_path
+        SELECT
+          c.id,
+          c.note_id,
+          c.document_id,
+          c.heading,
+          c.text,
+          COALESCE(n.title, kd.title, '') AS note_title,
+          COALESCE(n.path, kd.source_uri, '') AS note_path,
+          kd.title AS document_title,
+          kd.source_type AS source_type,
+          kd.source_uri AS source_uri
+        FROM project_context_documents pcd
+        JOIN research_chunks c ON c.document_id = pcd.document_id
+        LEFT JOIN knowledge_documents kd ON kd.id = c.document_id
+        LEFT JOIN obsidian_notes n ON n.id = c.note_id
+        WHERE pcd.project_id = ?
+        UNION
+        SELECT
+          c.id,
+          c.note_id,
+          c.document_id,
+          c.heading,
+          c.text,
+          COALESCE(n.title, kd.title, '') AS note_title,
+          COALESCE(n.path, kd.source_uri, '') AS note_path,
+          kd.title AS document_title,
+          kd.source_type AS source_type,
+          kd.source_uri AS source_uri
         FROM project_notes pn
         JOIN research_chunks c ON c.note_id = pn.note_id
-        JOIN obsidian_notes n ON n.id = c.note_id
+        LEFT JOIN knowledge_documents kd ON kd.id = c.document_id
+        LEFT JOIN obsidian_notes n ON n.id = c.note_id
         WHERE pn.project_id = ?
         """,
-        (project_id,),
+        (project_id, project_id),
     ).fetchall()
     return {int(row["id"]): row for row in rows}
 
@@ -290,6 +419,22 @@ def _project_match_evidence(hit: dict[str, object]) -> dict[str, object]:
         "arxiv_page_start": hit["arxiv_page_start"],
         "arxiv_page_end": hit["arxiv_page_end"],
         "arxiv_text": str(hit["arxiv_text"])[:1600],
+        "project_context": hit.get("project_context", {}),
+    }
+
+
+def _project_context_evidence(chunk: sqlite3.Row | None) -> dict[str, object]:
+    if not chunk:
+        return {}
+    return {
+        "chunk_id": int(chunk["id"]),
+        "document_id": int(chunk["document_id"]) if chunk["document_id"] is not None else None,
+        "note_id": int(chunk["note_id"]) if chunk["note_id"] is not None else None,
+        "source_type": chunk["source_type"] or "obsidian",
+        "source_uri": chunk["source_uri"] or chunk["note_path"] or "",
+        "title": chunk["document_title"] or chunk["note_title"] or "",
+        "heading": chunk["heading"] or "",
+        "text": str(chunk["text"] or "")[:1600],
     }
 
 
@@ -551,6 +696,15 @@ def rank_project_papers(
     paper_ids = [int(paper["id"]) for paper in papers]
     chunk_result = ensure_arxiv_chunks(conn, paper_ids=paper_ids)
     embedding_result = ensure_missing_arxiv_chunk_embeddings(conn, settings, paper_ids=paper_ids)
+    try:
+        pgvector_result = ensure_pgvector_indexes(conn)
+    except Exception as exc:
+        pgvector_result = {
+            "supported": False,
+            "reason": "init_failed",
+            "index_method": None,
+            "error": str(exc)[:500],
+        }
     projects = conn.execute(
         f"""
         SELECT id, name
@@ -563,14 +717,16 @@ def rank_project_papers(
     projects_with_context = 0
     papers_considered = 0
     arxiv_chunks_scored = 0
+    arxiv_chunks_skipped_by_early_stop = 0
+    project_paper_scan_early_stops = 0
     project_paper_matches_created = 0
 
     for project in projects:
         projects_considered += 1
         project_id = int(project["id"])
-        project_chunks = _project_chunks_by_id(conn, project_id)
-        project_chunk_ids = set(project_chunks)
-        if not project_chunk_ids:
+        project_cache = load_project_match_cache(conn, project_id, tokenize)
+        project_chunks = project_cache.chunks_by_id
+        if not project_cache.chunk_ids:
             continue
         projects_with_context += 1
         for paper in papers:
@@ -585,7 +741,8 @@ def rank_project_papers(
                 (int(paper["id"]),),
             ).fetchall()
             best_by_obsidian_chunk: dict[int, dict[str, object]] = {}
-            for arxiv_chunk in arxiv_chunks:
+            early_stopper = ProjectPaperMatchEarlyStopper()
+            for chunk_position, arxiv_chunk in enumerate(arxiv_chunks, start=1):
                 arxiv_chunks_scored += 1
                 query_embedding = ensure_arxiv_chunk_embedding(
                     conn,
@@ -593,14 +750,15 @@ def rank_project_papers(
                     int(arxiv_chunk["id"]),
                     arxiv_chunk["text"],
                 )
-                hits = hybrid_search_with_embedding(
+                hits = _hybrid_search_project_cache(
                     conn,
                     settings,
                     arxiv_chunk["text"],
                     settings.rag_top_k,
                     query_embedding,
-                    project_chunk_ids,
+                    project_cache,
                 )
+                accepted_hits: list[dict[str, object]] = []
                 for hit in hits:
                     obsidian_chunk_id = int(hit["chunk_id"])
                     raw_quality_score = float(hit.get("quality_score") or hit.get("score") or 0)
@@ -617,6 +775,7 @@ def rank_project_papers(
                         "quality_score": quality_score,
                         "raw_quality_score": raw_quality_score,
                         "generic_chunk_penalty": generic_penalty,
+                        "project_context": _project_context_evidence(project_chunks.get(obsidian_chunk_id)),
                         "arxiv_chunk_id": int(arxiv_chunk["id"]),
                         "arxiv_chunk_index": int(arxiv_chunk["chunk_index"]),
                         "arxiv_chunk_source": arxiv_chunk["source"],
@@ -624,6 +783,12 @@ def rank_project_papers(
                         "arxiv_page_end": arxiv_chunk["page_end"],
                         "arxiv_text": arxiv_chunk["text"],
                     }
+                    accepted_hits.append(best_by_obsidian_chunk[obsidian_chunk_id])
+                early_stop_decision = early_stopper.record_arxiv_chunk(accepted_hits)
+                if early_stop_decision.should_stop:
+                    project_paper_scan_early_stops += 1
+                    arxiv_chunks_skipped_by_early_stop += max(0, len(arxiv_chunks) - chunk_position)
+                    break
             ranked_hits = sorted(
                 best_by_obsidian_chunk.values(),
                 key=lambda hit: (float(hit["quality_score"]), float(hit.get("rank_score") or 0)),
@@ -648,6 +813,7 @@ def rank_project_papers(
                     "rank_score": round(float(hit.get("rank_score") or 0), 6),
                     "quality_score": round(float(hit["quality_score"]), 6),
                     "searchers": hit["searchers"],
+                    "project_context": hit.get("project_context", {}),
                 }
                 for hit in ranked_hits
             ]
@@ -702,6 +868,11 @@ def rank_project_papers(
     maintenance_result = {
         **{f"project_rank_{key}": value for key, value in chunk_result.items()},
         **{f"project_rank_{key}": value for key, value in embedding_result.items()},
+        "project_rank_pgvector_supported": 1 if pgvector_result.get("supported") else 0,
+        "project_rank_pgvector_index_method": str(pgvector_result.get("index_method") or ""),
+        "project_rank_pgvector_error": str(
+            pgvector_result.get("error") or pgvector_result.get("index_error") or ""
+        )[:500],
     }
     return {
         **maintenance_result,
@@ -709,6 +880,8 @@ def rank_project_papers(
         "project_rank_projects_with_context": projects_with_context,
         "project_rank_papers_considered": papers_considered,
         "project_rank_arxiv_chunks_scored": arxiv_chunks_scored,
+        "project_rank_arxiv_chunks_skipped_by_early_stop": arxiv_chunks_skipped_by_early_stop,
+        "project_rank_paper_scan_early_stops": project_paper_scan_early_stops,
         "project_paper_matches_created": project_paper_matches_created,
         "project_papers_linked": 0,
     }

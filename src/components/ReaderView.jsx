@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api, fmtDate, postJson } from "../lib/dashboard.js";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
+import { InlineLoader, LoadingPanel } from "./Loading.jsx";
 
 const REPORT_STATUS_LABELS = {
   queued: "排队",
@@ -226,7 +227,7 @@ function ReaderRow({ active, deleting, item, onDelete, onSelect }) {
       <div className="report-row-actions">
         <span className={`status-pill report-status-${item.status}`}>{reportStatusLabel(item.status)}</span>
         <button
-          className="danger queue-delete-button"
+          className={`danger queue-delete-button ${deleting ? "is-busy" : ""}`}
           disabled={!canDelete || deleting}
           onClick={(event) => {
             event.stopPropagation();
@@ -235,7 +236,7 @@ function ReaderRow({ active, deleting, item, onDelete, onSelect }) {
           title={canDelete ? "从报告队列删除" : "生成中的报告不能删除"}
           type="button"
         >
-          {deleting ? "删除中" : "删除"}
+          {deleting ? <InlineLoader compact label="删除中" /> : "删除"}
         </button>
       </div>
     </article>
@@ -629,7 +630,7 @@ function ReaderDetail({
                 <p>{selectedText.length > 260 ? `${selectedText.slice(0, 260)}...` : selectedText}</p>
                 <div className="reader-followups-actions">
                   <button disabled={generatingQuestions || busy} onClick={generateQuestions} type="button">
-                    {generatingQuestions ? "生成中" : "生成追问"}
+                    {generatingQuestions ? <InlineLoader compact label="生成中" /> : "生成追问"}
                   </button>
                 </div>
                 {questionError ? <div className="error-line">{questionError}</div> : null}
@@ -672,7 +673,9 @@ function ReaderDetail({
                   placeholder="针对这篇论文提问..."
                   value={message}
                 />
-                <button disabled={busy || !message.trim()} type="submit">{busy ? "发送中" : "发送"}</button>
+                <button className={busy ? "is-busy" : undefined} disabled={busy || !message.trim()} type="submit">
+                  {busy ? <InlineLoader compact label="发送中" /> : "发送"}
+                </button>
               </form>
             </div>
           </section>
@@ -715,7 +718,7 @@ function ReaderDetail({
   );
 }
 
-export function ReaderView({ setStatusMessage }) {
+export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, targetPaperKey }) {
   const [items, setItems] = useState([]);
   const [stats, setStats] = useState({});
   const [queueStatus, setQueueStatus] = useState({});
@@ -728,6 +731,7 @@ export function ReaderView({ setStatusMessage }) {
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [busy, setBusy] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [importOpen, setImportOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState("all");
   const [pendingUser, setPendingUser] = useState(null);
@@ -789,12 +793,18 @@ export function ReaderView({ setStatusMessage }) {
     setItems(nextItems);
     setStats(data.stats || {});
     setQueueStatus(statusData.scheduler?.paper_report_queue || {});
+    const routePaperId = Number(targetPaperId || 0);
+    if (routePaperId) {
+      await loadPaper(routePaperId);
+      return;
+    }
     const currentActiveId = activePaperIdRef.current;
     const activeStillExists = currentActiveId && nextItems.some((item) => item.paper_id === currentActiveId);
     const nextId = activeStillExists
       ? currentActiveId
       : nextItems[0]?.paper_id;
     if (nextId) {
+      onSelectPaper?.(nextId, { replace: true });
       await loadPaper(nextId, { setActive: !activeStillExists });
     } else {
       detailRequestRef.current += 1;
@@ -802,7 +812,7 @@ export function ReaderView({ setStatusMessage }) {
       setDetail(null);
       setActivePaperId(null);
     }
-  }, [loadPaper]);
+  }, [loadPaper, onSelectPaper, targetPaperId]);
 
   const loadReaderSettings = useCallback(async () => {
     const data = await api("/api/settings");
@@ -815,14 +825,33 @@ export function ReaderView({ setStatusMessage }) {
   }, []);
 
   useEffect(() => {
-    refresh().catch((error) => setStatusMessage(error.message));
-    loadReaderSettings().catch((error) => setStatusMessage(error.message));
-    loadProjects().catch((error) => setStatusMessage(error.message));
+    let cancelled = false;
+    Promise.all([
+      refresh().catch((error) => setStatusMessage(error.message)),
+      loadReaderSettings().catch((error) => setStatusMessage(error.message)),
+      loadProjects().catch((error) => setStatusMessage(error.message))
+    ]).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
     const timer = setInterval(() => {
       refresh().catch((error) => setStatusMessage(error.message));
     }, 3000);
-    return () => clearInterval(timer);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
   }, [loadProjects, loadReaderSettings, refresh, setStatusMessage]);
+
+  useEffect(() => {
+    const numericPaperId = Number(targetPaperId || 0);
+    if (!numericPaperId) return;
+    setStatusFilter("all");
+    loadPaper(numericPaperId)
+      .then((data) => {
+        if (data) setStatusMessage("已打开对应全文报告");
+      })
+      .catch((error) => setStatusMessage(error.message));
+  }, [loadPaper, setStatusMessage, targetPaperId, targetPaperKey]);
 
   async function generateReport(paperId, force = false) {
     setBusy(true);
@@ -1042,7 +1071,10 @@ export function ReaderView({ setStatusMessage }) {
       setStatusMessage(`URL 导入完成：${data.imported?.length || 0} 篇，失败 ${data.errors?.length || 0} 篇`);
       await refresh();
       const firstId = data.imported?.[0]?.paper_id;
-      if (firstId) await loadPaper(firstId);
+      if (firstId) {
+        if (onSelectPaper) onSelectPaper(firstId);
+        else await loadPaper(firstId);
+      }
     } catch (error) {
       setStatusMessage(error.message);
     } finally {
@@ -1070,7 +1102,10 @@ export function ReaderView({ setStatusMessage }) {
       setStatusMessage(`PDF 导入完成：${data.imported?.length || 0} 篇，失败 ${data.errors?.length || 0} 篇`);
       await refresh();
       const firstId = data.imported?.[0]?.paper_id || data.last_detail?.paper?.id;
-      if (firstId) await loadPaper(firstId);
+      if (firstId) {
+        if (onSelectPaper) onSelectPaper(firstId);
+        else await loadPaper(firstId);
+      }
     } catch (error) {
       setStatusMessage(error.message);
     } finally {
@@ -1118,7 +1153,9 @@ export function ReaderView({ setStatusMessage }) {
                 value={urls}
               />
             </label>
-            <button disabled={importBusy || !urls.trim()} type="submit">导入 URL</button>
+            <button className={importBusy ? "is-busy" : undefined} disabled={importBusy || !urls.trim()} type="submit">
+              {importBusy ? <InlineLoader compact label="导入中" /> : "导入 URL"}
+            </button>
           </form>
           <form className="reader-import-block" onSubmit={submitPdf}>
             <label>
@@ -1131,8 +1168,8 @@ export function ReaderView({ setStatusMessage }) {
                 type="file"
               />
             </label>
-            <button disabled={importBusy || !selectedFiles.length} type="submit">
-              导入 PDF{selectedFiles.length ? ` (${selectedFiles.length})` : ""}
+            <button className={importBusy ? "is-busy" : undefined} disabled={importBusy || !selectedFiles.length} type="submit">
+              {importBusy ? <InlineLoader compact label="导入中" /> : `导入 PDF${selectedFiles.length ? ` (${selectedFiles.length})` : ""}`}
             </button>
           </form>
         </div>
@@ -1143,19 +1180,27 @@ export function ReaderView({ setStatusMessage }) {
           <header className="queue-list-header">
             <div>
               <h2>队列列表</h2>
-              <p className="muted">{visibleItems.length} / {items.length} 篇</p>
+              <p className="muted">{loading ? "读取中" : `${visibleItems.length} / ${items.length} 篇`}</p>
             </div>
             <span className="stat-pill">当前：{REPORT_FILTERS.find(([value]) => value === statusFilter)?.[1] || "全部"}</span>
           </header>
           <div className="report-list">
-            {visibleItems.length ? visibleItems.map((item) => (
+            {loading ? (
+              <LoadingPanel compact rows={8} title="读取队列列表" />
+            ) : visibleItems.length ? visibleItems.map((item) => (
               <ReaderRow
                 active={item.paper_id === activePaperId}
                 deleting={deletingReportId === item.paper_id}
                 item={item}
                 key={item.paper_id}
                 onDelete={(paperId) => deleteReport(paperId)}
-                onSelect={(paperId) => loadPaper(paperId).catch((error) => setStatusMessage(error.message))}
+                onSelect={(paperId) => {
+                  if (onSelectPaper) {
+                    onSelectPaper(paperId);
+                    return;
+                  }
+                  loadPaper(paperId).catch((error) => setStatusMessage(error.message));
+                }}
               />
             )) : (
               <div className="queue-empty-state">
@@ -1168,29 +1213,33 @@ export function ReaderView({ setStatusMessage }) {
         </section>
 
         <section className="detail-panel" aria-label="报告队列详情">
-          <ReaderDetail
-            activeTab={activeTab}
-            busy={busy}
-            chatSettings={readerSettings}
-            deletingMessageId={deletingMessageId}
-            detail={detail}
-            displayedMessages={displayedMessages}
-            linkingProject={linkingProjectPaperId === detail?.paper?.id}
-            message={message}
-            onChatModelChange={changeReaderChatModel}
-            onCancel={cancelReport}
-            onDeleteMessage={deleteMessage}
-            onGenerate={generateReport}
-            onProjectLink={linkPaperToProject}
-            onRetry={retryReport}
-            onSave={saveToObsidian}
-            onSendQuestion={(question) => sendReaderMessage(question, { restoreOnFailure: false })}
-            onSendMessage={sendMessage}
-            onTabChange={setActiveTab}
-            projects={projects}
-            savingChatModel={savingChatModel}
-            setMessage={setMessage}
-          />
+          {loading ? (
+            <LoadingPanel description="正在读取报告详情、阅读设置和项目关联。" rows={8} title="读取报告详情" />
+          ) : (
+            <ReaderDetail
+              activeTab={activeTab}
+              busy={busy}
+              chatSettings={readerSettings}
+              deletingMessageId={deletingMessageId}
+              detail={detail}
+              displayedMessages={displayedMessages}
+              linkingProject={linkingProjectPaperId === detail?.paper?.id}
+              message={message}
+              onChatModelChange={changeReaderChatModel}
+              onCancel={cancelReport}
+              onDeleteMessage={deleteMessage}
+              onGenerate={generateReport}
+              onProjectLink={linkPaperToProject}
+              onRetry={retryReport}
+              onSave={saveToObsidian}
+              onSendQuestion={(question) => sendReaderMessage(question, { restoreOnFailure: false })}
+              onSendMessage={sendMessage}
+              onTabChange={setActiveTab}
+              projects={projects}
+              savingChatModel={savingChatModel}
+              setMessage={setMessage}
+            />
+          )}
         </section>
       </div>
     </section>

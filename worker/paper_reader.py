@@ -11,10 +11,12 @@ import re
 from .config import Settings
 from .arxiv_text import download_pdf, extract_pdf_text_to_file, replace_arxiv_chunks_for_paper
 from .db import clean_unicode, to_json, utc_now
+from .papers import upsert_imported_paper
 from .paper_reports import (
     _call_chat_text,
     _ensure_full_text,
     _iter_chat_text_chunks,
+    cancel_paper_report_from_queue,
     paper_report_payload,
     queue_paper_report,
 )
@@ -336,6 +338,19 @@ def import_reader_pdf(
         text_error=text_error,
         text_char_count=char_count,
     )
+    upsert_imported_paper(
+        conn,
+        source_type="upload",
+        source_identifier=f"reader-upload-{digest[:16]}",
+        title=title,
+        abstract="Manual PDF import.",
+        pdf_path=str(pdf_path),
+        text_path=str(text_path),
+        text_status=text_status,
+        text_error=text_error,
+        text_char_count=char_count,
+        metadata={"filename": filename, "sha256": digest},
+    )
     if text_status == "complete":
         _finalize_imported_pdf(conn, paper_id, pdf_path, text_path)
     _queue_imported_report(conn, settings, paper_id)
@@ -426,6 +441,21 @@ def import_reader_urls(
                 text_status=text_status,
                 text_error=text_error,
                 text_char_count=char_count,
+            )
+            upsert_imported_paper(
+                conn,
+                source_type="url",
+                source_identifier=source_id,
+                title=clean_unicode(str(payload.get("title") or "")).strip() or _title_from_url(url),
+                abstract=f"Imported from {url}",
+                source_url=url,
+                pdf_url=pdf_link,
+                pdf_path=str(pdf_path),
+                text_path=str(text_path),
+                text_status=text_status,
+                text_error=text_error,
+                text_char_count=char_count,
+                arxiv_id=arxiv_id,
             )
             if text_status == "complete":
                 _finalize_imported_pdf(conn, paper_id, pdf_path, text_path)
@@ -648,29 +678,7 @@ def delete_reader_message(conn: sqlite3.Connection, paper_id: int, message_id: i
 
 
 def cancel_reader_report(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
-    report = conn.execute(
-        "SELECT status FROM paper_reading_reports WHERE paper_id = ?",
-        (paper_id,),
-    ).fetchone()
-    if not report:
-        raise RuntimeError("Report queue item was not found")
-    status = str(report["status"] or "")
-    if status == "queued":
-        now = utc_now()
-        conn.execute(
-            """
-            UPDATE paper_reading_reports
-            SET status = 'cancelled',
-                error_message = '',
-                finished_at = ?,
-                updated_at = ?
-            WHERE paper_id = ?
-            """,
-            (now, now, paper_id),
-        )
-        conn.commit()
-    elif status == "processing":
-        raise RuntimeError("Processing reports cannot be cancelled")
+    cancel_paper_report_from_queue(conn, paper_id)
     detail = paper_reader_detail(conn, paper_id)
     detail["ok"] = True
     return detail

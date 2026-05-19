@@ -6,7 +6,9 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
+from .artifacts import export_artifact_to_obsidian
 from .db import clean_unicode, from_json, utc_now
+from .papers import paper_id_for_arxiv_paper_id
 
 
 PROJECTS_START = "<!-- research-intelligence:projects:start -->"
@@ -338,16 +340,38 @@ def _accepted_rows_for_paper(conn: sqlite3.Connection, paper_id: int) -> list[sq
 
 
 def _reading_report_for_paper(conn: sqlite3.Connection, paper_id: int) -> str:
-    row = conn.execute(
-        """
-        SELECT report_markdown
-        FROM paper_reading_reports
-        WHERE paper_id = ?
-          AND status = 'done'
-        """,
-        (paper_id,),
-    ).fetchone()
-    return clean_unicode(str(row["report_markdown"] or "")).strip() if row else ""
+    scope_ids: list[int] = []
+    library_paper_id = paper_id_for_arxiv_paper_id(conn, paper_id)
+    if library_paper_id is not None:
+        scope_ids.append(int(library_paper_id))
+    scope_ids.append(int(paper_id))
+    for scope_id in dict.fromkeys(scope_ids):
+        artifact = conn.execute(
+            """
+            SELECT content_markdown
+            FROM artifacts
+            WHERE scope_type = 'paper'
+              AND scope_id = ?
+              AND artifact_type = 'paper_report'
+              AND status IN ('ready', 'done')
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            """,
+            (scope_id,),
+        ).fetchone()
+        if artifact and clean_unicode(str(artifact["content_markdown"] or "")).strip():
+            return clean_unicode(str(artifact["content_markdown"] or "")).strip()
+    return ""
+
+
+def export_system_artifact_to_obsidian(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    artifact_id: int,
+    *,
+    relative_path: str | None = None,
+) -> dict[str, object]:
+    return export_artifact_to_obsidian(conn, settings, artifact_id, relative_path=relative_path)
 
 
 def _accepted_rows_for_project(conn: sqlite3.Connection, project_id: int) -> list[sqlite3.Row]:

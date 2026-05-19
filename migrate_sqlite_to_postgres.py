@@ -7,8 +7,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from worker.db import clean_unicode, postgres_schema_sql
-from worker.pg import IDENTITY_TABLES, TABLE_ORDER
+from worker.db import clean_unicode, init_db
+from worker.pg import IDENTITY_TABLES, TABLE_ORDER, PgConnection
 
 
 def _load_dotenv(path: Path = Path(".env")) -> None:
@@ -123,11 +123,9 @@ def migrate(args: argparse.Namespace) -> dict[str, int]:
                 return {}
             if args.reset:
                 _reset_public_schema(pg_conn)
-            with pg_conn.cursor() as cur:
-                cur.execute(postgres_schema_sql())
-            pg_conn.commit()
-            if not args.reset and _target_has_rows(pg_conn):
+            elif _target_has_rows(pg_conn):
                 raise RuntimeError("Target PostgreSQL database is not empty. Re-run with --reset to replace it.")
+            init_db(PgConnection(pg_conn))
 
             copied: dict[str, int] = {}
             for table in TABLE_ORDER:

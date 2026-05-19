@@ -1,9 +1,33 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { PanelTitle } from "./PanelTitle.jsx";
 import { normalizeProviders, providerPayload, SettingsForm } from "./SettingsForm.jsx";
-import { TaskControlPanel } from "./TaskControlPanel.jsx";
-import { api, chooseLocalPath, fmtDate, postJson, summarizeMeta } from "../lib/dashboard.js";
+import { api, chooseLocalPath, postJson } from "../lib/dashboard.js";
+
+const AUTO_SAVE_DELAY_MS = 850;
+const QUICK_SAVE_DELAY_MS = 150;
+const QUICK_SAVE_FIELDS = new Set([
+  "arxiv_cache_full_text",
+  "rag_prefilter_enabled",
+  "run_daily_on_startup_enabled",
+  "scheduler_enabled"
+]);
+const SUCCESS_TOAST_THROTTLE_MS = 2500;
+
+function settingsPayload(settings, providers) {
+  const payload = {
+    ...settings,
+    llm_providers: providerPayload(providers)
+  };
+  if (payload.scheduler_enabled && payload.run_daily_on_startup_enabled) {
+    payload.run_daily_on_startup_enabled = false;
+  }
+  return payload;
+}
+
+function settingsSignature(settings, providers) {
+  return JSON.stringify(settingsPayload(settings, providers));
+}
 
 function HealthItem({ label, value, state = "neutral" }) {
   return (
@@ -15,7 +39,6 @@ function HealthItem({ label, value, state = "neutral" }) {
 }
 
 function HealthGrid({ health }) {
-  const counts = health?.counts || {};
   const obsidianState = health?.obsidian?.status === "ok" ? "ok" : "warn";
   const llmState = health?.llm?.configured ? "ok" : "warn";
   return (
@@ -23,72 +46,44 @@ function HealthGrid({ health }) {
       <HealthItem label="Database" value={health?.database?.ok ? "OK" : "Error"} state={health?.database?.ok ? "ok" : "bad"} />
       <HealthItem label="Obsidian" value={health?.obsidian?.status || "unknown"} state={obsidianState} />
       <HealthItem label="LLM" value={health?.llm?.configured ? `${health.llm.providers?.length || 0} providers` : "Not configured"} state={llmState} />
-      <HealthItem label="Notes" value={counts.notes ?? 0} />
-      <HealthItem label="Projects" value={counts.projects ?? 0} />
-      <HealthItem label="Project Artifacts" value={counts.project_artifacts ?? 0} />
-      <HealthItem label="Chunks" value={counts.chunks ?? 0} />
-      <HealthItem label="Papers" value={counts.papers ?? 0} />
-      <HealthItem label="Paper TXT" value={counts.paper_texts ?? 0} />
-      <HealthItem label="Full Reports" value={counts.paper_reading_reports ?? 0} />
-      <HealthItem label="Paper Chunks" value={counts.paper_chunks ?? 0} />
-      <HealthItem label="Matches" value={counts.matches ?? 0} />
-      <HealthItem label="Latest job" value={health?.latest_job?.status || "none"} state={health?.latest_job?.status === "failed" ? "bad" : "neutral"} />
     </div>
   );
 }
 
-function HistoryTable({ history }) {
-  const items = history?.items || [];
-  if (!items.length) return <p className="muted">暂无任务记录。</p>;
-  return (
-    <div className="history-table">
-      <table>
-        <thead>
-          <tr>
-            <th>任务</th>
-            <th>状态</th>
-            <th>开始</th>
-            <th>结束</th>
-            <th>结果</th>
-          </tr>
-        </thead>
-        <tbody>
-          {items.map((item) => (
-            <tr key={item.id || `${item.job_type}-${item.started_at}`}>
-              <td>{item.job_type}</td>
-              <td><span className={`pill ${item.status === "failed" ? "bad-pill" : ""}`}>{item.status}</span></td>
-              <td>{fmtDate(item.started_at)}</td>
-              <td>{fmtDate(item.finished_at)}</td>
-              <td>{item.message || summarizeMeta(item.meta)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-export function ControlView({ setStatusMessage }) {
+export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) {
   const [settings, setSettings] = useState({});
   const [providers, setProviders] = useState([]);
-  const [scheduler, setScheduler] = useState({});
   const [health, setHealth] = useState(null);
-  const [history, setHistory] = useState({ items: [] });
+  const [saveStatus, setSaveStatus] = useState("idle");
+  const settingsRef = useRef(settings);
+  const providersRef = useRef(providers);
+  const hydratedRef = useRef(false);
+  const editVersionRef = useRef(0);
+  const saveRequestRef = useRef(0);
+  const saveTimerRef = useRef(null);
+  const pendingAutosaveRef = useRef(null);
+  const lastSavedSignatureRef = useRef("");
+  const lastSuccessToastAtRef = useRef(0);
+
+  settingsRef.current = settings;
+  providersRef.current = providers;
 
   const loadControl = useCallback(async ({ hydrate = false } = {}) => {
-    const [settingsData, statusData, healthData, historyData] = await Promise.all([
-      api("/api/settings"),
+    const [settingsData, statusData, healthData] = await Promise.all([
+      hydrate ? api("/api/settings") : Promise.resolve(null),
       api("/api/jobs/status"),
-      api("/api/health"),
-      api("/api/jobs/history")
+      api("/api/health")
     ]);
     if (hydrate) {
-      setSettings(settingsData.settings || {});
-      setProviders(normalizeProviders(settingsData.settings?.llm_providers || []));
+      const nextSettings = settingsData.settings || {};
+      const nextProviders = normalizeProviders(nextSettings.llm_providers || []);
+      lastSavedSignatureRef.current = settingsSignature(nextSettings, nextProviders);
+      hydratedRef.current = true;
+      setSettings(nextSettings);
+      setProviders(nextProviders);
+      setSaveStatus("idle");
     }
-    setScheduler(statusData.scheduler || {});
     setHealth(healthData);
-    setHistory(historyData);
     const current = statusData.scheduler?.current_job;
     setStatusMessage(current ? `Running ${current.command}...` : statusData.scheduler?.last_job?.message || statusData.scheduler?.last_error?.message || "Idle");
   }, [setStatusMessage]);
@@ -101,7 +96,107 @@ export function ControlView({ setStatusMessage }) {
     return () => clearInterval(timer);
   }, [loadControl, setStatusMessage]);
 
-  function updateSetting(name, value) {
+  const showSaveSuccess = useCallback(({ force = false } = {}) => {
+    const now = Date.now();
+    if (!force && now - lastSuccessToastAtRef.current < SUCCESS_TOAST_THROTTLE_MS) return;
+    lastSuccessToastAtRef.current = now;
+    notify("设置已保存", { type: "success" });
+  }, [notify]);
+
+  const saveCurrentSettings = useCallback(async ({ notifyOnSuccess = false, forceSuccessToast = false, force = false } = {}) => {
+    const payload = settingsPayload(settingsRef.current, providersRef.current);
+    const requestedSignature = JSON.stringify(payload);
+    if (!force && requestedSignature === lastSavedSignatureRef.current) {
+      setSaveStatus("idle");
+      return;
+    }
+
+    const requestId = saveRequestRef.current + 1;
+    const editVersion = editVersionRef.current;
+    saveRequestRef.current = requestId;
+    setSaveStatus("saving");
+    setStatusMessage("Saving settings...");
+
+    try {
+      const data = await postJson("/api/settings", payload);
+      if (requestId !== saveRequestRef.current || editVersion !== editVersionRef.current) return;
+
+      const savedSettings = data.settings || payload;
+      const savedProviders = normalizeProviders(savedSettings.llm_providers || payload.llm_providers || []);
+      lastSavedSignatureRef.current = settingsSignature(savedSettings, savedProviders);
+      setSettings(savedSettings);
+      setProviders(savedProviders);
+      setSaveStatus("saved");
+      setStatusMessage("Settings saved");
+      if (notifyOnSuccess) showSaveSuccess({ force: forceSuccessToast });
+      loadControl({ hydrate: false }).catch((error) => setStatusMessage(error.message));
+    } catch (error) {
+      if (requestId !== saveRequestRef.current || editVersion !== editVersionRef.current) return;
+      setSaveStatus("error");
+      setStatusMessage(error.message);
+      notify(error.message, { type: "error" });
+    }
+  }, [loadControl, notify, setStatusMessage, showSaveSuccess]);
+
+  useEffect(() => {
+    if (!hydratedRef.current) return undefined;
+
+    const currentSignature = settingsSignature(settings, providers);
+    if (currentSignature === lastSavedSignatureRef.current) {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+      setSaveStatus((current) => current === "saved" ? current : "idle");
+      return undefined;
+    }
+
+    const autosave = pendingAutosaveRef.current || {};
+    pendingAutosaveRef.current = null;
+    setSaveStatus("dirty");
+    saveTimerRef.current = setTimeout(() => {
+      saveTimerRef.current = null;
+      saveCurrentSettings({
+        notifyOnSuccess: Boolean(autosave.notifyOnSuccess),
+        forceSuccessToast: Boolean(autosave.forceSuccessToast)
+      });
+    }, autosave.delay ?? AUTO_SAVE_DELAY_MS);
+
+    return () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+    };
+  }, [providers, saveCurrentSettings, settings]);
+
+  function queueAutosave(options = {}) {
+    editVersionRef.current += 1;
+    const current = pendingAutosaveRef.current || {};
+    const nextDelay = options.delay ?? AUTO_SAVE_DELAY_MS;
+    pendingAutosaveRef.current = {
+      delay: Math.min(current.delay ?? nextDelay, nextDelay),
+      notifyOnSuccess: Boolean(current.notifyOnSuccess || options.notifyOnSuccess),
+      forceSuccessToast: Boolean(current.forceSuccessToast || options.forceSuccessToast)
+    };
+  }
+
+  function nextProviderId(currentProviders) {
+    const existing = new Set(currentProviders.map((provider) => provider.id).filter(Boolean));
+    let index = currentProviders.length + 1;
+    let id = `provider_${index}`;
+    while (existing.has(id)) {
+      index += 1;
+      id = `provider_${index}`;
+    }
+    return id;
+  }
+
+  function updateSetting(name, value, options = {}) {
+    queueAutosave({
+      ...options,
+      delay: options.delay ?? (QUICK_SAVE_FIELDS.has(name) ? QUICK_SAVE_DELAY_MS : AUTO_SAVE_DELAY_MS)
+    });
     setSettings((current) => {
       const next = { ...current, [name]: value };
       if (name === "run_daily_on_startup_enabled" && value) next.scheduler_enabled = false;
@@ -111,95 +206,76 @@ export function ControlView({ setStatusMessage }) {
   }
 
   function updateProvider(index, field, value) {
+    queueAutosave({
+      delay: field === "clear_api_key" ? QUICK_SAVE_DELAY_MS : AUTO_SAVE_DELAY_MS
+    });
     setProviders((current) => current.map((provider, providerIndex) => providerIndex === index ? { ...provider, [field]: value } : provider));
   }
 
   async function pickPath(name, { mode, relativeTo, title }) {
     setStatusMessage("正在打开本地路径选择器...");
-    const data = await chooseLocalPath({
-      mode,
-      title,
-      relativeTo,
-      basePath: relativeTo === "obsidian_vault" ? settings.obsidian_vault_path : undefined
-    });
-    if (data.cancelled) {
-      setStatusMessage("已取消路径选择");
-      return;
-    }
-    updateSetting(name, data.relative_path ?? data.path ?? "");
-    setStatusMessage("路径已选择");
-  }
-
-  async function saveSettings(event) {
-    event.preventDefault();
-    setStatusMessage("Saving settings...");
     try {
-      const payload = {
-        ...settings,
-        llm_providers: providerPayload(providers)
-      };
-      if (payload.scheduler_enabled && payload.run_daily_on_startup_enabled) {
-        payload.run_daily_on_startup_enabled = false;
+      const data = await chooseLocalPath({
+        mode,
+        title,
+        relativeTo,
+        basePath: relativeTo === "obsidian_vault" ? settingsRef.current.obsidian_vault_path : undefined
+      });
+      if (data.cancelled) {
+        setStatusMessage("已取消路径选择");
+        notify("已取消路径选择", { type: "info" });
+        return;
       }
-      const data = await postJson("/api/settings", payload);
-      setSettings(data.settings || payload);
-      setProviders(normalizeProviders(data.settings?.llm_providers || payload.llm_providers || []));
-      setScheduler(data.scheduler || {});
-      setStatusMessage("Settings saved");
-      await loadControl({ hydrate: false });
+      updateSetting(name, data.relative_path ?? data.path ?? "", {
+        delay: QUICK_SAVE_DELAY_MS,
+        notifyOnSuccess: true
+      });
+      setStatusMessage("路径已选择");
+      notify("路径已选择，正在保存", { type: "info" });
     } catch (error) {
       setStatusMessage(error.message);
+      notify(error.message, { type: "error" });
     }
   }
 
-  async function runJob(name, endpoint = `/api/jobs/${name}`) {
-    setStatusMessage(`Running ${name}...`);
-    try {
-      const data = await postJson(endpoint);
-      setStatusMessage(data.message || `${name} finished`);
-      await loadControl({ hydrate: false });
-    } catch (error) {
-      setStatusMessage(error.message);
+  function saveSettings(event) {
+    event.preventDefault();
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
     }
+    saveCurrentSettings({
+      notifyOnSuccess: true,
+      forceSuccessToast: true,
+      force: true
+    });
   }
 
-  async function startStartupDaily() {
-    try {
-      await postJson("/api/settings", { run_daily_on_startup_enabled: true, scheduler_enabled: false });
-      updateSetting("run_daily_on_startup_enabled", true);
-      await loadControl({ hydrate: false });
-    } catch (error) {
-      setStatusMessage(error.message);
-    }
+  function addProvider() {
+    queueAutosave({
+      delay: QUICK_SAVE_DELAY_MS,
+      notifyOnSuccess: true
+    });
+    setProviders((current) => [...current, { id: nextProviderId(current), name: "", base_url: "", api_key: "", chat_models: "", embedding_models: "", clear_api_key: false }]);
   }
 
-  async function startScheduler() {
-    try {
-      const data = await postJson("/api/jobs/scheduler/start");
-      setSettings((current) => ({ ...current, scheduler_enabled: true, run_daily_on_startup_enabled: false }));
-      setScheduler(data.scheduler || {});
-      await loadControl({ hydrate: false });
-    } catch (error) {
-      setStatusMessage(error.message);
-    }
-  }
-
-  async function stopScheduler() {
-    try {
-      await postJson("/api/settings", { run_daily_on_startup_enabled: false, scheduler_enabled: false });
-      setSettings((current) => ({ ...current, scheduler_enabled: false, run_daily_on_startup_enabled: false }));
-      await loadControl({ hydrate: false });
-    } catch (error) {
-      setStatusMessage(error.message);
-    }
+  function removeProvider(index) {
+    queueAutosave({
+      delay: QUICK_SAVE_DELAY_MS,
+      notifyOnSuccess: true
+    });
+    setProviders((current) => {
+      const next = current.filter((_, providerIndex) => providerIndex !== index);
+      return next.length ? next : [{ id: "default", name: "Default", base_url: "", api_key: "", chat_models: "", embedding_models: "", clear_api_key: false }];
+    });
   }
 
   return (
     <section className="view control-view">
       <header className="control-header">
         <div>
-          <h1>配置与任务</h1>
-          <p>Dashboard 启动后，定时任务由本地 Node 进程调度。</p>
+          <h1>设置</h1>
+          <p>系统连接、模型路由、论文源、检索策略和自动化规则。</p>
         </div>
         <button onClick={() => loadControl({ hydrate: false }).catch((error) => setStatusMessage(error.message))} type="button">
           刷新状态
@@ -207,18 +283,8 @@ export function ControlView({ setStatusMessage }) {
       </header>
 
       <div className="control-grid">
-        <TaskControlPanel
-          scheduler={scheduler}
-          onStartStartup={startStartupDaily}
-          onStartScheduler={startScheduler}
-          onStopScheduler={stopScheduler}
-          onRunNow={() => runJob("run-daily", "/api/jobs/run-now")}
-          onResumeDaily={() => runJob("resume-daily", "/api/jobs/resume-daily")}
-          onRetryDaily={() => runJob("retry-daily", "/api/jobs/retry-daily")}
-          onRunJob={runJob}
-        />
         <section className="panel">
-          <PanelTitle title="健康状态" subtitle="数据库、Obsidian、LLM provider 和索引规模。" />
+          <PanelTitle title="连接状态" subtitle="这里只显示基础设施连通性；任务执行和历史统一放在任务页。" />
           <HealthGrid health={health} />
         </section>
       </div>
@@ -230,20 +296,14 @@ export function ControlView({ setStatusMessage }) {
           providers={providers}
           onSettingChange={updateSetting}
           onProviderChange={updateProvider}
-          onAddProvider={() => setProviders((current) => [...current, { id: "", name: "", base_url: "", api_key: "", chat_models: "", embedding_models: "", clear_api_key: false }])}
-          onRemoveProvider={(index) => setProviders((current) => {
-            const next = current.filter((_, providerIndex) => providerIndex !== index);
-            return next.length ? next : [{ id: "default", name: "Default", base_url: "", api_key: "", chat_models: "", embedding_models: "", clear_api_key: false }];
-          })}
+          onAddProvider={addProvider}
+          onRemoveProvider={removeProvider}
           onPickPath={pickPath}
           onSubmit={saveSettings}
+          saveStatus={saveStatus}
         />
       </section>
 
-      <section className="panel">
-        <PanelTitle title="任务历史" subtitle="最近 20 次 worker 执行记录。" />
-        <HistoryTable history={history} />
-      </section>
     </section>
   );
 }

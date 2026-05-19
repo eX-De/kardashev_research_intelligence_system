@@ -9,11 +9,16 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import Settings
-from .db import utc_now
+from .db import clean_unicode, utc_now
 from .embeddings import ensure_missing_arxiv_chunk_embeddings
+from .papers import replace_paper_chunks_for_arxiv_paper, upsert_paper_from_arxiv
 
 PDF_429_RETRY_SECONDS = 20
 PDF_429_MAX_RETRIES = 1
+
+
+def _clean_text(value: Any) -> str:
+    return clean_unicode(str(value or ""))
 
 
 def safe_arxiv_filename(arxiv_id: str) -> str:
@@ -60,7 +65,7 @@ def extract_pdf_text_to_file(pdf_path: Path, text_path: Path) -> int:
             page_text = page.get_text("text").strip()
             if page_text:
                 parts.append(f"\n\n--- page {page_number} ---\n{page_text}")
-    text = "\n".join(parts).strip()
+    text = _clean_text("\n".join(parts)).strip()
     text_path.write_text(text, encoding="utf-8")
     return len(text)
 
@@ -89,6 +94,7 @@ def chunk_text(
     max_chars: int = 1800,
     overlap_chars: int = 180,
 ) -> list[dict[str, Any]]:
+    text = _clean_text(text)
     chunks: list[dict[str, Any]] = []
     current = ""
     page_start: int | None = None
@@ -138,7 +144,7 @@ def replace_arxiv_chunks_for_paper(
     conn.execute("DELETE FROM arxiv_text_chunks WHERE paper_id = ?", (int(paper["id"]),))
     now = utc_now()
     chunks: list[dict[str, Any]] = []
-    metadata_text = f"Title: {paper['title']}\n\nAbstract: {paper['summary']}".strip()
+    metadata_text = _clean_text(f"Title: {paper['title']}\n\nAbstract: {paper['summary']}").strip()
     chunks.append(
         {
             "source": "metadata",
@@ -153,7 +159,21 @@ def replace_arxiv_chunks_for_paper(
         text = paper_full_text_excerpt(paper, max_chars=2_000_000)
     if text:
         chunks.extend(chunk_text(text))
-    for index, chunk in enumerate(chunks):
+    normalized_chunks: list[dict[str, Any]] = []
+    for chunk in chunks:
+        text_value = _clean_text(chunk.get("text"))
+        normalized_chunks.append(
+            {
+                "source": _clean_text(chunk.get("source")).strip() or "full_text",
+                "page_start": chunk.get("page_start"),
+                "page_end": chunk.get("page_end"),
+                "text": text_value,
+                "token_count": _token_count(text_value),
+                "char_count": len(text_value),
+            }
+        )
+
+    for index, chunk in enumerate(normalized_chunks):
         conn.execute(
             """
             INSERT INTO arxiv_text_chunks(
@@ -173,7 +193,8 @@ def replace_arxiv_chunks_for_paper(
                 now,
             ),
         )
-    return len(chunks)
+    replace_paper_chunks_for_arxiv_paper(conn, paper, normalized_chunks)
+    return len(normalized_chunks)
 
 
 def ensure_arxiv_chunks(
@@ -314,6 +335,8 @@ def cache_arxiv_full_texts(
                 """,
                 (str(pdf_path), str(text_path), str(exc)[:1000], int(row["id"])),
             )
+            refreshed = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (int(row["id"]),)).fetchone()
+            upsert_paper_from_arxiv(conn, refreshed)
             failed += 1
         conn.commit()
         emit_progress(index + 1, str(row["arxiv_id"]))
@@ -366,4 +389,4 @@ def paper_full_text_excerpt(row: sqlite3.Row, max_chars: int = 12000) -> str:
     path = Path(text_path)
     if not path.exists():
         return ""
-    return path.read_text(encoding="utf-8", errors="ignore")[:max_chars]
+    return _clean_text(path.read_text(encoding="utf-8", errors="ignore"))[:max_chars]

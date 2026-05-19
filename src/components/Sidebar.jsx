@@ -1,10 +1,22 @@
-export function Sidebar({ activeView, onNavigate, statusMessage }) {
-  const navView = activeView === "project" ? "projects" : activeView;
+import { NavLink } from "react-router-dom";
+
+export function Sidebar({ statusMessage }) {
   const navItems = [
-    ["projects", "项目中心", "项目、提醒和全局规模"],
-    ["inbox", "论文推荐", "待判断论文与全文报告"],
-    ["reports", "报告队列", "阅读器、导入和对话"],
-    ["control", "配置与任务", "系统配置与任务历史"]
+    { to: "/", label: "首页", hint: "今日工作台", end: true },
+    {
+      to: "/papers",
+      label: "论文",
+      hint: "推荐、仓库和报告",
+      children: [
+        { to: "/papers/inbox", label: "待判断" },
+        { to: "/papers/library", label: "仓库" },
+        { to: "/papers/reports", label: "报告队列" }
+      ]
+    },
+    { to: "/projects", label: "项目", hint: "上下文、论文和产物" },
+    { to: "/artifacts", label: "产物", hint: "日报、摘要和报告" },
+    { to: "/tasks", label: "任务", hint: "运行控制台" },
+    { to: "/settings", label: "设置", hint: "系统连接与规则" }
   ];
 
   return (
@@ -15,19 +27,39 @@ export function Sidebar({ activeView, onNavigate, statusMessage }) {
         </span>
         <div>
           <strong>科研情报系统</strong>
-          <span>Research project center</span>
+          <span>System-first workspace</span>
         </div>
       </div>
 
       <nav className="main-nav" aria-label="主导航">
-        {navItems.map(([view, label, hint]) => (
-          <button className={`nav-button ${navView === view ? "active" : ""}`} key={view} onClick={() => onNavigate(view)} type="button">
-            <span className="nav-indicator" aria-hidden="true" />
-            <span>
-              <strong>{label}</strong>
-              <small>{hint}</small>
-            </span>
-          </button>
+        {navItems.map(({ to, label, hint, end, children }) => (
+          <div className="nav-group" key={to}>
+            <NavLink
+              className={({ isActive }) => `nav-button ${isActive ? "active" : ""}`}
+              end={end}
+              to={to}
+            >
+              <span className="nav-indicator" aria-hidden="true" />
+              <span>
+                <strong>{label}</strong>
+                <small>{hint}</small>
+              </span>
+            </NavLink>
+            {children?.length ? (
+              <div className="nav-submenu" aria-label={`${label}二级导航`}>
+                {children.map((item) => (
+                  <NavLink
+                    className={({ isActive }) => `nav-subitem ${isActive ? "active" : ""}`}
+                    end={item.end}
+                    key={item.to}
+                    to={item.to}
+                  >
+                    {item.label}
+                  </NavLink>
+                ))}
+              </div>
+            ) : null}
+          </div>
         ))}
       </nav>
 

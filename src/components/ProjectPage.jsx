@@ -23,6 +23,7 @@ function projectToForm(project = {}) {
     name: project.name || "",
     status: project.status || "active",
     keywords: csv(project.keywords || []),
+    raw_context: "",
     obsidian_project_path: project.obsidian_project_path || "",
     obsidian_output_dir: project.obsidian_output_dir || ""
   };
@@ -52,6 +53,15 @@ function ProjectForm({ project, form, setForm, onPickPath, onSubmit }) {
           <input value={form.keywords} placeholder="RAG,agent,scientific discovery" onChange={(event) => update("keywords", event.target.value)} />
         </label>
         <label>
+          <span>原始项目上下文</span>
+          <textarea
+            value={form.raw_context}
+            placeholder="粘贴项目 README、研究问题、实验计划或任意自由文本。保存后会进入系统内知识文档。"
+            onChange={(event) => update("raw_context", event.target.value)}
+            rows={7}
+          />
+        </label>
+        <label>
           <span>Obsidian 项目主页</span>
           <div className="path-input-row">
             <input value={form.obsidian_project_path} placeholder="Projects/Agentic RAG/Home.md" onChange={(event) => update("obsidian_project_path", event.target.value)} />
@@ -73,11 +83,11 @@ function ProjectForm({ project, form, setForm, onPickPath, onSubmit }) {
   );
 }
 
-function ObsidianPanel({ project, artifacts, onExport }) {
+function ObsidianPanel({ project, artifacts, contextDocuments, onExport }) {
   return (
     <section className="panel automation-panel">
       <div className="panel-title">
-        <h2>Obsidian</h2>
+        <h2>集成/导出</h2>
         {project?.id ? <button type="button" onClick={onExport}>同步索引到 Obsidian</button> : null}
       </div>
       <div className="project-health-grid">
@@ -96,6 +106,20 @@ function ObsidianPanel({ project, artifacts, onExport }) {
         <div className="health-item neutral">
           <span>状态标签</span>
           <strong>{project?.obsidian_status_tag || "—"}</strong>
+        </div>
+      </div>
+      <div>
+        <h3>上下文来源</h3>
+        <div className="linked-list">
+          {contextDocuments.length ? contextDocuments.map((document) => (
+            <div className="linked-item" key={`${document.document_id}-${document.relation}`}>
+              <div>
+                <strong>{document.title}</strong>
+                <p className="muted">{document.source_type} · {document.relation} · {document.chunk_count} chunks</p>
+                {document.excerpt ? <p className="muted">{snippet(document.excerpt, 160)}</p> : null}
+              </div>
+            </div>
+          )) : <p className="muted">暂无系统内上下文文档。</p>}
         </div>
       </div>
       <div>
@@ -123,22 +147,25 @@ function ProjectMatchesPanel({ matches }) {
         <p>{matches.length} matches</p>
       </div>
       <div className="project-match-list">
-        {matches.length ? matches.map((match) => (
-          <article className="project-match-item" key={`${match.paper_id}-${match.updated_at}`}>
-            <div className="project-match-head">
-              <div>
-                <strong>{match.title}</strong>
-                <p className="muted">{match.arxiv_id} · score {fmtScore(match.score)} · {(match.searchers || []).join(", ") || "matched"}</p>
+        {matches.length ? matches.map((match) => {
+          const relationType = match.judgment?.relation_type || "matched";
+          return (
+            <article className="project-match-item" key={`${match.paper_id}-${match.updated_at}`}>
+              <div className="project-match-head">
+                <div>
+                  <strong>{match.title}</strong>
+                  <p className="muted">{match.arxiv_id} · {relationType} · score {fmtScore(match.score)} · {(match.searchers || []).join(", ") || "matched"}</p>
+                </div>
+                <a href={match.link || "#"} target="_blank" rel="noreferrer">打开</a>
               </div>
-              <a href={match.link || "#"} target="_blank" rel="noreferrer">打开</a>
-            </div>
-            <div className="project-match-evidence">
-              <p><span>论文</span>{snippet(match.arxiv_text || match.evidence?.arxiv_text)}</p>
-              <p><span>项目</span>{snippet(`${match.note_title || ""} ${match.obsidian_heading || ""} ${match.obsidian_text || ""}`)}</p>
-              <p className="muted">{match.note_path || "项目上下文"} · chunk {match.best_obsidian_chunk_id || ""}</p>
-            </div>
-          </article>
-        )) : <p className="muted">暂无基于项目上下文匹配到的论文。</p>}
+              <div className="project-match-evidence">
+                <p><span>论文</span>{snippet(match.arxiv_text || match.evidence?.arxiv_text)}</p>
+                <p><span>项目</span>{snippet(`${match.note_title || ""} ${match.obsidian_heading || ""} ${match.obsidian_text || ""}`)}</p>
+                <p className="muted">{match.note_path || "项目上下文"} · chunk {match.best_obsidian_chunk_id || ""}</p>
+              </div>
+            </article>
+          );
+        }) : <p className="muted">暂无基于项目上下文匹配到的论文。</p>}
       </div>
     </section>
   );
@@ -232,7 +259,7 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
     }
     const data = await api(`/api/projects/${projectId}`);
     setDetail(data);
-    setForm(projectToForm(data.project));
+    setForm((current) => ({ ...projectToForm(data.project), raw_context: current.raw_context }));
   }, [projectId]);
 
   useEffect(() => {
@@ -242,7 +269,8 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
   const project = detail?.project || {};
   const title = isNew ? "新建项目" : project.name || "项目";
   const artifacts = detail?.artifacts || [];
-  const matches = detail?.project_matches || [];
+  const contextDocuments = detail?.context_documents || [];
+  const matches = detail?.retrieval_hits || detail?.project_matches || [];
 
   const payloadBase = useMemo(() => ({
     summary: project.summary || "",
@@ -278,6 +306,7 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
         name: form.name,
         status: form.status,
         keywords: form.keywords,
+        raw_context: form.raw_context,
         obsidian_project_path: form.obsidian_project_path,
         obsidian_output_dir: form.obsidian_output_dir
       };
@@ -343,7 +372,7 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
         <ProjectForm project={project} form={form} setForm={setForm} onPickPath={pickPath} onSubmit={saveProject} />
         {!isNew ? (
           <>
-            <ObsidianPanel project={project} artifacts={artifacts} onExport={exportProject} />
+            <ObsidianPanel project={project} artifacts={artifacts} contextDocuments={contextDocuments} onExport={exportProject} />
             <ProjectMatchesPanel matches={matches} />
             <LinkedResourcesPanel
               detail={detail || {}}

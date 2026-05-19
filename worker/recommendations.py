@@ -49,6 +49,7 @@ def sync_project_paper_recommendations(
           j.input_hash,
           r.state AS existing_state
         FROM project_paper_judgments j
+        JOIN arxiv_papers p ON p.id = j.paper_id
         JOIN research_projects rp ON rp.id = j.project_id
         LEFT JOIN project_paper_recommendations r
           ON r.project_id = j.project_id AND r.paper_id = j.paper_id
@@ -57,6 +58,24 @@ def sync_project_paper_recommendations(
           AND j.confidence >= ?
           AND j.usefulness_score >= ?
           AND {run_daily_project_status_sql("rp")}
+          AND NOT EXISTS (
+            SELECT 1 FROM arxiv_paper_tombstones t
+            WHERE t.arxiv_id = p.arxiv_id
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM papers lp
+            WHERE lp.arxiv_id = p.arxiv_id
+              AND lp.library_status IN ('archived', 'discarded')
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM paper_sources ps
+            JOIN papers lp ON lp.id = ps.paper_id
+            WHERE ps.source_type = 'arxiv'
+              AND ps.source_identifier = p.arxiv_id
+              AND lp.library_status IN ('archived', 'discarded')
+          )
           {paper_clause}
         """,
         params,
@@ -209,3 +228,84 @@ def discard_recommendations_for_paper(
         """,
         (now, paper_id),
     )
+
+
+def project_recommendation_paper_rows(
+    conn: sqlite3.Connection,
+    project_id: int,
+    *,
+    states: list[str] | tuple[str, ...] | set[str] = ("pending", "accepted"),
+    exclude_linked: bool = True,
+    limit: int = 80,
+) -> list[sqlite3.Row]:
+    selected_states = [str(state) for state in states if str(state) in VALID_RECOMMENDATION_STATES]
+    if not selected_states:
+        return []
+    state_placeholders = ", ".join("?" for _ in selected_states)
+    linked_clause = ""
+    if exclude_linked:
+        linked_clause = """
+          AND NOT EXISTS (
+            SELECT 1
+            FROM project_papers pp
+            WHERE pp.project_id = r.project_id
+              AND pp.paper_id = r.paper_id
+              AND NOT (
+                pp.relation = 'candidate'
+                AND pp.note = 'auto_matched_by_project_context'
+              )
+          )
+        """
+    row_limit = max(1, min(int(limit or 80), 500))
+    return conn.execute(
+        f"""
+        SELECT
+          p.id,
+          p.arxiv_id,
+          p.title,
+          p.published_at,
+          p.text_status,
+          p.link,
+          r.state AS recommendation_state,
+          r.importance,
+          r.relation_type,
+          r.reason AS recommendation_reason,
+          r.updated_at AS recommendation_updated_at,
+          j.relevance_score,
+          j.usefulness_score,
+          j.confidence
+        FROM project_paper_recommendations r
+        JOIN arxiv_papers p ON p.id = r.paper_id
+        LEFT JOIN project_paper_judgments j
+          ON j.project_id = r.project_id AND j.paper_id = r.paper_id
+        WHERE r.project_id = ?
+          AND r.state IN ({state_placeholders})
+          AND NOT EXISTS (
+            SELECT 1 FROM arxiv_paper_tombstones t
+            WHERE t.arxiv_id = p.arxiv_id
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM papers lp
+            WHERE lp.arxiv_id = p.arxiv_id
+              AND lp.library_status IN ('archived', 'discarded')
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM paper_sources ps
+            JOIN papers lp ON lp.id = ps.paper_id
+            WHERE ps.source_type = 'arxiv'
+              AND ps.source_identifier = p.arxiv_id
+              AND lp.library_status IN ('archived', 'discarded')
+          )
+          {linked_clause}
+        ORDER BY
+          CASE r.state WHEN 'pending' THEN 0 WHEN 'accepted' THEN 1 ELSE 2 END,
+          CASE r.relation_type WHEN 'direct' THEN 0 WHEN 'indirect' THEN 1 ELSE 2 END,
+          COALESCE(j.usefulness_score, 0) DESC,
+          COALESCE(j.confidence, 0) DESC,
+          p.published_at DESC
+        LIMIT ?
+        """,
+        (int(project_id), *selected_states, row_limit),
+    ).fetchall()

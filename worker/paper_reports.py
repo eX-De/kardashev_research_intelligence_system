@@ -16,7 +16,9 @@ from .arxiv_text import (
     safe_arxiv_filename,
 )
 from .config import Settings
-from .db import clean_unicode, from_json, to_json, utc_now
+from .artifacts import PAPER_REPORT_ARTIFACT_TYPE, content_hash, upsert_artifact
+from .db import clean_unicode, from_json, utc_now
+from .papers import paper_id_for_arxiv_paper_id
 from .project_status import run_daily_project_status_sql
 
 
@@ -50,6 +52,178 @@ def _paper_filter(
     return f"AND {alias}.paper_id IN ({placeholders})", ids
 
 
+def _report_source_key(paper_id: int) -> str:
+    return f"paper_report:{int(paper_id)}"
+
+
+def _paper_report_artifact_row(conn: sqlite3.Connection, paper_id: int) -> sqlite3.Row | None:
+    library_paper_id = paper_id_for_arxiv_paper_id(conn, int(paper_id))
+    if library_paper_id is None:
+        return None
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM artifacts
+        WHERE scope_type = 'paper'
+          AND scope_id = ?
+          AND artifact_type = ?
+        ORDER BY updated_at DESC, id DESC
+        """,
+        (int(library_paper_id), PAPER_REPORT_ARTIFACT_TYPE),
+    ).fetchall()
+    source_key = _report_source_key(paper_id)
+    fallback = rows[0] if rows else None
+    for row in rows:
+        source = from_json(row["source_json"], {})
+        if isinstance(source, dict) and source.get("source_key") == source_key:
+            return row
+    return fallback
+
+
+def _paper_report_state(
+    conn: sqlite3.Connection,
+    paper_id: int,
+    row: sqlite3.Row | None = None,
+) -> dict[str, Any] | None:
+    paper = conn.execute("SELECT title, arxiv_id, link FROM arxiv_papers WHERE id = ?", (int(paper_id),)).fetchone()
+    if not paper:
+        return None
+    library_paper_id = paper_id_for_arxiv_paper_id(conn, int(paper_id))
+    if library_paper_id is None:
+        return None
+    row = row if row is not None else _paper_report_artifact_row(conn, int(paper_id))
+    content = from_json(row["content_json"], {}) if row else {}
+    source = from_json(row["source_json"], {}) if row else {}
+    if not isinstance(content, dict):
+        content = {}
+    if not isinstance(source, dict):
+        source = {}
+    now = utc_now()
+    created_at = row["created_at"] if row else now
+    updated_at = row["updated_at"] if row else now
+    return {
+        "artifact_id": int(row["id"]) if row else None,
+        "paper_id": int(paper_id),
+        "library_paper_id": int(library_paper_id),
+        "arxiv_id": paper["arxiv_id"],
+        "link": paper["link"],
+        "title": paper["title"],
+        "status": row["status"] if row else "queued",
+        "prompt": content.get("prompt") or "",
+        "system_prompt": content.get("system_prompt") or "",
+        "model_provider_id": row["model_provider_id"] if row else "",
+        "model": row["model"] if row else "",
+        "source_text_hash": source.get("source_text_hash") or (row["input_hash"] if row else ""),
+        "source_project_ids": content.get("source_project_ids") if isinstance(content.get("source_project_ids"), list) else [],
+        "report_markdown": row["content_markdown"] if row else "",
+        "error_message": content.get("error_message") or "",
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "started_at": content.get("started_at"),
+        "finished_at": content.get("finished_at"),
+    }
+
+
+def _save_paper_report_state(
+    conn: sqlite3.Connection,
+    state: dict[str, Any],
+    *,
+    commit: bool = True,
+) -> dict[str, object]:
+    content = {
+        "paper_id": int(state["library_paper_id"]),
+        "legacy_arxiv_paper_id": int(state["paper_id"]),
+        "arxiv_id": state.get("arxiv_id") or "",
+        "link": state.get("link") or "",
+        "prompt": state.get("prompt") or "",
+        "system_prompt": state.get("system_prompt") or "",
+        "source_project_ids": state.get("source_project_ids") or [],
+        "error_message": state.get("error_message") or "",
+        "started_at": state.get("started_at"),
+        "finished_at": state.get("finished_at"),
+    }
+    source_key = _report_source_key(int(state["paper_id"]))
+    source = {
+        "source_key": source_key,
+        "generated_from": "paper_report_queue",
+        "legacy_arxiv_paper_id": int(state["paper_id"]),
+        "source_text_hash": state.get("source_text_hash") or "",
+    }
+    markdown = clean_unicode(str(state.get("report_markdown") or ""))
+    artifact = upsert_artifact(
+        conn,
+        scope_type="paper",
+        scope_id=int(state["library_paper_id"]),
+        artifact_type=PAPER_REPORT_ARTIFACT_TYPE,
+        title=clean_unicode(str(state.get("title") or f"Paper {state['paper_id']} Full Report")),
+        content_markdown=markdown,
+        content_json=content,
+        status=clean_unicode(str(state.get("status") or "queued")),
+        source_json=source,
+        source_key=source_key,
+        model_provider_id=clean_unicode(str(state.get("model_provider_id") or "")),
+        model=clean_unicode(str(state.get("model") or "")),
+        input_hash=clean_unicode(str(state.get("source_text_hash") or "")) or content_hash(markdown, content),
+        commit=commit,
+    )
+    state["artifact_id"] = int(artifact["id"]) if artifact else state.get("artifact_id")
+    return artifact
+
+
+def _report_rows_for_queue(
+    conn: sqlite3.Connection,
+    paper_ids: list[int] | tuple[int, ...] | set[int] | None = None,
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM artifacts
+        WHERE scope_type = 'paper'
+          AND artifact_type = ?
+          AND status != 'removed'
+        ORDER BY updated_at DESC, id DESC
+        """,
+        (PAPER_REPORT_ARTIFACT_TYPE,),
+    ).fetchall()
+    selected = None if paper_ids is None else {int(paper_id) for paper_id in paper_ids}
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        source = from_json(row["source_json"], {})
+        content = from_json(row["content_json"], {})
+        legacy_id = None
+        if isinstance(source, dict):
+            legacy_id = source.get("legacy_arxiv_paper_id")
+        if legacy_id is None and isinstance(content, dict):
+            legacy_id = content.get("legacy_arxiv_paper_id")
+        try:
+            paper_id = int(legacy_id)
+        except (TypeError, ValueError):
+            paper_id = _legacy_paper_id_for_library_paper(conn, int(row["scope_id"] or 0))
+        if paper_id is None:
+            continue
+        if selected is not None and paper_id not in selected:
+            continue
+        state = _paper_report_state(conn, paper_id, row)
+        if state:
+            result.append(state)
+    return result
+
+
+def _legacy_paper_id_for_library_paper(conn: sqlite3.Connection, library_paper_id: int) -> int | None:
+    row = conn.execute(
+        """
+        SELECT ap.id
+        FROM arxiv_papers ap
+        JOIN paper_sources ps ON ps.source_identifier = ap.arxiv_id
+        WHERE ps.paper_id = ?
+        ORDER BY ap.id
+        LIMIT 1
+        """,
+        (int(library_paper_id),),
+    ).fetchone()
+    return int(row["id"]) if row else None
+
+
 def _source_projects_for_recommended_papers(
     conn: sqlite3.Connection,
     paper_ids: list[int] | tuple[int, ...] | set[int] | None = None,
@@ -78,54 +252,34 @@ def ensure_paper_reports_for_recommendations(
     paper_ids: list[int] | tuple[int, ...] | set[int] | None = None,
 ) -> dict[str, int]:
     projects_by_paper = _source_projects_for_recommended_papers(conn, paper_ids)
-    now = utc_now()
     created = 0
     refreshed = 0
     preserved = 0
     for paper_id, project_ids in projects_by_paper.items():
-        source_project_ids_json = to_json(project_ids)
-        existing = conn.execute(
-            "SELECT source_project_ids_json FROM paper_reading_reports WHERE paper_id = ?",
-            (paper_id,),
-        ).fetchone()
-        if not existing:
-            conn.execute(
-                """
-                INSERT INTO paper_reading_reports(
-                  paper_id, status, prompt, system_prompt, source_project_ids_json,
-                  created_at, updated_at
-                )
-                VALUES (?, 'queued', ?, ?, ?, ?, ?)
-                """,
-                (
-                    paper_id,
-                    PAPER_READER_DEFAULT_PROMPT,
-                    PAPER_READER_ANALYSIS_SYSTEM,
-                    source_project_ids_json,
-                    now,
-                    now,
-                ),
+        state = _paper_report_state(conn, paper_id)
+        if not state:
+            continue
+        if not state.get("artifact_id"):
+            state.update(
+                {
+                    "status": "queued",
+                    "prompt": PAPER_READER_DEFAULT_PROMPT,
+                    "system_prompt": PAPER_READER_ANALYSIS_SYSTEM,
+                    "source_project_ids": project_ids,
+                    "report_markdown": "",
+                    "error_message": "",
+                }
             )
+            _save_paper_report_state(conn, state, commit=False)
             created += 1
             continue
-        if from_json(existing["source_project_ids_json"], []) != project_ids:
-            conn.execute(
-                """
-                UPDATE paper_reading_reports
-                SET source_project_ids_json = ?,
-                    prompt = CASE WHEN prompt = '' THEN ? ELSE prompt END,
-                    system_prompt = CASE WHEN system_prompt = '' THEN ? ELSE system_prompt END,
-                    updated_at = ?
-                WHERE paper_id = ?
-                """,
-                (
-                    source_project_ids_json,
-                    PAPER_READER_DEFAULT_PROMPT,
-                    PAPER_READER_ANALYSIS_SYSTEM,
-                    now,
-                    paper_id,
-                ),
-            )
+        if state.get("source_project_ids") != project_ids:
+            state["source_project_ids"] = project_ids
+            if not state.get("prompt"):
+                state["prompt"] = PAPER_READER_DEFAULT_PROMPT
+            if not state.get("system_prompt"):
+                state["system_prompt"] = PAPER_READER_ANALYSIS_SYSTEM
+            _save_paper_report_state(conn, state, commit=False)
             refreshed += 1
         else:
             preserved += 1
@@ -140,44 +294,29 @@ def ensure_paper_reports_for_recommendations(
 
 def sync_paper_report_for_recommendation_state(conn: sqlite3.Connection, paper_id: int) -> dict[str, int]:
     project_ids = _source_projects_for_recommended_papers(conn, [paper_id]).get(int(paper_id), [])
-    existing = conn.execute(
-        """
-        SELECT
-          rr.source_project_ids_json,
-          p.arxiv_id,
-          p.categories_json
-        FROM paper_reading_reports rr
-        JOIN arxiv_papers p ON p.id = rr.paper_id
-        WHERE rr.paper_id = ?
-        """,
-        (paper_id,),
-    ).fetchone()
-    if not existing:
+    state = _paper_report_state(conn, paper_id)
+    if not state or not state.get("artifact_id"):
         return {"paper_reports_deleted": 0, "paper_reports_refreshed": 0}
 
     if not project_ids:
-        source_project_ids = from_json(existing["source_project_ids_json"], [])
-        categories = set(from_json(existing["categories_json"], []))
-        arxiv_id = str(existing["arxiv_id"] or "")
+        paper = conn.execute(
+            "SELECT arxiv_id, categories_json FROM arxiv_papers WHERE id = ?",
+            (int(paper_id),),
+        ).fetchone()
+        source_project_ids = state.get("source_project_ids") or []
+        categories = set(from_json(paper["categories_json"], [])) if paper else set()
+        arxiv_id = str(paper["arxiv_id"] or "") if paper else ""
         if "reader" in categories or arxiv_id.startswith("reader-") or not source_project_ids:
             return {"paper_reports_deleted": 0, "paper_reports_refreshed": 0}
-        deleted = conn.execute(
-            "DELETE FROM paper_reading_reports WHERE paper_id = ?",
-            (paper_id,),
-        ).rowcount
-        return {"paper_reports_deleted": int(deleted or 0), "paper_reports_refreshed": 0}
+        state["status"] = "removed"
+        state["finished_at"] = utc_now()
+        state["error_message"] = ""
+        _save_paper_report_state(conn, state, commit=False)
+        return {"paper_reports_deleted": 1, "paper_reports_refreshed": 0}
 
-    source_project_ids_json = to_json(project_ids)
-    updated = conn.execute(
-        """
-        UPDATE paper_reading_reports
-        SET source_project_ids_json = ?,
-            updated_at = ?
-        WHERE paper_id = ?
-        """,
-        (source_project_ids_json, utc_now(), paper_id),
-    ).rowcount
-    return {"paper_reports_deleted": 0, "paper_reports_refreshed": int(updated or 0)}
+    state["source_project_ids"] = project_ids
+    _save_paper_report_state(conn, state, commit=False)
+    return {"paper_reports_deleted": 0, "paper_reports_refreshed": 1}
 
 
 def _settings_report_prompt(settings: Settings) -> str:
@@ -195,122 +334,116 @@ def queue_paper_report(
     if not conn.execute("SELECT id FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone():
         raise RuntimeError(f"Paper not found: {paper_id}")
     ensure_paper_reports_for_recommendations(conn, [paper_id])
-    existing = conn.execute(
-        "SELECT paper_id, status FROM paper_reading_reports WHERE paper_id = ?",
-        (paper_id,),
-    ).fetchone()
-    now = utc_now()
+    state = _paper_report_state(conn, paper_id)
+    if not state:
+        raise RuntimeError(f"Paper not found: {paper_id}")
     prompt_text = clean_unicode(str(prompt or "")).strip() or PAPER_READER_DEFAULT_PROMPT
-    if not existing:
-        conn.execute(
-            """
-            INSERT INTO paper_reading_reports(
-              paper_id, status, prompt, system_prompt, source_project_ids_json,
-              created_at, updated_at
-            )
-            VALUES (?, 'queued', ?, ?, '[]', ?, ?)
-            """,
-            (paper_id, prompt_text, PAPER_READER_ANALYSIS_SYSTEM, now, now),
+    if not state.get("artifact_id"):
+        state.update(
+            {
+                "status": "queued",
+                "prompt": prompt_text,
+                "system_prompt": PAPER_READER_ANALYSIS_SYSTEM,
+                "source_project_ids": [],
+                "report_markdown": "",
+                "error_message": "",
+                "started_at": None,
+                "finished_at": None,
+            }
         )
+        _save_paper_report_state(conn, state, commit=False)
         conn.commit()
         return {"paper_reports_queued": 1}
-    if str(existing["status"] or "") == "removed":
-        conn.execute(
-            """
-            UPDATE paper_reading_reports
-            SET status = 'queued',
-                prompt = ?,
-                system_prompt = ?,
-                report_markdown = '',
-                error_message = '',
-                started_at = NULL,
-                finished_at = NULL,
-                updated_at = ?
-            WHERE paper_id = ?
-            """,
-            (prompt_text, PAPER_READER_ANALYSIS_SYSTEM, now, paper_id),
+    if str(state.get("status") or "") == "removed":
+        state.update(
+            {
+                "status": "queued",
+                "prompt": prompt_text,
+                "system_prompt": PAPER_READER_ANALYSIS_SYSTEM,
+                "report_markdown": "",
+                "error_message": "",
+                "started_at": None,
+                "finished_at": None,
+            }
         )
+        _save_paper_report_state(conn, state, commit=False)
         conn.commit()
         return {"paper_reports_queued": 1}
     if force:
-        conn.execute(
-            """
-            UPDATE paper_reading_reports
-            SET status = 'queued',
-                prompt = ?,
-                system_prompt = ?,
-                report_markdown = '',
-                error_message = '',
-                started_at = NULL,
-                finished_at = NULL,
-                updated_at = ?
-            WHERE paper_id = ?
-            """,
-            (prompt_text, PAPER_READER_ANALYSIS_SYSTEM, now, paper_id),
+        state.update(
+            {
+                "status": "queued",
+                "prompt": prompt_text,
+                "system_prompt": PAPER_READER_ANALYSIS_SYSTEM,
+                "report_markdown": "",
+                "error_message": "",
+                "started_at": None,
+                "finished_at": None,
+            }
         )
+        _save_paper_report_state(conn, state, commit=False)
         conn.commit()
         return {"paper_reports_requeued": 1}
     return {"paper_reports_queued": 0}
 
 
 def paper_report_payload(conn: sqlite3.Connection, paper_id: int) -> dict[str, object] | None:
-    row = conn.execute(
-        """
-        SELECT paper_id, status, prompt, system_prompt, model_provider_id, model,
-               source_project_ids_json, report_markdown, error_message,
-               created_at, updated_at, started_at, finished_at
-        FROM paper_reading_reports
-        WHERE paper_id = ?
-        """,
-        (paper_id,),
-    ).fetchone()
-    if not row:
+    state = _paper_report_state(conn, paper_id)
+    if not state or not state.get("artifact_id"):
         return None
-    if str(row["status"] or "") == "removed":
+    if str(state["status"] or "") == "removed":
         return None
     return {
-        "paper_id": int(row["paper_id"]),
-        "status": row["status"],
-        "prompt": row["prompt"],
-        "system_prompt": row["system_prompt"],
-        "model_provider_id": row["model_provider_id"],
-        "model": row["model"],
-        "source_project_ids": from_json(row["source_project_ids_json"], []),
-        "report_markdown": row["report_markdown"],
-        "error_message": row["error_message"],
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
-        "started_at": row["started_at"],
-        "finished_at": row["finished_at"],
+        "paper_id": int(state["paper_id"]),
+        "artifact_id": state.get("artifact_id"),
+        "status": state["status"],
+        "prompt": state["prompt"],
+        "system_prompt": state["system_prompt"],
+        "model_provider_id": state["model_provider_id"],
+        "model": state["model"],
+        "source_project_ids": state["source_project_ids"],
+        "report_markdown": state["report_markdown"],
+        "error_message": state["error_message"],
+        "created_at": state["created_at"],
+        "updated_at": state["updated_at"],
+        "started_at": state["started_at"],
+        "finished_at": state["finished_at"],
     }
 
 
 def remove_paper_report_from_queue(conn: sqlite3.Connection, paper_id: int) -> dict[str, int]:
-    row = conn.execute(
-        "SELECT status FROM paper_reading_reports WHERE paper_id = ?",
-        (paper_id,),
-    ).fetchone()
-    if not row:
+    state = _paper_report_state(conn, paper_id)
+    if not state or not state.get("artifact_id"):
         return {"paper_reports_removed": 0}
-    status = str(row["status"] or "")
+    status = str(state["status"] or "")
     if status == "processing":
         raise RuntimeError("Processing reports cannot be removed from the queue")
     now = utc_now()
-    updated = conn.execute(
-        """
-        UPDATE paper_reading_reports
-        SET status = 'removed',
-            report_markdown = '',
-            error_message = '',
-            started_at = NULL,
-            finished_at = ?,
-            updated_at = ?
-        WHERE paper_id = ?
-        """,
-        (now, now, paper_id),
-    ).rowcount
+    state["status"] = "removed"
+    state["error_message"] = ""
+    state["started_at"] = None
+    state["finished_at"] = now
+    _save_paper_report_state(conn, state, commit=False)
     conn.commit()
-    return {"paper_reports_removed": int(updated or 0)}
+    return {"paper_reports_removed": 1}
+
+
+def cancel_paper_report_from_queue(conn: sqlite3.Connection, paper_id: int) -> dict[str, int]:
+    state = _paper_report_state(conn, paper_id)
+    if not state or not state.get("artifact_id"):
+        raise RuntimeError("Report queue item was not found")
+    status = str(state["status"] or "")
+    if status == "queued":
+        now = utc_now()
+        state["status"] = "cancelled"
+        state["error_message"] = ""
+        state["finished_at"] = now
+        _save_paper_report_state(conn, state, commit=False)
+        conn.commit()
+        return {"paper_reports_cancelled": 1}
+    if status == "processing":
+        raise RuntimeError("Processing reports cannot be cancelled")
+    return {"paper_reports_cancelled": 0}
 
 
 def _read_existing_text(paper: sqlite3.Row) -> str:
@@ -396,6 +529,15 @@ def _parse_report_generation_response(raw_text: str, fallback_title: str) -> tup
     if not markdown:
         raise RuntimeError("Full paper report LLM request failed: JSON response is missing markdown")
     return title or fallback_title, markdown
+
+
+def mirror_paper_report_artifact(conn: sqlite3.Connection, paper_id: int) -> dict[str, object] | None:
+    state = _paper_report_state(conn, paper_id)
+    if not state or state.get("status") != "done":
+        return None
+    if not clean_unicode(str(state.get("report_markdown") or "")).strip():
+        return None
+    return _save_paper_report_state(conn, state, commit=False)
 
 
 def _call_chat_text(
@@ -517,41 +659,19 @@ def _claim_queued_report(
     conn: sqlite3.Connection,
     paper_ids: list[int] | tuple[int, ...] | set[int] | None,
 ) -> int | None:
-    paper_clause, paper_params = _paper_filter("r", paper_ids)
     if getattr(conn, "dialect", "") == "postgres":
         conn.execute("BEGIN")
-        row = conn.execute(
-            f"""
-            SELECT r.paper_id
-            FROM paper_reading_reports r
-            JOIN arxiv_papers p ON p.id = r.paper_id
-            WHERE r.status = 'queued'
-              {paper_clause}
-            ORDER BY r.updated_at, p.published_at DESC
-            LIMIT 1
-            FOR UPDATE OF r SKIP LOCKED
-            """,
-            paper_params,
-        ).fetchone()
-        if not row:
+        queued = [row for row in _report_rows_for_queue(conn, paper_ids) if row.get("status") == "queued"]
+        if not queued:
             conn.commit()
             return None
-        paper_id = int(row["paper_id"])
-        now = utc_now()
-        conn.execute(
-            """
-            UPDATE paper_reading_reports
-            SET status = 'processing',
-                error_message = '',
-                started_at = ?,
-                updated_at = ?
-            WHERE paper_id = ?
-              AND status = 'queued'
-            """,
-            (now, now, paper_id),
-        )
+        state = queued[0]
+        state["status"] = "processing"
+        state["error_message"] = ""
+        state["started_at"] = utc_now()
+        _save_paper_report_state(conn, state, commit=False)
         conn.commit()
-        return paper_id
+        return int(state["paper_id"])
     try:
         conn.execute("BEGIN IMMEDIATE")
     except sqlite3.OperationalError as exc:
@@ -560,37 +680,17 @@ def _claim_queued_report(
             conn.execute("BEGIN IMMEDIATE")
         else:
             raise
-    row = conn.execute(
-        f"""
-        SELECT r.paper_id
-        FROM paper_reading_reports r
-        JOIN arxiv_papers p ON p.id = r.paper_id
-        WHERE r.status = 'queued'
-          {paper_clause}
-        ORDER BY r.updated_at, p.published_at DESC
-        LIMIT 1
-        """,
-        paper_params,
-    ).fetchone()
-    if not row:
+    queued = [row for row in _report_rows_for_queue(conn, paper_ids) if row.get("status") == "queued"]
+    if not queued:
         conn.commit()
         return None
-    paper_id = int(row["paper_id"])
-    now = utc_now()
-    conn.execute(
-        """
-        UPDATE paper_reading_reports
-        SET status = 'processing',
-            error_message = '',
-            started_at = ?,
-            updated_at = ?
-        WHERE paper_id = ?
-          AND status = 'queued'
-        """,
-        (now, now, paper_id),
-    )
+    state = queued[0]
+    state["status"] = "processing"
+    state["error_message"] = ""
+    state["started_at"] = utc_now()
+    _save_paper_report_state(conn, state, commit=False)
     conn.commit()
-    return paper_id
+    return int(state["paper_id"])
 
 
 def _queued_rows(
@@ -598,20 +698,10 @@ def _queued_rows(
     paper_ids: list[int] | tuple[int, ...] | set[int] | None,
     limit: int | None,
 ) -> list[sqlite3.Row]:
-    paper_clause, paper_params = _paper_filter("r", paper_ids)
-    sql = f"""
-        SELECT r.paper_id
-        FROM paper_reading_reports r
-        JOIN arxiv_papers p ON p.id = r.paper_id
-        WHERE r.status = 'queued'
-          {paper_clause}
-        ORDER BY r.updated_at, p.published_at DESC
-    """
-    params: list[Any] = [*paper_params]
+    rows = [row for row in _report_rows_for_queue(conn, paper_ids) if row.get("status") == "queued"]
     if limit:
-        sql += " LIMIT ?"
-        params.append(int(limit))
-    return conn.execute(sql, params).fetchall()
+        rows = rows[: int(limit)]
+    return rows  # type: ignore[return-value]
 
 
 def process_paper_report_queue(
@@ -634,11 +724,10 @@ def process_paper_report_queue(
             if not paper_text:
                 raise RuntimeError("Full paper text is missing")
             text_hash = hashlib.sha256(paper_text.encode("utf-8", "replace")).hexdigest()
-            report = conn.execute(
-                "SELECT prompt FROM paper_reading_reports WHERE paper_id = ?",
-                (paper_id,),
-            ).fetchone()
-            prompt = clean_unicode(str(report["prompt"] if report else "")).strip() or _settings_report_prompt(settings)
+            state = _paper_report_state(conn, paper_id)
+            if not state:
+                raise RuntimeError(f"Paper report queue item not found: {paper_id}")
+            prompt = clean_unicode(str(state.get("prompt") or "")).strip() or _settings_report_prompt(settings)
             provider_id = settings.paper_report_provider_id or settings.llm_chat_provider_id
             model = settings.paper_report_model or settings.llm_chat_model
             paper = conn.execute("SELECT title FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
@@ -659,49 +748,48 @@ def process_paper_report_queue(
                     "UPDATE arxiv_papers SET title = ? WHERE id = ?",
                     (generated_title, paper_id),
                 )
-            conn.execute(
-                """
-                UPDATE paper_reading_reports
-                SET status = 'done',
-                    prompt = ?,
-                    system_prompt = ?,
-                    model_provider_id = ?,
-                    model = ?,
-                    source_text_hash = ?,
-                    report_markdown = ?,
-                    error_message = '',
-                    finished_at = ?,
-                    updated_at = ?
-                WHERE paper_id = ?
-                """,
-                (
-                    prompt,
-                    PAPER_READER_ANALYSIS_SYSTEM,
-                    provider_id,
-                    model,
-                    text_hash,
-                    markdown,
-                    finished,
-                    finished,
-                    paper_id,
-                ),
+                state["title"] = generated_title
+            state.update(
+                {
+                    "status": "done",
+                    "prompt": prompt,
+                    "system_prompt": PAPER_READER_ANALYSIS_SYSTEM,
+                    "model_provider_id": provider_id,
+                    "model": model,
+                    "source_text_hash": text_hash,
+                    "report_markdown": markdown,
+                    "error_message": "",
+                    "finished_at": finished,
+                }
             )
+            _save_paper_report_state(conn, state, commit=False)
             conn.commit()
             done += 1
         except Exception as exc:
             finished = utc_now()
-            conn.execute(
-                """
-                UPDATE paper_reading_reports
-                SET status = 'failed',
-                    error_message = ?,
-                    finished_at = ?,
-                    updated_at = ?
-                WHERE paper_id = ?
-                """,
-                (str(exc)[:2000], finished, finished, paper_id),
-            )
-            conn.commit()
+            original_error = str(exc)[:2000]
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            try:
+                state = _paper_report_state(conn, paper_id)
+                if state is None:
+                    raise RuntimeError(f"Paper report queue item not found: {paper_id}")
+                state["status"] = "failed"
+                state["error_message"] = original_error
+                state["finished_at"] = finished
+                _save_paper_report_state(conn, state, commit=False)
+                conn.commit()
+            except Exception as record_exc:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    f"Paper report failed and failure status could not be recorded: {record_exc}; "
+                    f"original error: {original_error}"
+                ) from exc
             failed += 1
     return {
         "paper_reports_considered": considered,
@@ -718,10 +806,14 @@ def ensure_report_ready_for_paper(
     queue_paper_report(conn, paper_id)
     report = paper_report_payload(conn, paper_id)
     if report and report.get("status") == "done" and str(report.get("report_markdown") or "").strip():
+        mirror_paper_report_artifact(conn, paper_id)
+        conn.commit()
         return report
     result = process_paper_report_queue(conn, settings, [paper_id])
     report = paper_report_payload(conn, paper_id)
     if report and report.get("status") == "done" and str(report.get("report_markdown") or "").strip():
+        mirror_paper_report_artifact(conn, paper_id)
+        conn.commit()
         return report
     error = str(report.get("error_message") if report else "") if report else ""
     raise RuntimeError(error or f"Full paper report is not ready for paper {paper_id}")
