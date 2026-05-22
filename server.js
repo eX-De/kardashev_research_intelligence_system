@@ -4,6 +4,7 @@ import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 const __dirname = resolve(fileURLToPath(new URL(".", import.meta.url)));
 const ENV_PATH = join(__dirname, ".env");
@@ -13,11 +14,16 @@ const PORT = Number(process.env.PORT || 3000);
 const PYTHON_BIN = process.env.PYTHON_BIN || "python";
 const DIST_DIR = join(__dirname, "dist");
 const PUBLIC_DIR = existsSync(DIST_DIR) ? DIST_DIR : join(__dirname, "public");
+const PANEL_PASSWORD = process.env.PANEL_PASSWORD || "";
+const PANEL_SESSION_SECRET = process.env.PANEL_SESSION_SECRET || randomBytes(32).toString("base64url");
+const PANEL_SESSION_TTL_SECONDS = positiveInteger(process.env.PANEL_SESSION_TTL_SECONDS, 604800);
+const PANEL_SESSION_COOKIE_NAME = "panel_session";
 const PAPER_REPORT_QUEUE_INTERVAL_MS = Math.max(2000, Number(process.env.PAPER_REPORT_QUEUE_INTERVAL_MS || 5000));
 const PAPER_REPORT_QUEUE_DEFAULT_CONCURRENCY = Math.max(
   1,
   Number(process.env.PAPER_REPORT_QUEUE_CONCURRENCY || process.env.PAPER_REPORT_QUEUE_LIMIT || 1)
 );
+const OBSIDIAN_NOT_CONFIGURED_CODE = "obsidian_not_configured";
 const IN_MEMORY_JOB_RECONCILE_GRACE_MS = Math.max(
   5000,
   Number(process.env.IN_MEMORY_JOB_RECONCILE_GRACE_MS || 60000)
@@ -82,6 +88,11 @@ function loadDotEnv(path) {
   }
 }
 
+function positiveInteger(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
 function worker(args, input = null) {
   return new Promise((resolvePromise, reject) => {
     const child = execFile(
@@ -105,9 +116,13 @@ function worker(args, input = null) {
           let message = error.message;
           const stderrText = String(stderr || "").trim();
           const stdoutText = String(stdout || "").trim();
+          let workerPayload = null;
           try {
-            const parsed = JSON.parse(stdout || "{}");
-            if (parsed.error) message = parsed.error;
+            const parsed = JSON.parse(stdoutText || "{}");
+            if (parsed && typeof parsed === "object") {
+              workerPayload = parsed;
+              if (parsed.error) message = String(parsed.error);
+            }
           } catch {
             message = stderrText || stdoutText || error.message;
           }
@@ -115,7 +130,16 @@ function worker(args, input = null) {
             message = `${message}\n${stderrText}`.trim();
           }
           const err = new Error(message);
-          err.statusCode = 500;
+          const structuredCode = String(workerPayload?.code || workerPayload?.reason || "");
+          if (structuredCode) {
+            err.structuredCode = structuredCode;
+            err.code = structuredCode;
+            err.reason = String(workerPayload?.reason || structuredCode);
+            err.workerPayload = workerPayload;
+          }
+          err.statusCode = Number(workerPayload?.status_code || 0) || (
+            structuredCode === OBSIDIAN_NOT_CONFIGURED_CODE ? 409 : 500
+          );
           err.stdout = stdoutText;
           err.stderr = stderrText;
           reject(err);
@@ -629,6 +653,159 @@ async function readRequestJson(req) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
+function isPanelAuthRequired() {
+  return PANEL_PASSWORD !== "";
+}
+
+function isAuthApiRequest(req, pathname) {
+  return (
+    (req.method === "GET" && pathname === "/api/auth/status") ||
+    (req.method === "POST" && pathname === "/api/auth/login") ||
+    (req.method === "POST" && pathname === "/api/auth/logout")
+  );
+}
+
+function parseCookies(req) {
+  const cookies = Object.create(null);
+  const header = String(req.headers.cookie || "");
+  for (const part of header.split(";")) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    const separator = trimmed.indexOf("=");
+    if (separator === -1) continue;
+    const name = trimmed.slice(0, separator).trim();
+    if (!name) continue;
+    cookies[name] = trimmed.slice(separator + 1);
+  }
+  return cookies;
+}
+
+function sessionSigningKey() {
+  return `${PANEL_SESSION_SECRET}\0${PANEL_PASSWORD}`;
+}
+
+function signSessionPayload(payload) {
+  return createHmac("sha256", sessionSigningKey()).update(payload).digest("base64url");
+}
+
+function timingSafeStringEqual(left, right) {
+  const leftBuffer = Buffer.from(String(left));
+  const rightBuffer = Buffer.from(String(right));
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function passwordMatches(password) {
+  const left = createHmac("sha256", PANEL_SESSION_SECRET).update(String(password)).digest();
+  const right = createHmac("sha256", PANEL_SESSION_SECRET).update(PANEL_PASSWORD).digest();
+  return timingSafeEqual(left, right);
+}
+
+function createSessionCookieValue() {
+  const now = Math.floor(Date.now() / 1000);
+  const payload = Buffer.from(JSON.stringify({
+    v: 1,
+    iat: now,
+    exp: now + PANEL_SESSION_TTL_SECONDS,
+    nonce: randomBytes(16).toString("base64url")
+  })).toString("base64url");
+  return `${payload}.${signSessionPayload(payload)}`;
+}
+
+function isValidSessionCookie(value) {
+  const parts = String(value || "").split(".");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return false;
+  if (!timingSafeStringEqual(parts[1], signSessionPayload(parts[0]))) return false;
+
+  try {
+    const payload = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8"));
+    const expiresAt = Number(payload?.exp || 0);
+    return payload?.v === 1 && Number.isFinite(expiresAt) && expiresAt > Math.floor(Date.now() / 1000);
+  } catch {
+    return false;
+  }
+}
+
+function isAuthenticatedRequest(req) {
+  if (!isPanelAuthRequired()) return true;
+  const cookies = parseCookies(req);
+  return isValidSessionCookie(cookies[PANEL_SESSION_COOKIE_NAME]);
+}
+
+function shouldUseSecureCookie(req) {
+  const configured = String(process.env.PANEL_COOKIE_SECURE || "").trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(configured)) return true;
+  if (["0", "false", "no", "off"].includes(configured)) return false;
+  return Boolean(req.socket?.encrypted);
+}
+
+function sessionCookieHeader(req, value, maxAgeSeconds) {
+  const expires = maxAgeSeconds > 0
+    ? new Date(Date.now() + maxAgeSeconds * 1000).toUTCString()
+    : "Thu, 01 Jan 1970 00:00:00 GMT";
+  const parts = [
+    `${PANEL_SESSION_COOKIE_NAME}=${value}`,
+    "HttpOnly",
+    "SameSite=Strict",
+    "Path=/",
+    `Max-Age=${maxAgeSeconds}`,
+    `Expires=${expires}`
+  ];
+  if (shouldUseSecureCookie(req)) parts.push("Secure");
+  return parts.join("; ");
+}
+
+function authStatus(req) {
+  const authRequired = isPanelAuthRequired();
+  return {
+    auth_required: authRequired,
+    authenticated: !authRequired || isAuthenticatedRequest(req)
+  };
+}
+
+async function routeAuthApi(req, res, url) {
+  if (req.method === "GET" && url.pathname === "/api/auth/status") {
+    sendJson(res, 200, authStatus(req));
+    return true;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/auth/login") {
+    if (!isPanelAuthRequired()) {
+      sendJson(res, 200, { ok: true, auth_required: false, authenticated: true });
+      return true;
+    }
+
+    let body = {};
+    try {
+      body = await readRequestJson(req);
+    } catch {
+      sendJson(res, 400, { error: "Invalid JSON", code: "invalid_json" });
+      return true;
+    }
+
+    const password = typeof body?.password === "string" ? body.password : "";
+    if (!passwordMatches(password)) {
+      sendJson(res, 401, { error: "Invalid password", code: "invalid_password" });
+      return true;
+    }
+
+    res.setHeader("Set-Cookie", sessionCookieHeader(req, createSessionCookieValue(), PANEL_SESSION_TTL_SECONDS));
+    sendJson(res, 200, { ok: true, auth_required: true, authenticated: true });
+    return true;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/auth/logout") {
+    res.setHeader("Set-Cookie", sessionCookieHeader(req, "", 0));
+    sendJson(res, 200, {
+      ok: true,
+      auth_required: isPanelAuthRequired(),
+      authenticated: !isPanelAuthRequired()
+    });
+    return true;
+  }
+
+  return false;
+}
+
 function execFileText(command, args) {
   return new Promise((resolvePromise, reject) => {
     execFile(command, args, { encoding: "utf8", maxBuffer: 1024 * 64 }, (error, stdout, stderr) => {
@@ -648,10 +825,25 @@ function pathDialogCancelled(error) {
   return /user canceled|cancelled|canceled/i.test(output) || error.code === 2 || error.exitCode === 2;
 }
 
-function localPathError(message, statusCode = 500) {
+function localPathError(message, statusCode = 500, code = "") {
   const error = new Error(message);
   error.statusCode = statusCode;
+  if (code) {
+    error.structuredCode = code;
+    error.code = code;
+    error.reason = code;
+  }
   return error;
+}
+
+function errorResponseBody(error) {
+  const body = { error: error.message || "Server error" };
+  const code = String(error.structuredCode || error.workerPayload?.code || error.workerPayload?.reason || "");
+  if (code) {
+    body.code = code;
+    body.reason = String(error.reason || error.workerPayload?.reason || code);
+  }
+  return body;
 }
 
 function applescriptString(value) {
@@ -736,7 +928,11 @@ async function withOptionalRelativePath(selectedPath, body) {
     vaultPath = String(settings.obsidian_vault_path || "").trim();
   }
   if (!vaultPath) {
-    throw localPathError("请先选择或填写 Obsidian vault 路径，再选择 vault 内部路径。", 400);
+    throw localPathError(
+      "Obsidian 未配置：请先选择或填写 Obsidian vault 路径，再选择 vault 内部路径。",
+      409,
+      OBSIDIAN_NOT_CONFIGURED_CODE
+    );
   }
 
   const vaultRoot = resolve(vaultPath);
@@ -1274,13 +1470,23 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   try {
     if (url.pathname.startsWith("/api/")) {
+      if (await routeAuthApi(req, res, url)) {
+        return;
+      }
+      if (!isAuthApiRequest(req, url.pathname) && !isAuthenticatedRequest(req)) {
+        sendJson(res, 401, { error: "Authentication required", code: "auth_required" });
+        return;
+      }
       await routeApi(req, res, url);
       return;
     }
     await serveStatic(req, res);
   } catch (error) {
     console.error(error.stack || error.message || error);
-    sendJson(res, error.statusCode || 500, { error: error.message || "Server error" });
+    const statusCode = error.statusCode || (
+      error.structuredCode === OBSIDIAN_NOT_CONFIGURED_CODE ? 409 : 500
+    );
+    sendJson(res, statusCode, errorResponseBody(error));
   }
 });
 

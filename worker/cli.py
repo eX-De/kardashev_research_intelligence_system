@@ -55,7 +55,8 @@ from .db import (
 )
 from .llm import generate_missing_project_judgments
 from .knowledge import sync_project_context_documents_from_project_notes
-from .obsidian import sync_obsidian
+from .obsidian import OBSIDIAN_NOT_CONFIGURED, ObsidianNotConfiguredError, sync_obsidian
+from .obsidian_remote import obsidian_remote_enabled
 from .paper_reports import ensure_paper_reports_for_recommendations, process_paper_report_queue
 from .project_status import run_daily_project_status_sql
 from .paper_reader import (
@@ -1297,18 +1298,30 @@ def _daily_step_status_map(conn, job_id: int) -> dict[str, str]:
     }
 
 
-def sync_context_sources(conn: sqlite3.Connection, settings) -> dict[str, int]:
+def sync_context_sources(conn: sqlite3.Connection, settings) -> dict[str, Any]:
+    obsidian_enabled = bool(settings.obsidian_vault_path) or obsidian_remote_enabled(settings)
     result = {
         "context_sources_synced": 0,
         "context_sources_skipped": 0,
-        "obsidian_enabled": 1 if settings.obsidian_vault_path else 0,
+        "obsidian_enabled": 1 if obsidian_enabled else 0,
     }
-    if settings.obsidian_vault_path:
+    if obsidian_enabled:
         obsidian_result = _with_deadlock_retry(conn, lambda: sync_obsidian(conn, settings))
-        result.update({f"obsidian_{key}": int(value) for key, value in obsidian_result.items()})
-        result["context_sources_synced"] += 1
+        for key, value in obsidian_result.items():
+            if isinstance(value, bool):
+                result[f"obsidian_{key}"] = int(value)
+            elif isinstance(value, (int, float)):
+                result[f"obsidian_{key}"] = int(value)
+        if obsidian_result.get("skipped"):
+            result["context_sources_skipped"] += 1
+            result["obsidian_skipped"] = True
+            result["obsidian_skip_reason"] = str(obsidian_result.get("reason") or OBSIDIAN_NOT_CONFIGURED)
+        else:
+            result["context_sources_synced"] += 1
     else:
         result["context_sources_skipped"] += 1
+        result["obsidian_skipped"] = True
+        result["obsidian_skip_reason"] = OBSIDIAN_NOT_CONFIGURED
     linked = sync_project_context_documents_from_project_notes(conn)
     result["project_context_documents_synced"] = linked
     return result
@@ -1327,11 +1340,12 @@ def cmd_sync_obsidian(_: argparse.Namespace) -> None:
     def run(conn, settings):
         with job_run(conn, "sync-obsidian") as job_id:
             result = sync_obsidian(conn, settings)
-            update_job_meta(conn, job_id, "Obsidian sync completed", result)
-        return result
+            message = str(result.get("message") or "Obsidian sync completed")
+            update_job_meta(conn, job_id, message, result)
+        return {"message": message, **result}
 
     result = _with_db(run)
-    _print_json({"ok": True, "message": "Obsidian sync completed", **result})
+    _print_json({"ok": True, **result})
 
 
 def cmd_fetch_arxiv(_: argparse.Namespace) -> None:
@@ -2220,6 +2234,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args.func(args)
         return 0
+    except ObsidianNotConfiguredError as exc:
+        _print_json({"ok": False, **exc.to_payload()})
+        return 1
     except Exception as exc:
         traceback.print_exc(file=sys.stderr)
         _print_json({"ok": False, "error": str(exc)})

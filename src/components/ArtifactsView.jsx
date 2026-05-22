@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { api, fmtDate, postJson } from "../lib/dashboard.js";
+import { api, fmtDate } from "../lib/dashboard.js";
+import { friendlyObsidianMessage, postObsidianJson, useObsidianCapability } from "../lib/obsidianCapability.js";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
 
 const TYPES = [
@@ -21,6 +22,8 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
   const [scopeType, setScopeType] = useState("");
   const [busy, setBusy] = useState(false);
   const selectedRouteId = Number.isFinite(Number(selectedArtifactId)) ? Number(selectedArtifactId) : null;
+  const handleCapabilityError = useCallback((error) => setStatusMessage(error.message), [setStatusMessage]);
+  const obsidianCapability = useObsidianCapability({ onError: handleCapabilityError });
 
   const loadDetail = useCallback(async (id) => {
     const data = await api(`/api/artifacts/${encodeURIComponent(String(id))}`);
@@ -57,12 +60,16 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
 
   async function exportObsidian() {
     if (!detail?.id) return;
+    if (!obsidianCapability.available) {
+      setStatusMessage(obsidianCapability.disabledReason);
+      return;
+    }
     setBusy(true);
     try {
-      const data = await postJson(`/api/artifacts/${detail.id}/export-obsidian`, {});
+      const data = await postObsidianJson(`/api/artifacts/${detail.id}/export-obsidian`, {});
       setStatusMessage(`已导出 ${data.export?.path || "artifact"}`);
     } catch (error) {
-      setStatusMessage(error.message);
+      setStatusMessage(friendlyObsidianMessage(error));
     } finally {
       setBusy(false);
     }
@@ -108,7 +115,8 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
               <p className="muted">{detail.artifact_type} · {detail.scope_type}{detail.scope_id ? ` #${detail.scope_id}` : ""} · {fmtDate(detail.updated_at)}</p>
             </div>
             <div className="detail-actions">
-              <button disabled={busy} onClick={exportObsidian} type="button">导出到 Obsidian</button>
+              <button disabled={busy || !obsidianCapability.available} onClick={exportObsidian} title={!obsidianCapability.available ? obsidianCapability.disabledReason : undefined} type="button">导出到 Obsidian</button>
+              {!obsidianCapability.available ? <p className="capability-hint">{obsidianCapability.disabledReason}</p> : null}
             </div>
             <div className="section">
               <h3>正文</h3>

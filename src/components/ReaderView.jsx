@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { api, fmtDate, postJson } from "../lib/dashboard.js";
+import {
+  api,
+  createApiError,
+  emitAuthRequired,
+  fmtDate,
+  isAuthRequiredError,
+  postJson,
+  readResponseJson
+} from "../lib/dashboard.js";
+import { friendlyObsidianMessage, postObsidianJson, useObsidianCapability } from "../lib/obsidianCapability.js";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
 import { InlineLoader, LoadingPanel } from "./Loading.jsx";
 
@@ -37,9 +46,11 @@ function parseSseEvent(rawEvent) {
   return { event, data: JSON.parse(dataLines.join("\n")) };
 }
 
-async function readErrorResponse(response) {
-  const data = await response.json().catch(() => null);
-  return data?.error || `HTTP ${response.status}`;
+async function readErrorResponse(response, path) {
+  const data = await readResponseJson(response);
+  const error = createApiError(response, data, "阅读器对话请求失败。");
+  if (isAuthRequiredError(error)) emitAuthRequired({ path, status: response.status, data });
+  return error;
 }
 
 async function readSseStream(response, handlers) {
@@ -333,6 +344,7 @@ function ReaderDetail({
   displayedMessages,
   linkingProject,
   message,
+  obsidianCapability,
   onChatModelChange,
   onCancel,
   onDeleteMessage,
@@ -413,6 +425,8 @@ function ReaderDetail({
   const recommendations = detail.project_recommendations || [];
   const chatModelOptions = chatModelList(chatSettings || {});
   const chatModelValue = currentChatModelValue(chatSettings || {});
+  const smartSaveDisabled = busy || !obsidianCapability?.available;
+  const obsidianHint = obsidianCapability?.disabledReason || "请先配置可选 Obsidian 集成。";
   const selectedChatModelValue = chatModelOptions.some((option) => option.value === chatModelValue)
     ? chatModelValue
     : "";
@@ -551,13 +565,14 @@ function ReaderDetail({
               <div className="detail-actions">
                 <button
                   aria-label="智能保存到 Obsidian"
-                  disabled={busy}
+                  disabled={smartSaveDisabled}
                   onClick={() => onSave(paper.id)}
-                  title="用全文报告和 Chat 对话整理成 Obsidian 笔记"
+                  title={obsidianCapability?.available ? "用全文报告和 Chat 对话整理成 Obsidian 笔记" : obsidianHint}
                   type="button"
                 >
                   智能保存
                 </button>
+                {!obsidianCapability?.available ? <p className="capability-hint">{obsidianHint}</p> : null}
                 {report.status !== "processing" && report.status !== "queued" && !ready ? (
                   <button disabled={busy} onClick={() => onGenerate(paper.id, false)} type="button">生成全文报告</button>
                 ) : null}
@@ -743,6 +758,8 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
   const [savingChatModel, setSavingChatModel] = useState(false);
   const activePaperIdRef = useRef(null);
   const detailRequestRef = useRef(0);
+  const handleCapabilityError = useCallback((error) => setStatusMessage(error.message), [setStatusMessage]);
+  const obsidianCapability = useObsidianCapability({ settings: readerSettings, onError: handleCapabilityError });
 
   const baseMessages = detail?.reader_messages || [];
   const detailPaperId = Number(detail?.paper?.id || 0);
@@ -960,12 +977,14 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
       streaming: true
     });
     try {
-      const response = await fetch(`/api/reader/papers/${paperId}/chat`, {
+      const chatPath = `/api/reader/papers/${paperId}/chat`;
+      const response = await fetch(chatPath, {
         method: "POST",
+        credentials: "same-origin",
         headers: { accept: "text/event-stream", "content-type": "application/json" },
         body: JSON.stringify({ message: nextMessage, stream: true })
       });
-      if (!response.ok) throw new Error(await readErrorResponse(response));
+      if (!response.ok) throw await readErrorResponse(response, chatPath);
       let completed = false;
       await readSseStream(response, {
         onStart(data) {
@@ -1049,12 +1068,16 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
   }
 
   async function saveToObsidian(paperId) {
+    if (!obsidianCapability.available) {
+      setStatusMessage(obsidianCapability.disabledReason);
+      return;
+    }
     setBusy(true);
     try {
-      const data = await postJson(`/api/reader/papers/${paperId}/save`, {});
+      const data = await postObsidianJson(`/api/reader/papers/${paperId}/save`, {});
       setStatusMessage(`已保存到 Obsidian：${data.obsidian_path || ""}`);
     } catch (error) {
-      setStatusMessage(error.message);
+      setStatusMessage(friendlyObsidianMessage(error));
     } finally {
       setBusy(false);
     }
@@ -1225,6 +1248,7 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
               displayedMessages={displayedMessages}
               linkingProject={linkingProjectPaperId === detail?.paper?.id}
               message={message}
+              obsidianCapability={obsidianCapability}
               onChatModelChange={changeReaderChatModel}
               onCancel={cancelReport}
               onDeleteMessage={deleteMessage}

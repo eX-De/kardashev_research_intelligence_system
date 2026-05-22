@@ -11,6 +11,11 @@ from .config import Settings
 from .db import clean_unicode, to_json, utc_now
 from .embeddings import embed_text, ensure_missing_note_chunk_embeddings
 from .knowledge import sync_project_context_documents_from_project_notes, upsert_knowledge_document
+from .obsidian_remote import (
+    obsidian_remote_configured,
+    obsidian_remote_enabled,
+    sync_remote_obsidian_to_mirror,
+)
 
 TAG_PATTERN = re.compile(r"(?<![\w/])#([^\s#]+)")
 HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
@@ -25,6 +30,42 @@ STATUS_TAG_TO_PROJECT_STATUS = {
 }
 SKIPPED_DIR_NAMES = {".trash"}
 POSTGRES_OBSIDIAN_SYNC_LOCK_KEY = 7240185732502
+OBSIDIAN_NOT_CONFIGURED = "obsidian_not_configured"
+OBSIDIAN_NOT_CONFIGURED_MESSAGE = "Obsidian vault path is not configured"
+
+
+class ObsidianNotConfiguredError(RuntimeError):
+    code = OBSIDIAN_NOT_CONFIGURED
+    reason = OBSIDIAN_NOT_CONFIGURED
+    status_code = 409
+
+    def __init__(self, message: str = OBSIDIAN_NOT_CONFIGURED_MESSAGE):
+        super().__init__(message)
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "error": str(self),
+            "code": self.code,
+            "reason": self.reason,
+            "status_code": self.status_code,
+        }
+
+
+def obsidian_sync_skip_result() -> dict[str, object]:
+    return {
+        "ok": True,
+        "skipped": True,
+        "reason": OBSIDIAN_NOT_CONFIGURED,
+        "message": "Obsidian 未配置，已跳过同步。",
+        "notes_seen": 0,
+        "notes_indexed": 0,
+        "notes_skipped": 0,
+        "projects_synced": 0,
+        "project_notes_synced": 0,
+        "project_context_documents_synced": 0,
+        "chunks_created": 0,
+        "embeddings_created": 0,
+    }
 
 
 @dataclass
@@ -189,7 +230,7 @@ def _is_included(path: Path, vault: Path, settings: Settings) -> bool:
 def discover_notes(settings: Settings) -> list[ParsedNote]:
     vault = settings.obsidian_vault_path
     if not vault:
-        raise RuntimeError("OBSIDIAN_VAULT_PATH is not configured")
+        raise ObsidianNotConfiguredError()
     if not vault.exists():
         raise RuntimeError(f"OBSIDIAN_VAULT_PATH does not exist: {vault}")
 
@@ -544,13 +585,34 @@ def _mirror_note_to_knowledge(
     )
 
 
-def sync_obsidian(conn: sqlite3.Connection, settings: Settings) -> dict[str, int]:
+def sync_obsidian(conn: sqlite3.Connection, settings: Settings) -> dict[str, object]:
+    remote_stats: dict[str, int] = {}
+    if obsidian_remote_enabled(settings):
+        if not obsidian_remote_configured(settings):
+            result = obsidian_sync_skip_result()
+            result.update(
+                {
+                    "remote_enabled": 1,
+                    "remote_configured": 0,
+                    "remote_objects_seen": 0,
+                    "remote_markdown_downloaded": 0,
+                    "remote_objects_skipped": 0,
+                }
+            )
+            return result
+        settings, remote_stats = sync_remote_obsidian_to_mirror(settings)
+    if not settings.obsidian_vault_path:
+        result = obsidian_sync_skip_result()
+        result.update(remote_stats)
+        return result
     if getattr(conn, "dialect", "") != "postgres":
-        return _sync_obsidian_unlocked(conn, settings)
+        result = _sync_obsidian_unlocked(conn, settings)
+        return {**remote_stats, **result}
     conn.execute("SELECT pg_advisory_lock(?)", (POSTGRES_OBSIDIAN_SYNC_LOCK_KEY,))
     conn.commit()
     try:
-        return _sync_obsidian_unlocked(conn, settings)
+        result = _sync_obsidian_unlocked(conn, settings)
+        return {**remote_stats, **result}
     finally:
         try:
             conn.rollback()

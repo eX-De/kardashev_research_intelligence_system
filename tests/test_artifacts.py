@@ -7,7 +7,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from worker.config import LLMProvider, Settings
+from worker.api import export_artifact
+from worker.artifacts import upsert_artifact
 from worker.db import init_db
+from worker.obsidian import OBSIDIAN_NOT_CONFIGURED, ObsidianNotConfiguredError
 from worker.paper_reports import process_paper_report_queue, queue_paper_report
 from worker.papers import paper_id_for_arxiv_paper_id, upsert_manual_paper
 from worker.reports import generate_daily_report
@@ -60,6 +63,25 @@ def settings(*, vault: Path | None = None) -> Settings:
 
 
 class ArtifactTests(unittest.TestCase):
+    def test_artifact_export_without_obsidian_vault_raises_structured_error(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        artifact = upsert_artifact(
+            conn,
+            scope_type="system",
+            artifact_type="daily_report",
+            title="No Vault Report",
+            content_markdown="# Report\n\nNo vault.",
+            source_key="test:no-vault-report",
+        )
+
+        with self.assertRaises(ObsidianNotConfiguredError) as caught:
+            export_artifact(conn, settings(), int(artifact["id"]))
+
+        self.assertEqual(caught.exception.reason, OBSIDIAN_NOT_CONFIGURED)
+        self.assertEqual(caught.exception.to_payload()["code"], OBSIDIAN_NOT_CONFIGURED)
+
     def test_daily_report_creates_artifact_without_obsidian_vault(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row

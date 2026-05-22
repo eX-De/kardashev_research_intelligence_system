@@ -248,6 +248,15 @@ function ProviderSelectors({ settings, providers, onProviderChange, onAddProvide
   );
 }
 
+function PasswordField({ label, name, placeholder, value, onChange }) {
+  return (
+    <label>
+      <span>{label}</span>
+      <input name={name} type="password" placeholder={placeholder} value={value || ""} onChange={(event) => onChange(name, event.target.value)} />
+    </label>
+  );
+}
+
 export function normalizeProviders(providers = []) {
   return providers.length ? providers.map(normalizedProvider) : [normalizedProvider({ id: "default", name: "Default" })];
 }
@@ -275,21 +284,51 @@ const SAVE_STATUS_LABELS = {
 };
 
 export function SettingsForm({ settings, providers, onSettingChange, onProviderChange, onAddProvider, onRemoveProvider, onPickPath, onSubmit, saveStatus = "idle" }) {
+  const obsidianBackend = String(settings.obsidian_storage_backend || "local");
+  const remoteObsidian = ["oss", "s3", "r2"].includes(obsidianBackend);
+  const remoteSecretText = settings.obsidian_remote_secret_access_key_configured ? "Secret 已保存；留空不修改。" : "Access secret";
+
   return (
     <form className="settings-form" onSubmit={onSubmit}>
       <SettingsSection
         eyebrow="Sources"
-        title="知识库与 Obsidian"
-        description="项目上下文、论文归档和同步入口。"
+        title="知识库与可选 Obsidian 集成"
+        description="系统内知识库、论文抓取和报告生成可独立运行；填写 vault 后才启用 Obsidian 导入、导出和路径选择。"
       >
-        <PathField label="Obsidian vault 路径" name="obsidian_vault_path" placeholder="D:\\Obsidian\\Vault" value={settings.obsidian_vault_path} onChange={onSettingChange} onPickPath={onPickPath} />
-        <TextField label="扫描文件夹" name="obsidian_include_dirs" placeholder="Research,Papers" value={settings.obsidian_include_dirs} onChange={onSettingChange} />
-        <TextField label="纳入标签" name="obsidian_include_tags" placeholder="research,paper,direction" value={settings.obsidian_include_tags} onChange={onSettingChange} />
-        <TextField label="项目中心页标签组合" name="obsidian_project_center_tags" placeholder="project,center" value={settings.obsidian_project_center_tags} onChange={onSettingChange} />
-        <TextField label="Obsidian CLI 命令" name="obsidian_cli_command" placeholder="obsidian" value={settings.obsidian_cli_command} onChange={onSettingChange} />
-        <PathField label="论文仓库目录" name="obsidian_paper_repository_dir" placeholder="人工智能/论文仓库" relativeTo="obsidian_vault" value={settings.obsidian_paper_repository_dir} onChange={onSettingChange} onPickPath={onPickPath} />
-        <PathField label="论文附件目录" name="obsidian_paper_attachment_dir" placeholder="人工智能/论文仓库/附件" relativeTo="obsidian_vault" value={settings.obsidian_paper_attachment_dir} onChange={onSettingChange} onPickPath={onPickPath} />
-        <TextField label="项目论文列表文件名" name="obsidian_project_paper_list_name" placeholder="论文列表.md" value={settings.obsidian_project_paper_list_name} onChange={onSettingChange} />
+        <label>
+          <span>Obsidian 存储模式</span>
+          <select value={obsidianBackend} onChange={(event) => onSettingChange("obsidian_storage_backend", event.target.value)}>
+            <option value="local">本地 vault</option>
+            <option value="oss">阿里云 OSS</option>
+            <option value="s3">S3 兼容</option>
+            <option value="r2">Cloudflare R2</option>
+          </select>
+        </label>
+        {remoteObsidian ? (
+          <>
+            <TextField label="Endpoint URL" name="obsidian_remote_endpoint_url" placeholder={obsidianBackend === "r2" ? "https://<account>.r2.cloudflarestorage.com" : "https://oss-cn-hangzhou.aliyuncs.com"} value={settings.obsidian_remote_endpoint_url} onChange={onSettingChange} />
+            <TextField label="Region" name="obsidian_remote_region" placeholder={obsidianBackend === "r2" ? "auto" : "cn-hangzhou"} value={settings.obsidian_remote_region} onChange={onSettingChange} />
+            <TextField label="Bucket" name="obsidian_remote_bucket" placeholder="obsidian-vault" value={settings.obsidian_remote_bucket} onChange={onSettingChange} />
+            <TextField label="Vault prefix" name="obsidian_remote_prefix" placeholder="vault" value={settings.obsidian_remote_prefix} onChange={onSettingChange} />
+            <TextField label="系统输出前缀" name="obsidian_remote_output_prefix" placeholder="Research Intelligence" value={settings.obsidian_remote_output_prefix} onChange={onSettingChange} />
+            <TextField label="本地镜像目录" name="obsidian_remote_mirror_dir" placeholder="./data/obsidian_remote_vault" value={settings.obsidian_remote_mirror_dir} onChange={onSettingChange} />
+            <TextField label="Access key ID" name="obsidian_remote_access_key_id" placeholder="AKIA..." value={settings.obsidian_remote_access_key_id} onChange={onSettingChange} />
+            <PasswordField label="Access secret" name="obsidian_remote_secret_access_key" placeholder={remoteSecretText} value={settings.obsidian_remote_secret_access_key} onChange={onSettingChange} />
+          </>
+        ) : (
+          <PathField label="可选 Obsidian vault 路径" name="obsidian_vault_path" placeholder="D:\\Obsidian\\Vault" value={settings.obsidian_vault_path} onChange={onSettingChange} onPickPath={onPickPath} />
+        )}
+        <TextField label="Obsidian 扫描文件夹" name="obsidian_include_dirs" placeholder="Research,Papers" value={settings.obsidian_include_dirs} onChange={onSettingChange} />
+        <TextField label="Obsidian 纳入标签" name="obsidian_include_tags" placeholder="research,paper,direction" value={settings.obsidian_include_tags} onChange={onSettingChange} />
+        <TextField label="Obsidian 项目中心页标签" name="obsidian_project_center_tags" placeholder="project,center" value={settings.obsidian_project_center_tags} onChange={onSettingChange} />
+        {!remoteObsidian ? (
+          <>
+            <TextField label="Obsidian CLI 命令（可选）" name="obsidian_cli_command" placeholder="obsidian" value={settings.obsidian_cli_command} onChange={onSettingChange} />
+            <PathField label="Obsidian 论文仓库目录" name="obsidian_paper_repository_dir" placeholder="人工智能/论文仓库" relativeTo="obsidian_vault" value={settings.obsidian_paper_repository_dir} onChange={onSettingChange} onPickPath={onPickPath} />
+            <PathField label="Obsidian 论文附件目录" name="obsidian_paper_attachment_dir" placeholder="人工智能/论文仓库/附件" relativeTo="obsidian_vault" value={settings.obsidian_paper_attachment_dir} onChange={onSettingChange} onPickPath={onPickPath} />
+            <TextField label="Obsidian 项目论文列表文件名" name="obsidian_project_paper_list_name" placeholder="论文列表.md" value={settings.obsidian_project_paper_list_name} onChange={onSettingChange} />
+          </>
+        ) : null}
       </SettingsSection>
 
       <SettingsSection

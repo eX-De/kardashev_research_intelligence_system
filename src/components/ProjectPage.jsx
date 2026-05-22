@@ -13,6 +13,7 @@ import {
   PROJECT_STATUSES,
   snippet
 } from "../lib/dashboard.js";
+import { friendlyObsidianMessage, postObsidianJson, useObsidianCapability } from "../lib/obsidianCapability.js";
 
 function relationOptions(options) {
   return options.map(([value, label]) => <option key={value} value={value}>{label}</option>);
@@ -29,8 +30,10 @@ function projectToForm(project = {}) {
   };
 }
 
-function ProjectForm({ project, form, setForm, onPickPath, onSubmit }) {
+function ProjectForm({ project, form, setForm, obsidianCapability, onPickPath, onSubmit }) {
   const update = (name, value) => setForm((current) => ({ ...current, [name]: value }));
+  const obsidianDisabled = !obsidianCapability?.available;
+  const obsidianHint = obsidianCapability?.disabledReason || "请先配置可选 Obsidian 集成。";
   return (
     <div className="detail-card">
       <form className="project-form" onSubmit={onSubmit}>
@@ -61,19 +64,21 @@ function ProjectForm({ project, form, setForm, onPickPath, onSubmit }) {
             rows={7}
           />
         </label>
-        <label>
+        <label className={obsidianDisabled ? "capability-disabled" : ""}>
           <span>Obsidian 项目主页</span>
           <div className="path-input-row">
-            <input value={form.obsidian_project_path} placeholder="Projects/Agentic RAG/Home.md" onChange={(event) => update("obsidian_project_path", event.target.value)} />
-            <button type="button" onClick={() => onPickPath("obsidian_project_path", "file", "选择 Obsidian 项目主页 Markdown")}>选择</button>
+            <input disabled={obsidianDisabled} value={form.obsidian_project_path} placeholder="Projects/Agentic RAG/Home.md" onChange={(event) => update("obsidian_project_path", event.target.value)} />
+            <button disabled={obsidianDisabled} title={obsidianDisabled ? obsidianHint : undefined} type="button" onClick={() => onPickPath("obsidian_project_path", "file", "选择 Obsidian 项目主页 Markdown")}>选择</button>
           </div>
+          {obsidianDisabled ? <small className="capability-hint">{obsidianHint}</small> : null}
         </label>
-        <label>
+        <label className={obsidianDisabled ? "capability-disabled" : ""}>
           <span>Obsidian 输出目录</span>
           <div className="path-input-row">
-            <input value={form.obsidian_output_dir} placeholder="Projects/Agentic RAG" onChange={(event) => update("obsidian_output_dir", event.target.value)} />
-            <button type="button" onClick={() => onPickPath("obsidian_output_dir", "directory", "选择 Obsidian 输出目录")}>选择</button>
+            <input disabled={obsidianDisabled} value={form.obsidian_output_dir} placeholder="Projects/Agentic RAG" onChange={(event) => update("obsidian_output_dir", event.target.value)} />
+            <button disabled={obsidianDisabled} title={obsidianDisabled ? obsidianHint : undefined} type="button" onClick={() => onPickPath("obsidian_output_dir", "directory", "选择 Obsidian 输出目录")}>选择</button>
           </div>
+          {obsidianDisabled ? <small className="capability-hint">{obsidianHint}</small> : null}
         </label>
         <div className="form-actions">
           <button type="submit" className="primary">保存配置</button>
@@ -83,21 +88,25 @@ function ProjectForm({ project, form, setForm, onPickPath, onSubmit }) {
   );
 }
 
-function ObsidianPanel({ project, artifacts, contextDocuments, onExport }) {
+function ObsidianPanel({ project, artifacts, contextDocuments, obsidianCapability, onExport }) {
+  const exportDisabled = !obsidianCapability?.available;
+  const obsidianHint = obsidianCapability?.disabledReason || "请先配置可选 Obsidian 集成。";
+  const disabledValue = obsidianCapability?.configured ? obsidianCapability.label : "可选：未启用";
   return (
     <section className="panel automation-panel">
       <div className="panel-title">
         <h2>集成/导出</h2>
-        {project?.id ? <button type="button" onClick={onExport}>同步索引到 Obsidian</button> : null}
+        {project?.id ? <button disabled={exportDisabled} title={exportDisabled ? obsidianHint : undefined} type="button" onClick={onExport}>同步索引到 Obsidian</button> : null}
       </div>
+      {exportDisabled ? <p className="capability-hint">{obsidianHint}</p> : null}
       <div className="project-health-grid">
-        <div className={`health-item ${project?.obsidian_project_path ? "ok" : "warn"}`}>
+        <div className={`health-item ${project?.obsidian_project_path ? "ok" : "neutral"}`}>
           <span>项目主页</span>
-          <strong>{project?.obsidian_project_path || "未配置"}</strong>
+          <strong>{project?.obsidian_project_path || (obsidianCapability?.available ? "默认 Projects/<项目名>.md" : disabledValue)}</strong>
         </div>
-        <div className={`health-item ${project?.obsidian_folder || project?.obsidian_output_dir ? "ok" : "warn"}`}>
+        <div className={`health-item ${project?.obsidian_folder || project?.obsidian_output_dir ? "ok" : "neutral"}`}>
           <span>项目文件夹</span>
-          <strong>{project?.obsidian_folder || project?.obsidian_output_dir || "未配置"}</strong>
+          <strong>{project?.obsidian_folder || project?.obsidian_output_dir || (obsidianCapability?.available ? "使用默认输出目录" : disabledValue)}</strong>
         </div>
         <div className="health-item neutral">
           <span>来源</span>
@@ -129,7 +138,7 @@ function ObsidianPanel({ project, artifacts, contextDocuments, onExport }) {
             <div className="linked-item" key={artifact.id}>
               <div>
                 <strong>{artifact.title}</strong>
-                <p className="muted">{artifact.status} · {artifact.obsidian_path}</p>
+                <p className="muted">{artifact.status}{artifact.obsidian_path ? ` · ${artifact.obsidian_path}` : ""}</p>
               </div>
             </div>
           )) : <p className="muted">暂无生成产物。</p>}
@@ -238,7 +247,7 @@ function LinkedResourcesPanel({ detail, onLinkPaper, onLinkNote, onUnlinkPaper, 
                 </div>
                 <button type="button" onClick={() => onUnlinkNote(note.id)}>移除</button>
               </div>
-            )) : <p className="muted">暂无关联 Obsidian 笔记。</p>}
+            )) : <p className="muted">暂无关联笔记。</p>}
           </div>
         </div>
       </div>
@@ -250,6 +259,8 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
   const [detail, setDetail] = useState(null);
   const [form, setForm] = useState(projectToForm());
   const isNew = !projectId;
+  const handleCapabilityError = useCallback((error) => setStatusMessage(error.message), [setStatusMessage]);
+  const obsidianCapability = useObsidianCapability({ onError: handleCapabilityError });
 
   const loadProject = useCallback(async () => {
     if (!projectId) {
@@ -283,6 +294,10 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
   }), [project]);
 
   async function pickPath(field, mode, titleText) {
+    if (!obsidianCapability.available) {
+      setStatusMessage(obsidianCapability.disabledReason);
+      return;
+    }
     try {
       setStatusMessage("正在打开本地路径选择器...");
       const data = await chooseLocalPath({ mode, title: titleText, relativeTo: "obsidian_vault" });
@@ -293,7 +308,7 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
       setForm((current) => ({ ...current, [field]: data.relative_path ?? data.path ?? "" }));
       setStatusMessage("路径已选择");
     } catch (error) {
-      setStatusMessage(error.message);
+      setStatusMessage(friendlyObsidianMessage(error));
     }
   }
 
@@ -322,12 +337,16 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
 
   async function exportProject() {
     if (!projectId) return;
+    if (!obsidianCapability.available) {
+      setStatusMessage(obsidianCapability.disabledReason);
+      return;
+    }
     try {
-      const data = await postJson(`/api/projects/${projectId}/export-obsidian`);
+      const data = await postObsidianJson(`/api/projects/${projectId}/export-obsidian`);
       setDetail(data);
       setStatusMessage(`Synced ${data.export?.obsidian_path || "project index"}`);
     } catch (error) {
-      setStatusMessage(error.message);
+      setStatusMessage(friendlyObsidianMessage(error));
     }
   }
 
@@ -364,15 +383,15 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
         <div>
           <button type="button" onClick={onBack}>← 返回项目中心</button>
           <h1>{title}</h1>
-          <p>{isNew ? "创建项目配置；从 Obsidian 同步的项目通常不需要手工创建。" : `${project.paper_count || 0} papers · ${project.note_count || 0} notes · ${artifacts.length} outputs`}</p>
+          <p>{isNew ? "创建系统内项目配置；也可以稍后接入可选 Obsidian 同步。" : `${project.paper_count || 0} papers · ${project.note_count || 0} notes · ${artifacts.length} outputs`}</p>
         </div>
       </header>
 
       <div className="project-page-grid">
-        <ProjectForm project={project} form={form} setForm={setForm} onPickPath={pickPath} onSubmit={saveProject} />
+        <ProjectForm project={project} form={form} setForm={setForm} obsidianCapability={obsidianCapability} onPickPath={pickPath} onSubmit={saveProject} />
         {!isNew ? (
           <>
-            <ObsidianPanel project={project} artifacts={artifacts} contextDocuments={contextDocuments} onExport={exportProject} />
+            <ObsidianPanel project={project} artifacts={artifacts} contextDocuments={contextDocuments} obsidianCapability={obsidianCapability} onExport={exportProject} />
             <ProjectMatchesPanel matches={matches} />
             <LinkedResourcesPanel
               detail={detail || {}}

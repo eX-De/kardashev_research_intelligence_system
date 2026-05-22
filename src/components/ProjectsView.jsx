@@ -118,7 +118,7 @@ export function ProjectsView({ onOpenProject, onNewProject, setStatusMessage }) 
             <LoadingPanel compact rows={7} title="读取项目列表" />
           ) : (
             <div className="project-board">
-              {!projects.length ? <div className="project-empty">暂无项目。手动新建项目，或在设置中启用 Obsidian 导入。</div> : (
+              {!projects.length ? <div className="project-empty">暂无项目。可以手动新建系统内项目；Obsidian 导入是可选入口。</div> : (
                 <>
                   <div className="project-table-head">
                     <span>Project</span>
@@ -132,7 +132,7 @@ export function ProjectsView({ onOpenProject, onNewProject, setStatusMessage }) 
                     <button className="project-row" key={project.id} onClick={() => onOpenProject(project.id)} type="button">
                       <div className="project-row-main">
                         <strong>{project.name}</strong>
-                        <p>{project.obsidian_folder || project.obsidian_project_path || project.obsidian_output_dir || "未配置 Obsidian 输出"}</p>
+                        <p>{project.obsidian_folder || project.obsidian_project_path || project.obsidian_output_dir || "系统内项目"}</p>
                       </div>
                       <span className={`status-pill status-${project.status}`}><span className="status-dot" />{statusLabel(project.status)}</span>
                       <span className="project-row-metric"><strong>{project.paper_count || 0}</strong><small>papers</small></span>

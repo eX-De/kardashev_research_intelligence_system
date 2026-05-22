@@ -15,6 +15,7 @@ from .llm import (
     call_chat_json,
 )
 from .project_status import run_daily_project_status_sql
+from .obsidian_remote import obsidian_remote_enabled
 
 
 DAILY_REPORT_DIR = Path("Research Intelligence") / "Daily"
@@ -380,7 +381,11 @@ def generate_daily_report(
         input_hash=content_hash(body, source_payload),
     )
     exported_path = ""
-    export_enabled = bool(settings.obsidian_vault_path) if export_to_obsidian is None else bool(export_to_obsidian)
+    export_enabled = (
+        bool(settings.obsidian_vault_path) or obsidian_remote_enabled(settings)
+        if export_to_obsidian is None
+        else bool(export_to_obsidian)
+    )
     if export_enabled:
         try:
             exported = export_artifact_to_obsidian(conn, settings, int(artifact["id"]), relative_path=rel_path)

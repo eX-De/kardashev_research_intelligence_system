@@ -14,7 +14,17 @@ from .artifacts import (
     list_artifacts,
 )
 from .knowledge import save_manual_project_context
-from .obsidian import status_tag_for_project_status, update_markdown_status_tag
+from .obsidian import (
+    OBSIDIAN_NOT_CONFIGURED,
+    ObsidianNotConfiguredError,
+    status_tag_for_project_status,
+    update_markdown_status_tag,
+)
+from .obsidian_remote import (
+    obsidian_remote_configured,
+    obsidian_remote_enabled,
+    obsidian_remote_status,
+)
 from .obsidian_library import sync_accepted_paper_to_obsidian
 from .paper_reports import (
     ensure_paper_reports_for_recommendations,
@@ -514,7 +524,7 @@ def _sync_project_status_to_obsidian(
     status: str,
 ) -> str:
     status_tag = status_tag_for_project_status(status)
-    if settings and settings.obsidian_vault_path and obsidian_project_path:
+    if settings and not obsidian_remote_enabled(settings) and settings.obsidian_vault_path and obsidian_project_path:
         update_markdown_status_tag(settings.obsidian_vault_path, obsidian_project_path, status)
     return status_tag
 
@@ -648,7 +658,7 @@ def _safe_filename(value: str) -> str:
 
 def _resolve_vault_markdown_path(settings: Settings, project: dict[str, object]) -> tuple[Path, str]:
     if not settings.obsidian_vault_path:
-        raise RuntimeError("Obsidian vault path is not configured")
+        raise ObsidianNotConfiguredError()
     vault = settings.obsidian_vault_path.expanduser().resolve()
     if not vault.exists() or not vault.is_dir():
         raise RuntimeError("Obsidian vault path does not exist")
@@ -736,11 +746,15 @@ def export_project_to_obsidian(
     project_id: int,
 ) -> dict[str, object]:
     detail = project_detail(conn, project_id)
-    _, relative_path = _resolve_vault_markdown_path(settings, detail["project"])
     artifact = generate_project_index_artifact(conn, project_id)
-    export_artifact_to_obsidian(conn, settings, int(artifact["id"]), relative_path=relative_path)
+    if obsidian_remote_enabled(settings):
+        export = export_artifact_to_obsidian(conn, settings, int(artifact["id"]))
+        relative_path = str(export.get("path") or "")
+    else:
+        _, relative_path = _resolve_vault_markdown_path(settings, detail["project"])
+        export = export_artifact_to_obsidian(conn, settings, int(artifact["id"]), relative_path=relative_path)
     updated = project_detail(conn, project_id)
-    updated["export"] = {"obsidian_path": relative_path, "status": "synced"}
+    updated["export"] = {"obsidian_path": relative_path, "status": "synced", **export}
     return updated
 
 
@@ -1300,8 +1314,8 @@ def update_paper_recommendation(
         accept_recommendations_for_paper(conn, paper_id, project_ids, importance)
         library_result = set_arxiv_paper_library_status(conn, paper_id, "reading")
         conn.commit()
-        sync_result: dict[str, object] = {"skipped": True, "reason": "obsidian_not_configured"}
-        if settings.obsidian_vault_path:
+        sync_result: dict[str, object] = {"skipped": True, "reason": OBSIDIAN_NOT_CONFIGURED}
+        if settings.obsidian_vault_path and not obsidian_remote_enabled(settings):
             try:
                 sync_result = sync_accepted_paper_to_obsidian(conn, settings, paper_id)
                 conn.commit()
@@ -1311,6 +1325,12 @@ def update_paper_recommendation(
                 except Exception:
                     pass
                 sync_result = {"skipped": False, "failed": True, "reason": str(exc)}
+        elif obsidian_remote_enabled(settings):
+            sync_result = {
+                "skipped": True,
+                "reason": "obsidian_remote_append_only",
+                "message": "远端 Obsidian 模式只写入新增产物，不修改论文笔记或项目论文列表。",
+            }
         detail = paper_detail(conn, paper_id)
         detail["ok"] = True
         detail["sync"] = sync_result
@@ -1531,9 +1551,23 @@ def health(conn: sqlite3.Connection, settings: Settings) -> dict[str, object]:
         LIMIT 1
         """
     ).fetchone()
+    remote = obsidian_remote_status(settings)
+    remote_enabled = obsidian_remote_enabled(settings)
     vault = settings.obsidian_vault_path
     vault_path = str(vault or "")
     vault_exists = bool(vault and Path(vault).exists())
+    obsidian_configured = obsidian_remote_configured(settings) if remote_enabled else bool(vault)
+    obsidian_status = (
+        "remote_configured"
+        if remote_enabled and obsidian_remote_configured(settings)
+        else "remote_incomplete"
+        if remote_enabled
+        else "ok"
+        if vault_exists
+        else "missing"
+        if vault
+        else "not_configured"
+    )
     database = database_target(conn, settings.db_path)
     return {
         "database": {
@@ -1541,10 +1575,12 @@ def health(conn: sqlite3.Connection, settings: Settings) -> dict[str, object]:
             **database,
         },
         "obsidian": {
-            "configured": bool(vault),
+            "configured": obsidian_configured,
             "path": vault_path,
             "exists": vault_exists,
-            "status": "ok" if vault_exists else "missing" if vault else "not_configured",
+            "status": obsidian_status,
+            "storage_backend": remote["backend"],
+            "remote": remote,
             "cli_command": settings.obsidian_cli_command,
             "paper_repository_dir": settings.obsidian_paper_repository_dir,
             "paper_attachment_dir": settings.obsidian_paper_attachment_dir,

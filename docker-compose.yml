@@ -1,0 +1,75 @@
+services:
+  db:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-research_intelligence}
+      POSTGRES_USER: ${POSTGRES_USER:-research_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-research_password}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    # Uncomment only if you need to connect to PostgreSQL from the host.
+    # ports:
+    #   - "${POSTGRES_HOST_PORT:-5432}:5432"
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: research-intelligence:local
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${APP_HOST_BIND:-0.0.0.0}:${APP_HOST_PORT:-3000}:3000"
+    env_file:
+      - .env
+    environment:
+      PORT: "3000"
+      PYTHON_BIN: /opt/venv/bin/python
+      DATABASE_URL: postgresql://${POSTGRES_USER:-research_app}:${POSTGRES_PASSWORD:-research_password}@db:5432/${POSTGRES_DB:-research_intelligence}
+      APP_DB_PATH: /data/research_intelligence.sqlite
+      PANEL_PASSWORD: ${PANEL_PASSWORD:-}
+      PANEL_SESSION_TTL_SECONDS: ${PANEL_SESSION_TTL_SECONDS:-604800}
+      PANEL_SESSION_SECRET: ${PANEL_SESSION_SECRET:-}
+      PANEL_COOKIE_SECURE: ${PANEL_COOKIE_SECURE:-}
+      ARXIV_PDF_DIR: /data/arxiv_pdfs
+      ARXIV_TEXT_DIR: /data/arxiv_text
+      # Set OBSIDIAN_VAULT_PATH to /vault if you mount a vault below.
+      # OBSIDIAN_VAULT_PATH: /vault
+    volumes:
+      - ./data:/data
+      # Mount your Obsidian vault when needed, then set OBSIDIAN_VAULT_PATH=/vault.
+      # - D:/path/to/YourVault:/vault
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.27-alpine
+    profiles:
+      - nginx
+    depends_on:
+      app:
+        condition: service_started
+    ports:
+      - "${NGINX_HTTP_PORT:-80}:80"
+      - "${NGINX_HTTPS_PORT:-443}:443"
+    environment:
+      NGINX_SERVER_NAME: ${NGINX_SERVER_NAME:-localhost}
+      NGINX_CERTIFICATE: ${NGINX_CERTIFICATE:-/etc/nginx/certs/fullchain.pem}
+      NGINX_CERTIFICATE_KEY: ${NGINX_CERTIFICATE_KEY:-/etc/nginx/certs/privkey.pem}
+      NGINX_CLIENT_MAX_BODY_SIZE: ${NGINX_CLIENT_MAX_BODY_SIZE:-64m}
+    volumes:
+      - ./deploy/nginx/templates:/etc/nginx/templates:ro
+      - ${NGINX_CERT_DIR:-./deploy/nginx/certs}:/etc/nginx/certs:ro
+    restart: unless-stopped
+
+volumes:
+  pgdata:

@@ -9,8 +9,11 @@ from urllib.parse import unquote, urljoin, urlparse
 import re
 
 from .config import Settings
+from .artifacts import create_artifact, export_artifact_to_obsidian
 from .arxiv_text import download_pdf, extract_pdf_text_to_file, replace_arxiv_chunks_for_paper
 from .db import clean_unicode, to_json, utc_now
+from .obsidian import ObsidianNotConfiguredError
+from .obsidian_remote import obsidian_remote_enabled
 from .papers import upsert_imported_paper
 from .paper_reports import (
     _call_chat_text,
@@ -964,10 +967,39 @@ def save_reader_note_to_obsidian(
     settings: Settings,
     paper_id: int,
 ) -> dict[str, object]:
-    vault = _vault(settings)
+    if not settings.obsidian_vault_path and not obsidian_remote_enabled(settings):
+        raise ObsidianNotConfiguredError()
     paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
     if not paper:
         raise RuntimeError(f"Paper not found: {paper_id}")
+
+    if obsidian_remote_enabled(settings):
+        smart_save = _generate_smart_save_note(conn, settings, paper, paper_id)
+        artifact = create_artifact(
+            conn,
+            scope_type="paper",
+            scope_id=int(paper_id),
+            artifact_type="reader_note",
+            title=clean_unicode(str(paper["title"] or paper["arxiv_id"] or f"Paper {paper_id}")),
+            content_markdown=smart_save["body"],
+            content_json={"generated": smart_save["generated"], "arxiv_id": paper["arxiv_id"]},
+            source_json={"paper_id": int(paper_id), "source": "reader_smart_save"},
+            model_provider_id=smart_save["model"].get("provider_id", ""),
+            model=smart_save["model"].get("model", ""),
+        )
+        export = export_artifact_to_obsidian(conn, settings, int(artifact["id"]))
+        return {
+            "ok": True,
+            "obsidian_path": export.get("path", ""),
+            "attachment_path": "",
+            "chat_messages": len(smart_save["messages"]),
+            "has_report": True,
+            "generated": smart_save["generated"],
+            "model": smart_save["model"],
+            "export": export,
+        }
+
+    vault = _vault(settings)
 
     note_path, note_rel = _paper_note_path(vault, settings, paper)
     attachment_rel = _copy_attachment(vault, settings, paper)

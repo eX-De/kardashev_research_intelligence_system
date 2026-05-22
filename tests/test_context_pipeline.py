@@ -8,7 +8,7 @@ from unittest.mock import patch
 from worker.config import Settings
 from worker.db import from_json, init_db
 from worker.knowledge import replace_document_chunks, save_manual_project_context
-from worker.obsidian import sync_obsidian
+from worker.obsidian import OBSIDIAN_NOT_CONFIGURED, sync_obsidian
 from worker.search import hybrid_search, rank_project_papers
 
 
@@ -86,6 +86,19 @@ class RecordingPostgresConnection:
 
 
 class ContextPipelineTests(unittest.TestCase):
+    def test_sync_obsidian_without_vault_returns_structured_skip(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+
+        result = sync_obsidian(conn, test_settings())
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["skipped"])
+        self.assertEqual(result["reason"], OBSIDIAN_NOT_CONFIGURED)
+        self.assertEqual(result["notes_seen"], 0)
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM obsidian_notes").fetchone()["count"], 0)
+
     def test_manual_project_context_without_obsidian_is_retrievable_and_rankable(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -243,9 +256,10 @@ class ContextPipelineTests(unittest.TestCase):
 
     def test_postgres_sync_obsidian_uses_session_advisory_lock(self) -> None:
         conn = RecordingPostgresConnection()
+        settings = Settings(**{**test_settings().__dict__, "obsidian_vault_path": Path("test-vault")})
 
         with patch("worker.obsidian._sync_obsidian_unlocked", return_value={"notes_seen": 0}) as inner:
-            result = sync_obsidian(conn, test_settings())
+            result = sync_obsidian(conn, settings)
 
         self.assertEqual(result, {"notes_seen": 0})
         inner.assert_called_once()

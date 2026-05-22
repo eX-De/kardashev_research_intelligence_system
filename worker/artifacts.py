@@ -8,6 +8,13 @@ from typing import Any
 
 from .config import Settings
 from .db import clean_unicode, from_json, to_json, utc_now
+from .obsidian import ObsidianNotConfiguredError
+from .obsidian_remote import (
+    obsidian_remote_enabled,
+    obsidian_remote_mirror_path,
+    obsidian_remote_output_prefix,
+    upload_markdown_append_only,
+)
 
 
 ARTIFACT_STATUS_READY = "ready"
@@ -515,7 +522,7 @@ def generate_project_index_artifact(conn: sqlite3.Connection, project_id: int) -
 
 def _vault(settings: Settings) -> Path:
     if not settings.obsidian_vault_path:
-        raise RuntimeError("Obsidian vault path is not configured")
+        raise ObsidianNotConfiguredError()
     vault = settings.obsidian_vault_path.expanduser().resolve()
     if not vault.exists() or not vault.is_dir():
         raise RuntimeError("Obsidian vault path does not exist")
@@ -553,29 +560,33 @@ def _default_obsidian_relative_path(
     return f"Research Intelligence/Artifacts/{artifact_type}/{title}.md"
 
 
-def export_artifact_to_obsidian(
+def _remote_obsidian_relative_path(
     conn: sqlite3.Connection,
     settings: Settings,
-    artifact_id: int,
-    *,
-    relative_path: str | None = None,
-) -> dict[str, object]:
-    artifact = get_artifact(conn, int(artifact_id))
-    if not artifact:
-        raise RuntimeError(f"Artifact not found: {artifact_id}")
-    vault = _vault(settings)
-    rel = clean_unicode(relative_path or _default_obsidian_relative_path(conn, artifact)).replace("\\", "/").strip("/")
-    if not rel:
-        raise RuntimeError("Obsidian artifact export path is empty")
-    if not rel.lower().endswith(".md"):
-        rel += ".md"
-    target = (vault / rel).resolve()
-    try:
-        relative = target.relative_to(vault).as_posix()
-    except ValueError as exc:
-        raise RuntimeError("Artifact export path must be inside the configured vault") from exc
+    artifact: dict[str, object],
+) -> str:
+    artifact_type = str(artifact["artifact_type"])
+    title = _safe_filename(str(artifact["title"]))
+    digest = content_hash(str(artifact.get("content_markdown") or ""), artifact.get("content_json"))[:10]
+    suffix = f"{int(artifact['id'])}-{digest}"
+    prefix = obsidian_remote_output_prefix(settings)
+    if artifact_type == "daily_report":
+        source = artifact.get("source") if isinstance(artifact.get("source"), dict) else {}
+        report_date = _safe_filename(str(source.get("date") or title), "daily-report")
+        return f"{prefix}/Daily/{report_date}-{suffix}.md"
+    if artifact_type == "project_index" and artifact.get("scope_type") == "project" and artifact.get("scope_id"):
+        project = conn.execute(
+            "SELECT name FROM research_projects WHERE id = ?",
+            (int(artifact["scope_id"]),),
+        ).fetchone()
+        name = _safe_filename(str(project["name"] if project else title), "project")
+        return f"{prefix}/Projects/{name}-{suffix}.md"
+    if artifact_type == "paper_report":
+        return f"{prefix}/Paper Reports/{title}-{suffix}.md"
+    return f"{prefix}/Artifacts/{artifact_type}/{title}-{suffix}.md"
 
-    target.parent.mkdir(parents=True, exist_ok=True)
+
+def _artifact_markdown(artifact: dict[str, object]) -> str:
     frontmatter = "\n".join(
         [
             "---",
@@ -589,6 +600,63 @@ def export_artifact_to_obsidian(
             "",
         ]
     )
-    target.write_text(frontmatter + clean_unicode(str(artifact["content_markdown"] or "")).rstrip() + "\n", encoding="utf-8")
+    return frontmatter + clean_unicode(str(artifact["content_markdown"] or "")).rstrip() + "\n"
+
+
+def export_artifact_to_obsidian(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    artifact_id: int,
+    *,
+    relative_path: str | None = None,
+) -> dict[str, object]:
+    artifact = get_artifact(conn, int(artifact_id))
+    if not artifact:
+        raise RuntimeError(f"Artifact not found: {artifact_id}")
+
+    markdown = _artifact_markdown(artifact)
+    if obsidian_remote_enabled(settings):
+        mirror = obsidian_remote_mirror_path(settings).resolve()
+        mirror.mkdir(parents=True, exist_ok=True)
+        rel = _remote_obsidian_relative_path(conn, settings, artifact)
+        target = (mirror / rel).resolve()
+        try:
+            local_relative = target.relative_to(mirror).as_posix()
+        except ValueError as exc:
+            raise RuntimeError("Remote artifact export path must be inside the local mirror") from exc
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(markdown, encoding="utf-8")
+        remote = upload_markdown_append_only(settings, target, local_relative)
+        if str(remote.get("path") or "") != local_relative:
+            mirrored_target = (mirror / str(remote["path"])).resolve()
+            try:
+                mirrored_target.relative_to(mirror)
+            except ValueError as exc:
+                raise RuntimeError("Remote artifact export path must be inside the local mirror") from exc
+            mirrored_target.parent.mkdir(parents=True, exist_ok=True)
+            mirrored_target.write_text(markdown, encoding="utf-8")
+        return {
+            "artifact_id": int(artifact["id"]),
+            "target": "obsidian_remote",
+            "path": remote["path"],
+            "key": remote["key"],
+            "status": "synced",
+            "append_only": True,
+        }
+
+    vault = _vault(settings)
+    rel = clean_unicode(relative_path or _default_obsidian_relative_path(conn, artifact)).replace("\\", "/").strip("/")
+    if not rel:
+        raise RuntimeError("Obsidian artifact export path is empty")
+    if not rel.lower().endswith(".md"):
+        rel += ".md"
+    target = (vault / rel).resolve()
+    try:
+        relative = target.relative_to(vault).as_posix()
+    except ValueError as exc:
+        raise RuntimeError("Artifact export path must be inside the configured vault") from exc
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(markdown, encoding="utf-8")
 
     return {"artifact_id": int(artifact["id"]), "target": "obsidian", "path": relative, "status": "synced"}

@@ -18,23 +18,44 @@ function PaperList({ papers, activePaperId, onSelect }) {
   if (!papers.length) {
     return <div className="paper-card paper-card-empty"><h2>还没有推荐</h2><div className="card-meta">先在“配置与任务”里保存配置，再执行每日流程。</div></div>;
   }
-  return papers.map((paper) => (
-    <button className={`paper-card ${paper.id === activePaperId ? "active" : ""}`} key={paper.id} onClick={() => onSelect(paper.id)} type="button">
-      <h2>{paper.title}</h2>
-      <div className="card-meta">
-        <span className="pill score">{fmtScore(paper.score)}</span>
-        {paper.project_name ? <span className="pill">{paper.project_name}</span> : null}
-        {paper.project_count > 1 ? <span className="pill">{paper.project_count} projects</span> : null}
-        {paper.relation_type ? <span className="pill">{paper.relation_type}</span> : null}
-        <span className={`pill report-pill ${paper.report_status || "missing"}`}>{reportStatusLabel(paper.report_status)}</span>
-        <span className="pill">{(paper.categories || []).slice(0, 2).join(", ") || "arXiv"}</span>
-        {paper.feedback_status ? <span className="pill">{paper.feedback_status}</span> : null}
-      </div>
-    </button>
-  ));
+  return papers.map((paper) => {
+    function handleSelect() {
+      onSelect(paper.id);
+    }
+
+    function handleSelectKeyDown(event) {
+      if (event.target !== event.currentTarget) return;
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        handleSelect();
+      }
+    }
+
+    return (
+      <article
+        className={`paper-card ${paper.id === activePaperId ? "active" : ""}`}
+        key={paper.id}
+        onClick={handleSelect}
+        onKeyDown={handleSelectKeyDown}
+        role="button"
+        tabIndex={0}
+      >
+        <h2>{paper.title}</h2>
+        <div className="card-meta">
+          <span className="pill score">{fmtScore(paper.score)}</span>
+          {paper.project_name ? <span className="pill">{paper.project_name}</span> : null}
+          {paper.project_count > 1 ? <span className="pill">{paper.project_count} projects</span> : null}
+          {paper.relation_type ? <span className="pill">{paper.relation_type}</span> : null}
+          <span className={`pill report-pill ${paper.report_status || "missing"}`}>{reportStatusLabel(paper.report_status)}</span>
+          <span className="pill">{(paper.categories || []).slice(0, 2).join(", ") || "arXiv"}</span>
+          {paper.feedback_status ? <span className="pill">{paper.feedback_status}</span> : null}
+        </div>
+      </article>
+    );
+  });
 }
 
-function PaperDetail({ detail, onRecommendation, onGenerateReport }) {
+function PaperDetail({ detail, onOpenReportQueue, onRecommendation, onGenerateReport }) {
   const [selectedProjectIds, setSelectedProjectIds] = useState([]);
   const [importance, setImportance] = useState("");
 
@@ -117,6 +138,7 @@ function PaperDetail({ detail, onRecommendation, onGenerateReport }) {
             </div>
             <div className="detail-actions">
               <button className="primary" disabled={!canAccept} onClick={() => onRecommendation({ action: "accept", importance, project_ids: selectedProjectIds })} type="button">保存到论文仓库</button>
+              <button onClick={() => onOpenReportQueue?.(paper.id)} title={`打开报告队列：${reportStatusLabel(report.status)}`} type="button">打开报告队列</button>
               <button className="danger" onClick={() => onRecommendation({ action: "discard" })} type="button">遗弃</button>
             </div>
           </div>
@@ -197,7 +219,7 @@ function PaperDetail({ detail, onRecommendation, onGenerateReport }) {
   );
 }
 
-export function InboxView({ onSelectPaper, selectedPaperId, setStatusMessage }) {
+export function InboxView({ onOpenReportQueue, onSelectPaper, selectedPaperId, setStatusMessage }) {
   const [papers, setPapers] = useState([]);
   const [activePaperId, setActivePaperId] = useState(null);
   const [detail, setDetail] = useState(null);
@@ -281,7 +303,7 @@ export function InboxView({ onSelectPaper, selectedPaperId, setStatusMessage }) 
       </section>
 
       <section className="detail-panel" aria-label="论文详情">
-        <PaperDetail detail={detail} onGenerateReport={generateReport} onRecommendation={updateRecommendation} />
+        <PaperDetail detail={detail} onGenerateReport={generateReport} onOpenReportQueue={onOpenReportQueue} onRecommendation={updateRecommendation} />
       </section>
     </section>
   );

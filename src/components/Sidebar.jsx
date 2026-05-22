@@ -1,6 +1,17 @@
 import { NavLink } from "react-router-dom";
 
-export function Sidebar({ statusMessage }) {
+function authLabel(authInfo, fallback) {
+  if (fallback) return fallback;
+  const user = authInfo?.user;
+  if (typeof user === "string" && user.trim()) return user;
+  if (user?.name) return user.name;
+  if (user?.username) return user.username;
+  if (authInfo?.name) return authInfo.name;
+  return "已登录";
+}
+
+export function Sidebar({ authInfo, authStatusLabel, isLoggingOut = false, onLogout, statusMessage }) {
+  const canLogout = authInfo?.auth_required !== false;
   const navItems = [
     { to: "/", label: "首页", hint: "今日工作台", end: true },
     {
@@ -62,6 +73,18 @@ export function Sidebar({ statusMessage }) {
           </div>
         ))}
       </nav>
+
+      <div className="sidebar-session" aria-label="认证状态">
+        <div>
+          <span>访问状态</span>
+          <strong>{authLabel(authInfo, authStatusLabel)}</strong>
+        </div>
+        {canLogout ? (
+          <button className="sidebar-logout" disabled={!onLogout || isLoggingOut} onClick={onLogout} type="button">
+            {isLoggingOut ? "退出中" : "退出登录"}
+          </button>
+        ) : null}
+      </div>
 
       <div className="status">
         <span className="status-label">当前状态</span>

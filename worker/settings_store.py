@@ -28,7 +28,7 @@ CSV_FIELDS = {
     "rag_searchers",
 }
 
-PATH_FIELDS = {"obsidian_vault_path", "arxiv_pdf_dir", "arxiv_text_dir"}
+PATH_FIELDS = {"obsidian_vault_path", "obsidian_remote_mirror_dir", "arxiv_pdf_dir", "arxiv_text_dir"}
 
 INT_FIELDS = {
     "arxiv_daily_lookback_days",
@@ -51,6 +51,15 @@ FLOAT_FIELDS = {
 
 STRING_FIELDS = {
     "obsidian_vault_path",
+    "obsidian_storage_backend",
+    "obsidian_remote_endpoint_url",
+    "obsidian_remote_region",
+    "obsidian_remote_bucket",
+    "obsidian_remote_prefix",
+    "obsidian_remote_access_key_id",
+    "obsidian_remote_secret_access_key",
+    "obsidian_remote_mirror_dir",
+    "obsidian_remote_output_prefix",
     "obsidian_cli_command",
     "obsidian_paper_repository_dir",
     "obsidian_paper_attachment_dir",
@@ -72,6 +81,7 @@ STRING_FIELDS = {
     "reader_question_provider_id",
     "reader_question_model",
     "scheduler_run_time",
+    "onboarding_project_source",
 }
 
 BOOL_FIELDS = {
@@ -79,10 +89,13 @@ BOOL_FIELDS = {
     "run_daily_on_startup_enabled",
     "arxiv_cache_full_text",
     "rag_prefilter_enabled",
+    "onboarding_completed",
+    "obsidian_remote_append_only",
 }
 JSON_FIELDS = {"llm_providers"}
 
 ALLOWED_FIELDS = CSV_FIELDS | INT_FIELDS | FLOAT_FIELDS | STRING_FIELDS | BOOL_FIELDS | JSON_FIELDS
+SECRET_FIELDS = {"obsidian_remote_secret_access_key"}
 
 
 def _csv(value: Any, tags: bool = False) -> list[str]:
@@ -160,6 +173,17 @@ def _providers_from_value(value: Any, existing: dict[str, LLMProvider] | None = 
 def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, Any]:
     return {
         "obsidian_vault_path": str(settings.obsidian_vault_path or ""),
+        "obsidian_storage_backend": settings.obsidian_storage_backend,
+        "obsidian_remote_endpoint_url": settings.obsidian_remote_endpoint_url,
+        "obsidian_remote_region": settings.obsidian_remote_region,
+        "obsidian_remote_bucket": settings.obsidian_remote_bucket,
+        "obsidian_remote_prefix": settings.obsidian_remote_prefix,
+        "obsidian_remote_access_key_id": settings.obsidian_remote_access_key_id,
+        "obsidian_remote_secret_access_key": "",
+        "obsidian_remote_secret_access_key_configured": bool(settings.obsidian_remote_secret_access_key),
+        "obsidian_remote_mirror_dir": str(settings.obsidian_remote_mirror_dir),
+        "obsidian_remote_output_prefix": settings.obsidian_remote_output_prefix,
+        "obsidian_remote_append_only": True,
         "obsidian_include_dirs": settings.obsidian_include_dirs,
         "obsidian_include_tags": settings.obsidian_include_tags,
         "obsidian_project_center_tags": settings.obsidian_project_center_tags,
@@ -247,6 +271,8 @@ def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, An
                 or 1
             ),
         ),
+        "onboarding_completed": _bool(stored.get("onboarding_completed", False)),
+        "onboarding_project_source": str(stored.get("onboarding_project_source", "")),
     }
 
 
@@ -261,6 +287,9 @@ def apply_stored_settings(conn: sqlite3.Connection, settings: Settings) -> Setti
         updates["arxiv_pdf_dir"] = Path(str(stored.get("arxiv_pdf_dir") or "./data/arxiv_pdfs")).expanduser()
     if "arxiv_text_dir" in stored:
         updates["arxiv_text_dir"] = Path(str(stored.get("arxiv_text_dir") or "./data/arxiv_text")).expanduser()
+    if "obsidian_remote_mirror_dir" in stored:
+        mirror = str(stored.get("obsidian_remote_mirror_dir") or "./data/obsidian_remote_vault").strip()
+        updates["obsidian_remote_mirror_dir"] = Path(mirror).expanduser()
     for field in CSV_FIELDS:
         if field in stored and field != "obsidian_include_tags":
             updates[field] = _csv(stored[field])
@@ -315,6 +344,8 @@ def save_app_settings(conn: sqlite3.Connection, payload: dict[str, Any]) -> dict
 
     for key, raw_value in payload.items():
         if key not in ALLOWED_FIELDS:
+            continue
+        if key in SECRET_FIELDS and not str(raw_value or "").strip():
             continue
         value: Any = raw_value
         if key in CSV_FIELDS:

@@ -46,7 +46,7 @@ from worker.embeddings import (
     ensure_missing_arxiv_chunk_embeddings,
 )
 from worker.llm import _project_judgment_prompt, generate_missing_project_judgments
-from worker.obsidian import parse_note
+from worker.obsidian import OBSIDIAN_NOT_CONFIGURED, ObsidianNotConfiguredError, parse_note
 from worker.obsidian import sync_obsidian
 from worker.paper_reports import (
     PAPER_READER_DEFAULT_PROMPT,
@@ -1695,6 +1695,30 @@ class WorkerTests(unittest.TestCase):
             2,
         )
 
+    def test_reader_save_without_obsidian_vault_raises_structured_error(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO arxiv_papers(
+              arxiv_id, title, authors_json, summary, categories_json, published_at,
+              updated_at, link, pdf_link, text_status, fetched_batch_id, created_at
+            )
+            VALUES (
+              'reader-no-vault', 'Reader No Vault Paper', '[]', 'Abstract.', '["reader"]',
+              '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z',
+              '', '', 'complete', 'reader-import', 'now'
+            )
+            """
+        )
+        paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
+
+        with self.assertRaises(ObsidianNotConfiguredError) as caught:
+            save_reader_note_to_obsidian(conn, test_settings(), int(paper_id))
+
+        self.assertEqual(caught.exception.reason, OBSIDIAN_NOT_CONFIGURED)
+
     def test_reader_save_writes_report_and_chat_to_obsidian(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -2396,6 +2420,58 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("daily_run_completed", item_types)
         self.assertNotIn("job_failed", item_types)
 
+    def test_accept_recommendation_without_obsidian_vault_skips_sync_only(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO research_projects(name, status, keywords_json, created_at, updated_at)
+            VALUES ('No Vault Accept Project', 'active', '[]', 'now', 'now')
+            """
+        )
+        project_id = conn.execute("SELECT id FROM research_projects").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO arxiv_papers(
+              arxiv_id, title, authors_json, summary, categories_json, published_at,
+              updated_at, link, pdf_link, text_status, fetched_batch_id, created_at
+            )
+            VALUES (
+              '2605.00991', 'No Vault Accept Paper', '[]', 'Abstract',
+              '["cs.AI"]', '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z',
+              'https://arxiv.org/abs/2605.00991', 'https://arxiv.org/pdf/2605.00991',
+              'complete', 'batch', 'now'
+            )
+            """
+        )
+        paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO project_paper_recommendations(
+              project_id, paper_id, state, importance, relation_type, reason,
+              source_judgment_hash, created_at, updated_at
+            )
+            VALUES (?, ?, 'pending', '', 'direct', '推荐理由', 'hash', 'now', 'now')
+            """,
+            (project_id, paper_id),
+        )
+        conn.commit()
+
+        result = update_paper_recommendation(
+            conn,
+            test_settings(),
+            int(paper_id),
+            {"action": "accept", "importance": "medium", "project_ids": [int(project_id)]},
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["library"]["library_status"], "reading")
+        self.assertTrue(result["sync"]["skipped"])
+        self.assertEqual(result["sync"]["reason"], OBSIDIAN_NOT_CONFIGURED)
+        self.assertEqual(conn.execute("SELECT relation FROM project_papers").fetchone()["relation"], "reading")
+        self.assertEqual(conn.execute("SELECT state FROM project_paper_recommendations").fetchone()["state"], "accepted")
+
     def test_accept_recommendation_writes_paper_library_and_project_list(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -2852,6 +2928,10 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(detail["candidate_papers"], [])
 
         link_project_paper(conn, int(project_id), {"paper_id": paper_id, "relation": "core"})
+        with self.assertRaises(ObsidianNotConfiguredError) as caught:
+            export_project_to_obsidian(conn, test_settings(), int(project_id))
+        self.assertEqual(caught.exception.reason, OBSIDIAN_NOT_CONFIGURED)
+
         vault.mkdir(parents=True, exist_ok=True)
         export_settings = Settings(**{**test_settings().__dict__, "obsidian_vault_path": vault})
         exported = export_project_to_obsidian(conn, export_settings, int(project_id))

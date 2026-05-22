@@ -27,15 +27,106 @@ export const PROJECT_NOTE_RELATIONS = [
 ];
 
 const PROJECT_STATUS_LABELS = Object.fromEntries(PROJECT_STATUSES);
+const AUTH_REQUIRED_CODE = "auth_required";
+const NON_JSON_RESPONSE = "__nonJsonResponse";
+
+export const AUTH_REQUIRED_EVENT = "panel-auth-required";
+
+function cleanMessage(value) {
+  const message = String(value ?? "").replace(/\s+/g, " ").trim();
+  return message.length > 220 ? `${message.slice(0, 219)}...` : message;
+}
+
+function isAuthRequiredValue(value) {
+  return cleanMessage(value) === AUTH_REQUIRED_CODE;
+}
+
+function isAuthRequiredPayload(data) {
+  if (!data) return false;
+  if (typeof data === "string") return isAuthRequiredValue(data);
+  return [data.code, data.reason, data.error, data.message].some(isAuthRequiredValue);
+}
+
+export function isAuthRequiredResponse(response, data) {
+  return Number(response?.status) === 401 && isAuthRequiredPayload(data);
+}
+
+export function isAuthRequiredError(error) {
+  return [
+    error?.code,
+    error?.reason,
+    error?.data?.code,
+    error?.data?.reason,
+    error?.data?.error,
+    error?.data?.message
+  ].some(isAuthRequiredValue) || (Number(error?.status) === 401 && isAuthRequiredPayload(error?.data));
+}
+
+export function emitAuthRequired(detail = {}) {
+  if (typeof window === "undefined" || typeof window.dispatchEvent !== "function") return;
+  const event = typeof window.CustomEvent === "function"
+    ? new window.CustomEvent(AUTH_REQUIRED_EVENT, { detail })
+    : new Event(AUTH_REQUIRED_EVENT);
+  window.dispatchEvent(event);
+}
+
+export async function readResponseJson(response) {
+  const body = await response.text().catch(() => "");
+  if (!body) return null;
+  try {
+    return JSON.parse(body);
+  } catch {
+    return {
+      [NON_JSON_RESPONSE]: true,
+      error: cleanMessage(body)
+    };
+  }
+}
+
+export function isNonJsonResponse(data) {
+  return Boolean(data?.[NON_JSON_RESPONSE]);
+}
+
+function responseErrorMessage(response, data, fallback = "Request failed") {
+  return cleanMessage(data?.error || data?.message || data?.detail || data?.reason || data?.code)
+    || (response?.status ? cleanMessage(`HTTP ${response.status} ${response.statusText || ""}`) : "")
+    || fallback;
+}
+
+export function createApiError(response, data, fallback = "Request failed") {
+  const authRequired = isAuthRequiredResponse(response, data);
+  let message = authRequired ? responseErrorMessage(response, data, "请先登录。") : responseErrorMessage(response, data, fallback);
+  if (authRequired && message === AUTH_REQUIRED_CODE) message = "请先登录。";
+  const error = new Error(message);
+  error.name = authRequired ? "AuthRequiredError" : "ApiError";
+  error.status = response?.status;
+  error.statusText = response?.statusText;
+  error.code = data?.code || (authRequired ? AUTH_REQUIRED_CODE : undefined);
+  error.reason = data?.reason;
+  error.data = data;
+  return error;
+}
+
+function requestHeaders(headers) {
+  const nextHeaders = new Headers(headers || {});
+  if (!nextHeaders.has("content-type")) nextHeaders.set("content-type", "application/json");
+  return nextHeaders;
+}
 
 export async function api(path, options = {}) {
+  const { headers, ...restOptions } = options;
   const response = await fetch(path, {
-    headers: { "content-type": "application/json" },
-    ...options
+    ...restOptions,
+    credentials: "same-origin",
+    headers: requestHeaders(headers)
   });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || "Request failed");
-  return data;
+  const data = await readResponseJson(response);
+  if (!response.ok || isNonJsonResponse(data)) {
+    const error = createApiError(response, data);
+    if (isAuthRequiredError(error)) emitAuthRequired({ path, status: response.status, data });
+    throw error;
+  }
+  return data || {};
 }
 
 export async function postJson(path, body = {}) {

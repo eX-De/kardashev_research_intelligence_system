@@ -1,16 +1,27 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { BrowserRouter, Navigate, Route, Routes, useNavigate, useParams } from "react-router-dom";
+import {
+  BrowserRouter,
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+  useParams,
+  useSearchParams
+} from "react-router-dom";
 
 import { ArtifactsView } from "./components/ArtifactsView.jsx";
 import { ControlView } from "./components/ControlView.jsx";
 import { DashboardView } from "./components/DashboardView.jsx";
+import { LoginView } from "./components/LoginView.jsx";
+import { OnboardingGate } from "./components/OnboardingGate.jsx";
 import { PapersWorkspaceView } from "./components/PapersWorkspaceView.jsx";
 import { ProjectPage } from "./components/ProjectPage.jsx";
 import { ProjectsView } from "./components/ProjectsView.jsx";
 import { Sidebar } from "./components/Sidebar.jsx";
 import { TasksView } from "./components/TasksView.jsx";
 import { ToastHost } from "./components/ToastHost.jsx";
-import { postJson } from "./lib/dashboard.js";
+import { AUTH_REQUIRED_EVENT, api, postJson } from "./lib/dashboard.js";
 
 const TOAST_TYPES = new Set(["success", "error", "info", "warning"]);
 const DEFAULT_TOAST_DURATION = 3500;
@@ -23,6 +34,48 @@ function paperPath(section, paperId) {
 
 function projectPath(projectId) {
   return `/projects/${encodeURIComponent(String(projectId))}`;
+}
+
+function locationPath(location) {
+  return `${location.pathname}${location.search}${location.hash}`;
+}
+
+function authFlag(data) {
+  if (!data || typeof data !== "object") return null;
+  for (const key of ["authenticated", "isAuthenticated", "is_authenticated"]) {
+    if (Object.prototype.hasOwnProperty.call(data, key)) {
+      return Boolean(data[key]);
+    }
+  }
+  return null;
+}
+
+function authStatusLabel(authInfo) {
+  if (authInfo?.auth_required === false) return "无密码模式";
+  return "已登录";
+}
+
+function isAuthenticatedStatus(data) {
+  const flag = authFlag(data);
+  if (flag !== null) return flag;
+  return Boolean(data?.user || data?.session || data?.ok);
+}
+
+function safeNextPath(value, fallback = "/") {
+  const rawValue = typeof value === "string" ? value.trim() : "";
+  if (!rawValue.startsWith("/") || rawValue.startsWith("//") || rawValue.startsWith("/\\")) {
+    return fallback;
+  }
+
+  try {
+    const url = new URL(rawValue, window.location.origin);
+    if (url.origin !== window.location.origin || url.pathname === "/login") {
+      return fallback;
+    }
+    return `${url.pathname}${url.search}${url.hash}` || fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 function PapersRoute({ section, setStatusMessage }) {
@@ -112,9 +165,117 @@ function AppRoutes({ notify, setStatusMessage }) {
   );
 }
 
-export function App() {
+function RequireAuth({ authenticated, children }) {
+  const location = useLocation();
+
+  if (!authenticated) {
+    const next = encodeURIComponent(locationPath(location));
+    return <Navigate to={`/login?next=${next}`} replace />;
+  }
+
+  return children;
+}
+
+function LoginRoute({ authenticated, onLogin }) {
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const nextPath = safeNextPath(searchParams.get("next"));
+
+  const handleLogin = useCallback(async (password) => {
+    await onLogin(password);
+    navigate(nextPath, { replace: true });
+  }, [navigate, nextPath, onLogin]);
+
+  if (authenticated) {
+    return <Navigate to={nextPath} replace />;
+  }
+
+  return <LoginView onLogin={handleLogin} />;
+}
+
+function AuthLoadingScreen() {
+  return (
+    <main className="auth-loading" aria-busy="true">
+      <div className="auth-loading-panel">
+        <span className="loader-dot" aria-hidden="true" />
+        <strong>正在验证访问状态</strong>
+      </div>
+    </main>
+  );
+}
+
+function ProtectedShell({ authInfo, authStatusLabel, notify, onLogout, setStatusMessage, statusMessage, toasts, onDismissToast }) {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
+
+  const handleLogout = useCallback(async () => {
+    if (isLoggingOut) return;
+
+    setIsLoggingOut(true);
+    const nextPath = safeNextPath(locationPath(location));
+
+    try {
+      const data = await onLogout();
+      if (isAuthenticatedStatus(data)) {
+        setIsLoggingOut(false);
+        return;
+      }
+      navigate(`/login?next=${encodeURIComponent(nextPath)}`, { replace: true });
+    } catch (error) {
+      setIsLoggingOut(false);
+      notify(error.message || "退出登录失败", {
+        statusMessage: "退出登录失败",
+        type: "error"
+      });
+    }
+  }, [isLoggingOut, location, navigate, notify, onLogout]);
+
+  useEffect(() => {
+    let active = true;
+    postJson("/api/jobs/startup-daily/check")
+      .then((data) => {
+        if (!active) return;
+        if (data.startup_daily_trigger?.triggered) {
+          setStatusMessage("每日流程已在后台启动");
+        }
+      })
+      .catch((error) => {
+        if (active) setStatusMessage(error.message);
+      });
+    return () => {
+      active = false;
+    };
+  }, [setStatusMessage]);
+
+  return (
+    <>
+      <Sidebar
+        authInfo={authInfo}
+        authStatusLabel={authStatusLabel}
+        isLoggingOut={isLoggingOut}
+        onLogout={handleLogout}
+        statusMessage={statusMessage}
+      />
+      <ToastHost onDismiss={onDismissToast} toasts={toasts} />
+      <OnboardingGate notify={notify} setStatusMessage={setStatusMessage} />
+      <main className="app-shell">
+        <AppRoutes notify={notify} setStatusMessage={setStatusMessage} />
+      </main>
+    </>
+  );
+}
+
+function AuthenticatedApp() {
   const [statusMessage, setStatusMessage] = useState("Idle");
   const [toasts, setToasts] = useState([]);
+  const [authState, setAuthState] = useState({
+    authenticated: false,
+    checked: false,
+    info: null
+  });
+  const location = useLocation();
+  const navigate = useNavigate();
   const toastIdRef = useRef(0);
 
   const dismissToast = useCallback((toastId) => {
@@ -145,28 +306,102 @@ export function App() {
 
   useEffect(() => {
     let active = true;
-    postJson("/api/jobs/startup-daily/check")
+    api("/api/auth/status")
       .then((data) => {
         if (!active) return;
-        if (data.startup_daily_trigger?.triggered) {
-          setStatusMessage("每日流程已在后台启动");
-        }
+        setAuthState({
+          authenticated: isAuthenticatedStatus(data),
+          checked: true,
+          info: data
+        });
       })
-      .catch((error) => {
-        if (active) setStatusMessage(error.message);
+      .catch(() => {
+        if (!active) return;
+        setAuthState({
+          authenticated: false,
+          checked: true,
+          info: null
+        });
       });
     return () => {
       active = false;
     };
   }, []);
 
+  useEffect(() => {
+    const handleAuthRequired = () => {
+      const nextPath = safeNextPath(locationPath(location));
+      setAuthState({
+        authenticated: false,
+        checked: true,
+        info: null
+      });
+      if (location.pathname !== "/login") {
+        navigate(`/login?next=${encodeURIComponent(nextPath)}`, { replace: true });
+      }
+    };
+    window.addEventListener(AUTH_REQUIRED_EVENT, handleAuthRequired);
+    return () => window.removeEventListener(AUTH_REQUIRED_EVENT, handleAuthRequired);
+  }, [location, navigate]);
+
+  const handleLogin = useCallback(async (password) => {
+    const data = await postJson("/api/auth/login", { password });
+    const flag = authFlag(data);
+    if (flag === false) {
+      throw new Error("密码验证失败");
+    }
+
+    setAuthState({
+      authenticated: true,
+      checked: true,
+      info: data
+    });
+    setStatusMessage("Idle");
+  }, []);
+
+  const handleLogout = useCallback(async () => {
+    const data = await postJson("/api/auth/logout");
+    setAuthState({
+      authenticated: isAuthenticatedStatus(data),
+      checked: true,
+      info: data
+    });
+    setStatusMessage("Idle");
+    return data;
+  }, []);
+
+  if (!authState.checked) {
+    return <AuthLoadingScreen />;
+  }
+
+  return (
+    <Routes>
+      <Route path="/login" element={<LoginRoute authenticated={authState.authenticated} onLogin={handleLogin} />} />
+      <Route
+        path="/*"
+        element={
+          <RequireAuth authenticated={authState.authenticated}>
+            <ProtectedShell
+              authInfo={authState.info}
+              authStatusLabel={authStatusLabel(authState.info)}
+              notify={notify}
+              onDismissToast={dismissToast}
+              onLogout={handleLogout}
+              setStatusMessage={setStatusMessage}
+              statusMessage={statusMessage}
+              toasts={toasts}
+            />
+          </RequireAuth>
+        }
+      />
+    </Routes>
+  );
+}
+
+export function App() {
   return (
     <BrowserRouter>
-      <Sidebar statusMessage={statusMessage} />
-      <ToastHost onDismiss={dismissToast} toasts={toasts} />
-      <main className="app-shell">
-        <AppRoutes notify={notify} setStatusMessage={setStatusMessage} />
-      </main>
+      <AuthenticatedApp />
     </BrowserRouter>
   );
 }

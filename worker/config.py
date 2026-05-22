@@ -72,6 +72,16 @@ class Settings:
     llm_chat_model: str
     llm_embedding_provider_id: str
     llm_embedding_model: str
+    obsidian_storage_backend: str = "local"
+    obsidian_remote_endpoint_url: str = ""
+    obsidian_remote_region: str = ""
+    obsidian_remote_bucket: str = ""
+    obsidian_remote_prefix: str = ""
+    obsidian_remote_access_key_id: str = ""
+    obsidian_remote_secret_access_key: str = ""
+    obsidian_remote_mirror_dir: Path = Path("./data/obsidian_remote_vault")
+    obsidian_remote_output_prefix: str = "Research Intelligence"
+    obsidian_remote_append_only: bool = True
     embedding_concurrency: int = 2
     paper_reader_default_prompt: str = ""
     paper_report_provider_id: str = ""
@@ -183,6 +193,19 @@ def load_settings() -> Settings:
         llm_chat_model=os.environ.get("LLM_CHAT_MODEL", ""),
         llm_embedding_provider_id=os.environ.get("LLM_EMBEDDING_PROVIDER_ID", ""),
         llm_embedding_model=os.environ.get("LLM_EMBEDDING_MODEL", ""),
+        obsidian_storage_backend=os.environ.get("OBSIDIAN_STORAGE_BACKEND", "local").strip().lower() or "local",
+        obsidian_remote_endpoint_url=os.environ.get("OBSIDIAN_REMOTE_ENDPOINT_URL", "").strip(),
+        obsidian_remote_region=os.environ.get("OBSIDIAN_REMOTE_REGION", "").strip(),
+        obsidian_remote_bucket=os.environ.get("OBSIDIAN_REMOTE_BUCKET", "").strip(),
+        obsidian_remote_prefix=os.environ.get("OBSIDIAN_REMOTE_PREFIX", "").strip().replace("\\", "/").strip("/"),
+        obsidian_remote_access_key_id=os.environ.get("OBSIDIAN_REMOTE_ACCESS_KEY_ID", "").strip(),
+        obsidian_remote_secret_access_key=os.environ.get("OBSIDIAN_REMOTE_SECRET_ACCESS_KEY", "").strip(),
+        obsidian_remote_mirror_dir=Path(os.environ.get("OBSIDIAN_REMOTE_MIRROR_DIR", "./data/obsidian_remote_vault")).expanduser(),
+        obsidian_remote_output_prefix=os.environ.get(
+            "OBSIDIAN_REMOTE_OUTPUT_PREFIX",
+            "Research Intelligence",
+        ).strip().replace("\\", "/").strip("/") or "Research Intelligence",
+        obsidian_remote_append_only=_bool("OBSIDIAN_REMOTE_APPEND_ONLY", "true"),
         embedding_concurrency=max(1, min(8, int(os.environ.get("EMBEDDING_CONCURRENCY", "2") or 2))),
         paper_reader_default_prompt=os.environ.get("PAPER_READER_DEFAULT_PROMPT", ""),
         paper_report_provider_id=os.environ.get("PAPER_REPORT_PROVIDER_ID", ""),

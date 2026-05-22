@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { PanelTitle } from "./PanelTitle.jsx";
 import { normalizeProviders, providerPayload, SettingsForm } from "./SettingsForm.jsx";
 import { api, chooseLocalPath, postJson } from "../lib/dashboard.js";
+import { friendlyObsidianMessage, obsidianCapabilityFrom } from "../lib/obsidianCapability.js";
 
 const AUTO_SAVE_DELAY_MS = 850;
 const QUICK_SAVE_DELAY_MS = 150;
@@ -38,13 +39,13 @@ function HealthItem({ label, value, state = "neutral" }) {
   );
 }
 
-function HealthGrid({ health }) {
-  const obsidianState = health?.obsidian?.status === "ok" ? "ok" : "warn";
+function HealthGrid({ health, settings }) {
+  const obsidianCapability = obsidianCapabilityFrom({ health, settings });
   const llmState = health?.llm?.configured ? "ok" : "warn";
   return (
     <div className="health-grid">
       <HealthItem label="Database" value={health?.database?.ok ? "OK" : "Error"} state={health?.database?.ok ? "ok" : "bad"} />
-      <HealthItem label="Obsidian" value={health?.obsidian?.status || "unknown"} state={obsidianState} />
+      <HealthItem label="Obsidian" value={obsidianCapability.label} state={obsidianCapability.state} />
       <HealthItem label="LLM" value={health?.llm?.configured ? `${health.llm.providers?.length || 0} providers` : "Not configured"} state={llmState} />
     </div>
   );
@@ -233,8 +234,9 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
       setStatusMessage("路径已选择");
       notify("路径已选择，正在保存", { type: "info" });
     } catch (error) {
-      setStatusMessage(error.message);
-      notify(error.message, { type: "error" });
+      const message = relativeTo === "obsidian_vault" ? friendlyObsidianMessage(error) : error.message;
+      setStatusMessage(message);
+      notify(message, { type: "error" });
     }
   }
 
@@ -285,7 +287,7 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
       <div className="control-grid">
         <section className="panel">
           <PanelTitle title="连接状态" subtitle="这里只显示基础设施连通性；任务执行和历史统一放在任务页。" />
-          <HealthGrid health={health} />
+          <HealthGrid health={health} settings={settings} />
         </section>
       </div>
 
