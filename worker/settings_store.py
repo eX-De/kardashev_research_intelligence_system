@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import os
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
@@ -9,6 +8,7 @@ from typing import Any
 
 from .config import LLMProvider, Settings, normalize_provider_base_url
 from .db import from_json, to_json, utc_now
+from .env import env_value
 
 DEFAULT_PAPER_READER_PROMPT = """请阅读这篇论文 PDF，输出结构化解读：
 
@@ -199,7 +199,7 @@ def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, An
         "arxiv_pdf_dir": str(settings.arxiv_pdf_dir),
         "arxiv_text_dir": str(settings.arxiv_text_dir),
         "retry_daily_max_results": int(
-            stored.get("retry_daily_max_results", os.environ.get("RETRY_DAILY_MAX_RESULTS", settings.retry_daily_max_results))
+            stored.get("retry_daily_max_results", env_value("RETRY_DAILY_MAX_RESULTS", settings.retry_daily_max_results))
             or 100
         ),
         "rag_score_threshold": settings.rag_score_threshold,
@@ -244,28 +244,28 @@ def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, An
             1,
             min(
                 8,
-                int(stored.get("embedding_concurrency", os.environ.get("EMBEDDING_CONCURRENCY", settings.embedding_concurrency)) or 2),
+                int(stored.get("embedding_concurrency", env_value("EMBEDDING_CONCURRENCY", settings.embedding_concurrency)) or 2),
             ),
         ),
-        "scheduler_enabled": _bool(stored.get("scheduler_enabled", os.environ.get("SCHEDULER_ENABLED", False))),
+        "scheduler_enabled": _bool(stored.get("scheduler_enabled", env_value("SCHEDULER_ENABLED", False))),
         "run_daily_on_startup_enabled": _bool(
             stored.get(
                 "run_daily_on_startup_enabled",
-                os.environ.get("RUN_DAILY_ON_STARTUP_ENABLED", False),
+                env_value("RUN_DAILY_ON_STARTUP_ENABLED", False),
             )
         ),
-        "scheduler_run_time": str(stored.get("scheduler_run_time", os.environ.get("SCHEDULER_RUN_TIME", "09:00"))),
+        "scheduler_run_time": str(stored.get("scheduler_run_time", env_value("SCHEDULER_RUN_TIME", "09:00"))),
         "scheduler_interval_hours": int(
-            stored.get("scheduler_interval_hours", os.environ.get("SCHEDULER_INTERVAL_HOURS", 24)) or 24
+            stored.get("scheduler_interval_hours", env_value("SCHEDULER_INTERVAL_HOURS", 24)) or 24
         ),
         "paper_report_queue_concurrency": max(
             1,
             int(
                 stored.get(
                     "paper_report_queue_concurrency",
-                    os.environ.get(
+                    env_value(
                         "PAPER_REPORT_QUEUE_CONCURRENCY",
-                        os.environ.get("PAPER_REPORT_QUEUE_LIMIT", 1),
+                        env_value("PAPER_REPORT_QUEUE_LIMIT", 1),
                     ),
                 )
                 or 1

@@ -1541,6 +1541,64 @@ h2 {
   gap: 14px;
 }
 
+.experiment-progress-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.experiment-report-list {
+  display: grid;
+  gap: 10px;
+}
+
+.experiment-report-item {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--panel-soft);
+}
+
+.experiment-report-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.experiment-report-head > div:first-child {
+  min-width: 0;
+}
+
+.experiment-report-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.experiment-report-actions a {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0 10px;
+  color: var(--accent);
+  background: #fff;
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.experiment-report-preview {
+  max-height: 280px;
+  overflow: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  padding: 10px;
+  background: #fff;
+}
+
 .project-match-list {
   display: grid;
   gap: 10px;

@@ -6,3 +6,7 @@ __pycache__/
 node_modules/
 .DS_Store
 *.tar
+secrets/*
+!secrets/.gitkeep
+!secrets/README.md
+!secrets/*.example

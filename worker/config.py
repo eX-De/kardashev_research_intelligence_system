@@ -5,6 +5,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from .env import env_bool, env_value
+
 
 def _load_dotenv() -> None:
     path = Path(".env")
@@ -21,7 +23,7 @@ def _load_dotenv() -> None:
 
 
 def _csv(name: str, default: str = "") -> list[str]:
-    value = os.environ.get(name, default)
+    value = env_value(name, default)
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
@@ -104,7 +106,7 @@ class Settings:
 
 
 def _providers_from_env() -> list[LLMProvider]:
-    raw = os.environ.get("LLM_PROVIDERS_JSON", "").strip()
+    raw = env_value("LLM_PROVIDERS_JSON", "").strip()
     if not raw:
         return []
     try:
@@ -142,78 +144,78 @@ def normalize_provider_base_url(value: str) -> str:
 
 
 def _bool(name: str, default: str = "false") -> bool:
-    return os.environ.get(name, default).strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    return env_bool(name, default)
 
 
 def load_settings() -> Settings:
     _load_dotenv()
-    vault = os.environ.get("OBSIDIAN_VAULT_PATH", "").strip()
+    vault = env_value("OBSIDIAN_VAULT_PATH", "").strip()
     providers = _providers_from_env()
     return Settings(
-        db_path=Path(os.environ.get("APP_DB_PATH", "./data/research_intelligence.sqlite")),
+        db_path=Path(env_value("APP_DB_PATH", "./data/research_intelligence.sqlite")),
         obsidian_vault_path=Path(vault).expanduser() if vault else None,
         obsidian_include_dirs=_csv("OBSIDIAN_INCLUDE_DIRS", "Research,Papers"),
         obsidian_include_tags=_tags("OBSIDIAN_INCLUDE_TAGS", "research,paper,direction"),
         obsidian_project_center_tags=_tags("OBSIDIAN_PROJECT_CENTER_TAGS", ""),
-        obsidian_cli_command=os.environ.get("OBSIDIAN_CLI_COMMAND", "obsidian").strip() or "obsidian",
-        obsidian_paper_repository_dir=os.environ.get(
+        obsidian_cli_command=env_value("OBSIDIAN_CLI_COMMAND", "obsidian").strip() or "obsidian",
+        obsidian_paper_repository_dir=env_value(
             "OBSIDIAN_PAPER_REPOSITORY_DIR",
             "人工智能/论文仓库",
         ).strip().replace("\\", "/").strip("/"),
-        obsidian_paper_attachment_dir=os.environ.get(
+        obsidian_paper_attachment_dir=env_value(
             "OBSIDIAN_PAPER_ATTACHMENT_DIR",
             "人工智能/论文仓库/附件",
         ).strip().replace("\\", "/").strip("/"),
-        obsidian_project_paper_list_name=os.environ.get(
+        obsidian_project_paper_list_name=env_value(
             "OBSIDIAN_PROJECT_PAPER_LIST_NAME",
             "论文列表.md",
         ).strip() or "论文列表.md",
         arxiv_categories=_csv("ARXIV_CATEGORIES", "cs.AI,cs.CL,cs.IR"),
-        arxiv_daily_lookback_days=int(os.environ.get("ARXIV_DAILY_LOOKBACK_DAYS", "1")),
-        arxiv_max_results=int(os.environ.get("ARXIV_MAX_RESULTS", "50")),
-        arxiv_request_interval_seconds=float(os.environ.get("ARXIV_REQUEST_INTERVAL_SECONDS", "3")),
+        arxiv_daily_lookback_days=int(env_value("ARXIV_DAILY_LOOKBACK_DAYS", "1")),
+        arxiv_max_results=int(env_value("ARXIV_MAX_RESULTS", "50")),
+        arxiv_request_interval_seconds=float(env_value("ARXIV_REQUEST_INTERVAL_SECONDS", "3")),
         arxiv_cache_full_text=_bool("ARXIV_CACHE_FULL_TEXT", "true"),
-        arxiv_pdf_dir=Path(os.environ.get("ARXIV_PDF_DIR", "./data/arxiv_pdfs")),
-        arxiv_text_dir=Path(os.environ.get("ARXIV_TEXT_DIR", "./data/arxiv_text")),
-        retry_daily_max_results=int(os.environ.get("RETRY_DAILY_MAX_RESULTS", "100")),
-        rag_score_threshold=float(os.environ.get("RAG_SCORE_THRESHOLD", "0.35")),
-        rag_top_k=int(os.environ.get("RAG_TOP_K", "6")),
+        arxiv_pdf_dir=Path(env_value("ARXIV_PDF_DIR", "./data/arxiv_pdfs")),
+        arxiv_text_dir=Path(env_value("ARXIV_TEXT_DIR", "./data/arxiv_text")),
+        retry_daily_max_results=int(env_value("RETRY_DAILY_MAX_RESULTS", "100")),
+        rag_score_threshold=float(env_value("RAG_SCORE_THRESHOLD", "0.35")),
+        rag_top_k=int(env_value("RAG_TOP_K", "6")),
         rag_searchers=_csv(
             "RAG_SEARCHERS",
             "embedding_search,keyword_search,front_page_search",
         ),
         rag_prefilter_enabled=_bool("RAG_PREFILTER_ENABLED", "true"),
-        rag_prefilter_threshold=float(os.environ.get("RAG_PREFILTER_THRESHOLD", "0.18")),
-        rag_prefilter_top_k=int(os.environ.get("RAG_PREFILTER_TOP_K", "20")),
-        rag_prefilter_min_keep=int(os.environ.get("RAG_PREFILTER_MIN_KEEP", "30")),
-        rag_prefilter_max_keep=int(os.environ.get("RAG_PREFILTER_MAX_KEEP", "50")),
-        vector_index_backend=os.environ.get("VECTOR_INDEX_BACKEND", "sqlite"),
+        rag_prefilter_threshold=float(env_value("RAG_PREFILTER_THRESHOLD", "0.18")),
+        rag_prefilter_top_k=int(env_value("RAG_PREFILTER_TOP_K", "20")),
+        rag_prefilter_min_keep=int(env_value("RAG_PREFILTER_MIN_KEEP", "30")),
+        rag_prefilter_max_keep=int(env_value("RAG_PREFILTER_MAX_KEEP", "50")),
+        vector_index_backend=env_value("VECTOR_INDEX_BACKEND", "sqlite"),
         llm_providers=providers,
-        llm_chat_provider_id=os.environ.get("LLM_CHAT_PROVIDER_ID", ""),
-        llm_chat_model=os.environ.get("LLM_CHAT_MODEL", ""),
-        llm_embedding_provider_id=os.environ.get("LLM_EMBEDDING_PROVIDER_ID", ""),
-        llm_embedding_model=os.environ.get("LLM_EMBEDDING_MODEL", ""),
-        obsidian_storage_backend=os.environ.get("OBSIDIAN_STORAGE_BACKEND", "local").strip().lower() or "local",
-        obsidian_remote_endpoint_url=os.environ.get("OBSIDIAN_REMOTE_ENDPOINT_URL", "").strip(),
-        obsidian_remote_region=os.environ.get("OBSIDIAN_REMOTE_REGION", "").strip(),
-        obsidian_remote_bucket=os.environ.get("OBSIDIAN_REMOTE_BUCKET", "").strip(),
-        obsidian_remote_prefix=os.environ.get("OBSIDIAN_REMOTE_PREFIX", "").strip().replace("\\", "/").strip("/"),
-        obsidian_remote_access_key_id=os.environ.get("OBSIDIAN_REMOTE_ACCESS_KEY_ID", "").strip(),
-        obsidian_remote_secret_access_key=os.environ.get("OBSIDIAN_REMOTE_SECRET_ACCESS_KEY", "").strip(),
-        obsidian_remote_mirror_dir=Path(os.environ.get("OBSIDIAN_REMOTE_MIRROR_DIR", "./data/obsidian_remote_vault")).expanduser(),
-        obsidian_remote_output_prefix=os.environ.get(
+        llm_chat_provider_id=env_value("LLM_CHAT_PROVIDER_ID", ""),
+        llm_chat_model=env_value("LLM_CHAT_MODEL", ""),
+        llm_embedding_provider_id=env_value("LLM_EMBEDDING_PROVIDER_ID", ""),
+        llm_embedding_model=env_value("LLM_EMBEDDING_MODEL", ""),
+        obsidian_storage_backend=env_value("OBSIDIAN_STORAGE_BACKEND", "local").strip().lower() or "local",
+        obsidian_remote_endpoint_url=env_value("OBSIDIAN_REMOTE_ENDPOINT_URL", "").strip(),
+        obsidian_remote_region=env_value("OBSIDIAN_REMOTE_REGION", "").strip(),
+        obsidian_remote_bucket=env_value("OBSIDIAN_REMOTE_BUCKET", "").strip(),
+        obsidian_remote_prefix=env_value("OBSIDIAN_REMOTE_PREFIX", "").strip().replace("\\", "/").strip("/"),
+        obsidian_remote_access_key_id=env_value("OBSIDIAN_REMOTE_ACCESS_KEY_ID", "").strip(),
+        obsidian_remote_secret_access_key=env_value("OBSIDIAN_REMOTE_SECRET_ACCESS_KEY", "").strip(),
+        obsidian_remote_mirror_dir=Path(env_value("OBSIDIAN_REMOTE_MIRROR_DIR", "./data/obsidian_remote_vault")).expanduser(),
+        obsidian_remote_output_prefix=env_value(
             "OBSIDIAN_REMOTE_OUTPUT_PREFIX",
             "Research Intelligence",
         ).strip().replace("\\", "/").strip("/") or "Research Intelligence",
         obsidian_remote_append_only=_bool("OBSIDIAN_REMOTE_APPEND_ONLY", "true"),
-        embedding_concurrency=max(1, min(8, int(os.environ.get("EMBEDDING_CONCURRENCY", "2") or 2))),
-        paper_reader_default_prompt=os.environ.get("PAPER_READER_DEFAULT_PROMPT", ""),
-        paper_report_provider_id=os.environ.get("PAPER_REPORT_PROVIDER_ID", ""),
-        paper_report_model=os.environ.get("PAPER_REPORT_MODEL", ""),
-        reader_chat_provider_id=os.environ.get("READER_CHAT_PROVIDER_ID", ""),
-        reader_chat_model=os.environ.get("READER_CHAT_MODEL", ""),
-        reader_smart_save_provider_id=os.environ.get("READER_SMART_SAVE_PROVIDER_ID", ""),
-        reader_smart_save_model=os.environ.get("READER_SMART_SAVE_MODEL", ""),
-        reader_question_provider_id=os.environ.get("READER_QUESTION_PROVIDER_ID", ""),
-        reader_question_model=os.environ.get("READER_QUESTION_MODEL", ""),
+        embedding_concurrency=max(1, min(8, int(env_value("EMBEDDING_CONCURRENCY", "2") or 2))),
+        paper_reader_default_prompt=env_value("PAPER_READER_DEFAULT_PROMPT", ""),
+        paper_report_provider_id=env_value("PAPER_REPORT_PROVIDER_ID", ""),
+        paper_report_model=env_value("PAPER_REPORT_MODEL", ""),
+        reader_chat_provider_id=env_value("READER_CHAT_PROVIDER_ID", ""),
+        reader_chat_model=env_value("READER_CHAT_MODEL", ""),
+        reader_smart_save_provider_id=env_value("READER_SMART_SAVE_PROVIDER_ID", ""),
+        reader_smart_save_model=env_value("READER_SMART_SAVE_MODEL", ""),
+        reader_question_provider_id=env_value("READER_QUESTION_PROVIDER_ID", ""),
+        reader_question_model=env_value("READER_QUESTION_MODEL", ""),
     )

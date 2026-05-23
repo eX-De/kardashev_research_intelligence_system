@@ -29,6 +29,7 @@ from .api import (
     paper_reports_queue,
     project_detail,
     projects,
+    receive_experiment_report,
     reminders,
     save_feedback,
     save_project,
@@ -1748,6 +1749,12 @@ def cmd_api_artifact_export(args: argparse.Namespace) -> None:
     _print_json(result)
 
 
+def cmd_api_experiment_report(_: argparse.Namespace) -> None:
+    payload = _read_json_stdin("experiment report")
+    result = _with_db(lambda conn, settings: receive_experiment_report(conn, settings, payload))
+    _print_json(result)
+
+
 def cmd_api_reader_papers(args: argparse.Namespace) -> None:
     result = _with_db(lambda conn, settings: paper_reports_queue(conn, int(args.limit)))
     _print_json(result)
@@ -2125,6 +2132,9 @@ def build_parser() -> argparse.ArgumentParser:
     api_artifact_export = sub.add_parser("api-artifact-export")
     api_artifact_export.add_argument("artifact_id")
     api_artifact_export.set_defaults(func=cmd_api_artifact_export)
+
+    api_experiment_report = sub.add_parser("api-experiment-report")
+    api_experiment_report.set_defaults(func=cmd_api_experiment_report)
 
     api_reader_papers = sub.add_parser("api-reader-papers")
     api_reader_papers.add_argument("--limit", default="300")

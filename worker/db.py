@@ -8,7 +8,9 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
+
+from .env import env_value
 
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 JOB_STALE_AFTER_SECONDS = 30 * 60
@@ -660,7 +662,7 @@ def _redacted_database_url(url: str) -> str:
 def database_target(conn: Any, db_path: Path) -> dict[str, str]:
     dialect = str(getattr(conn, "dialect", "") or "sqlite")
     if dialect == "postgres":
-        target = _redacted_database_url(os.environ.get("DATABASE_URL", ""))
+        target = _redacted_database_url(database_url_from_env())
         return {"dialect": "postgres", "target": target, "path": target}
     target = str(db_path)
     return {"dialect": "sqlite", "target": target, "path": target}
@@ -697,8 +699,26 @@ def postgres_index_sql() -> str:
     return "\n".join(lines)
 
 
+def database_url_from_env() -> str:
+    configured = env_value("DATABASE_URL", "").strip()
+    if configured:
+        return configured
+
+    host = env_value("POSTGRES_HOST", "").strip()
+    if not host:
+        return ""
+    port = env_value("POSTGRES_PORT", "5432").strip() or "5432"
+    user = env_value("POSTGRES_USER", "research_app").strip()
+    password = env_value("POSTGRES_PASSWORD", "").strip()
+    database = env_value("POSTGRES_DB", "research_intelligence").strip()
+    return (
+        f"postgresql://{quote(user, safe='')}:{quote(password, safe='')}@"
+        f"{host}:{port}/{quote(database, safe='')}"
+    )
+
+
 def connect(db_path: Path):
-    database_url = os.environ.get("DATABASE_URL", "").strip()
+    database_url = database_url_from_env()
     if database_url:
         from .pg import connect_postgres
 

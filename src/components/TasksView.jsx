@@ -5,6 +5,9 @@ import { PanelTitle } from "./PanelTitle.jsx";
 import { TaskControlPanel } from "./TaskControlPanel.jsx";
 import { api, fmtDate, postJson, summarizeMeta } from "../lib/dashboard.js";
 
+const STATUS_POLL_INTERVAL_MS = 5000;
+const DETAIL_POLL_INTERVAL_MS = 30000;
+
 function HistoryTable({ history }) {
   if (!history.length) return <p className="muted">暂无任务记录。</p>;
   return (
@@ -33,11 +36,36 @@ function HistoryTable({ history }) {
   );
 }
 
+function schedulerStatusMessage(scheduler) {
+  const current = scheduler?.current_job;
+  return current ? `Running ${current.command}...` : scheduler?.last_job?.message || scheduler?.last_error?.message || "Idle";
+}
+
 export function TasksView({ setStatusMessage }) {
   const [scheduler, setScheduler] = useState({});
   const [history, setHistory] = useState([]);
   const [reports, setReports] = useState({ stats: {}, items: [] });
   const [loading, setLoading] = useState(true);
+
+  const applyScheduler = useCallback((nextScheduler = {}) => {
+    setScheduler(nextScheduler || {});
+    setStatusMessage(schedulerStatusMessage(nextScheduler));
+  }, [setStatusMessage]);
+
+  const loadStatus = useCallback(async () => {
+    const statusData = await api("/api/jobs/status");
+    applyScheduler(statusData.scheduler || {});
+    return statusData;
+  }, [applyScheduler]);
+
+  const loadDetails = useCallback(async () => {
+    const [historyData, reportData] = await Promise.all([
+      api("/api/jobs/history?limit=30"),
+      api("/api/paper-reports?limit=80")
+    ]);
+    setHistory(historyData.items || []);
+    setReports(reportData);
+  }, []);
 
   const load = useCallback(async () => {
     const [statusData, historyData, reportData] = await Promise.all([
@@ -45,12 +73,10 @@ export function TasksView({ setStatusMessage }) {
       api("/api/jobs/history?limit=30"),
       api("/api/paper-reports?limit=80")
     ]);
-    setScheduler(statusData.scheduler || {});
+    applyScheduler(statusData.scheduler || {});
     setHistory(historyData.items || []);
     setReports(reportData);
-    const current = statusData.scheduler?.current_job;
-    setStatusMessage(current ? `Running ${current.command}...` : statusData.scheduler?.last_job?.message || "Idle");
-  }, [setStatusMessage]);
+  }, [applyScheduler]);
 
   useEffect(() => {
     let cancelled = false;
@@ -59,12 +85,14 @@ export function TasksView({ setStatusMessage }) {
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
-    const timer = setInterval(() => load().catch((error) => setStatusMessage(error.message)), 5000);
+    const statusTimer = setInterval(() => loadStatus().catch((error) => setStatusMessage(error.message)), STATUS_POLL_INTERVAL_MS);
+    const detailTimer = setInterval(() => loadDetails().catch((error) => setStatusMessage(error.message)), DETAIL_POLL_INTERVAL_MS);
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      clearInterval(statusTimer);
+      clearInterval(detailTimer);
     };
-  }, [load, setStatusMessage]);
+  }, [load, loadDetails, loadStatus, setStatusMessage]);
 
   async function runJob(name, endpoint = `/api/jobs/${name}`) {
     setStatusMessage(`Running ${name}...`);
@@ -78,18 +106,36 @@ export function TasksView({ setStatusMessage }) {
   }
 
   async function startStartupDaily() {
-    await postJson("/api/settings", { run_daily_on_startup_enabled: true, scheduler_enabled: false });
-    await load();
+    setStatusMessage("Updating scheduler...");
+    try {
+      const data = await postJson("/api/settings", { run_daily_on_startup_enabled: true, scheduler_enabled: false });
+      if (data.scheduler) applyScheduler(data.scheduler);
+      else await loadStatus();
+    } catch (error) {
+      setStatusMessage(error.message);
+    }
   }
 
   async function startScheduler() {
-    await postJson("/api/jobs/scheduler/start", {});
-    await load();
+    setStatusMessage("Updating scheduler...");
+    try {
+      const data = await postJson("/api/jobs/scheduler/start", {});
+      if (data.scheduler) applyScheduler(data.scheduler);
+      else await loadStatus();
+    } catch (error) {
+      setStatusMessage(error.message);
+    }
   }
 
   async function stopScheduler() {
-    await postJson("/api/settings", { run_daily_on_startup_enabled: false, scheduler_enabled: false });
-    await load();
+    setStatusMessage("Updating scheduler...");
+    try {
+      const data = await postJson("/api/settings", { run_daily_on_startup_enabled: false, scheduler_enabled: false });
+      if (data.scheduler) applyScheduler(data.scheduler);
+      else await loadStatus();
+    } catch (error) {
+      setStatusMessage(error.message);
+    }
   }
 
   return (

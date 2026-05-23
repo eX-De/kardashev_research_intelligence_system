@@ -1,90 +1,363 @@
-# 科研情报系统
+# Kardashev Research Intelligence System (KRIS)
 
-这是一个本地运行的科研信息自动化 dashboard MVP。主界面是“项目中心”，但 Obsidian 才是人类可读信息中心：dashboard 负责配置、调度、监控和少量确认，论文卡片、项目索引、实验记录整理等可读内容应写回 Obsidian。
+Kardashev Research Intelligence System (KRIS) 是一个面向个人或小团队的科研情报工作台：它把 Obsidian 项目笔记、arXiv 新论文、PDF 全文、LLM 判断和 Markdown 产物串成一条可恢复的每日情报流水线。Dashboard 负责配置、调度、筛选和阅读；可长期保存和人工编辑的内容仍以 Obsidian Markdown、数据库记录和 `artifacts` 产物为主。
 
-- 前端使用 Vite + React；Node 提供 API 服务，并在普通使用模式下托管构建后的前端静态文件。
-- Python worker 负责数据库、Obsidian 导入、arXiv 抓取、PDF 转 TXT、正文分段匹配、相关性排序和解释生成。
-- SQLite 数据库默认位于 `./data/research_intelligence.sqlite`；设置 `DATABASE_URL` 后可切换到 PostgreSQL。
-- Obsidian vault 是最终输出位置。系统会按项目配置写入自动生成的 Markdown，例如项目索引；导入流程仍只读取用户已有笔记。
+KRIS 还可以作为实验进展接收端，与 [eX-De/kris-agent](https://github.com/eX-De/kris-agent) 配合使用。agent 在代码工作区完成实验、重构或评测后，可以把结构化实验报告推送到 KRIS；KRIS 会把报告保存为项目 artifact，并写入项目上下文，让后续论文推荐、项目检索和日报生成能读到真实研发进展。
 
-## 快速开始
+在笔记侧，KRIS 支持直接连接本地 Obsidian vault，也支持通过 OSS、S3 或 R2 这类 S3-compatible 对象存储读取远端 Obsidian Markdown。本地 Obsidian 可以使用 [Remotely Save](https://github.com/remotely-save/remotely-save) 插件同步到同一个 OSS/S3-compatible bucket，服务器上的 KRIS 再从对象存储同步笔记并把系统产物追加写回固定输出前缀。后续会继续扩展更多外部笔记软件和知识库连接方式。
 
-1. 复制 `.env.example` 为 `.env`。`PORT`、`APP_DB_PATH`、`PYTHON_BIN` 这类启动级配置保留在 `.env` 中。
-2. 初始化数据库：
+## 部署方式
 
-```bash
+KRIS 支持两种主要部署方式：
+
+- Docker 部署：推荐用于服务器或长期运行环境。发布镜像为 `exde1968/kardashev-research-intelligence-system:0.1.0`；建议直接使用仓库内的 [docker-compose.yml](docker-compose.yml)，它会启动 PostgreSQL 17、secrets 和可选 Nginx HTTPS。
+- 源代码部署：推荐用于本地开发和快速调试。直接从仓库安装 Node/Python 依赖，使用 `npm start` 启动构建后的 dashboard；未配置 PostgreSQL 时会落到本地 SQLite 兼容模式。
+
+最小 Docker 运行示例：
+
+```powershell
+docker pull exde1968/kardashev-research-intelligence-system:0.1.0
+docker run --rm -p 3000:3000 -v ${PWD}/data:/data exde1968/kardashev-research-intelligence-system:0.1.0
+```
+
+生产部署建议使用本文后面的 [Docker Compose](docker-compose.yml) 配置，以便启用 PostgreSQL、secret 文件和 HTTPS 反向代理。SQLite 兼容模式不再作为长期运行后端重点支持；为了获得更稳定的并发、迁移和检索体验，建议使用 PostgreSQL。
+
+## 最佳实践
+
+推荐把 KRIS 自部署在一台长期在线的服务器上，用 [docker-compose.yml](docker-compose.yml) 启动应用和 PostgreSQL 17。服务器上只保留必要的管理入口，例如 SSH；不要把 `3000`、`5432` 或其它内部服务端口直接暴露到公网。若需要公网访问，优先使用 Cloudflare Tunnel，而不是开放源站端口。
+
+服务器部署的主要收益是让 KRIS 成为持续运行的研究中枢：它可以每天按固定时间自动执行 `run-daily`，持续同步笔记、抓取 arXiv、生成报告和维护任务历史；你可以从任意设备访问同一个 dashboard；[kris-agent](https://github.com/eX-De/kris-agent) 也可以在不同代码工作区完成实验后随时把进展推送回来。相比只在个人电脑临时启动，服务器模式更适合长期积累项目上下文、自动化日报和跨设备协作。
+
+推荐拓扑：
+
+- `kris.example.com`：面向使用者的 KRIS Dashboard。Cloudflare Tunnel public hostname 指向服务器本机的 `http://localhost:3000` 或 `http://app:3000`；在 Cloudflare Access 中把它配置为 self-hosted application，只允许你的账号、团队邮箱或身份提供商用户访问。
+- `kris-agent.example.com`：面向 [kris-agent](https://github.com/eX-De/kris-agent) 的实验报告上报入口。它可以指向同一个 KRIS 服务，但建议单独建 hostname，便于设置更窄的 Cloudflare Access service token、WAF 规则、速率限制和日志筛选。KRIS 侧仍要配置高强度 `KRIS_AGENT_TOKEN`，agent 请求同时携带 `x-experiment-agent-token`。
+
+Cloudflare Tunnel 的价值是让 `cloudflared` 从服务器向 Cloudflare 建立 outbound-only 连接；用户和 agent 都访问 Cloudflare hostname，Cloudflare 再把流量转发到本机 KRIS 服务。这样服务器防火墙可以保持入站业务端口关闭。Cloudflare 官方文档可参考：[Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)、[Published applications](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/routing-to-tunnel/) 和 [Access self-hosted applications](https://developers.cloudflare.com/cloudflare-one/applications/configure-apps/self-hosted-apps/)。
+
+其它推荐配置：
+
+- 使用 Docker Compose + PostgreSQL 17 作为长期运行方式；不要把 SQLite 兼容模式用于生产数据。
+- 为 `panel_session_secret.txt` 写入固定随机值；否则重启后已有登录 session 会失效。
+- 为 `panel_password.txt` 和 `kris_agent_token.txt` 使用不同的高强度随机值；agent token 只给自动化调用方。
+- 如果不使用 Nginx profile，保持 `APP_HOST_BIND=127.0.0.1` 或通过防火墙阻断公网访问 `3000`；如果使用 Cloudflare Tunnel，通常不需要直接暴露 `80/443`。
+- 定期备份 PostgreSQL volume `pgdata17` 和 `./data`；前者是主业务数据库，后者保存 PDF/TXT 缓存、远端 Obsidian 镜像等文件数据。
+- 把 LLM provider、Obsidian 远端存储、Cloudflare token 等密钥放在 secret 文件或服务端安全配置里，不要提交到 Git。
+- 为 `kris.example.com` 开启 Access 登录保护；为 `kris-agent.example.com` 使用 Access service token 或等价的机器身份控制，并保留 KRIS 自身的 `KRIS_AGENT_TOKEN` 校验作为第二层保护。
+- 服务器部署时优先使用远端 Obsidian 连接：本地 Obsidian 通过 [Remotely Save](https://github.com/remotely-save/remotely-save) 同步到 OSS/S3/R2，KRIS 使用 `OBSIDIAN_STORAGE_BACKEND=oss`、`s3` 或 `r2` 读取同一 bucket。这样服务器不需要挂载你的桌面 vault，也更适合跨设备和长期运行。
+- 远端 Obsidian 模式建议把 `OBSIDIAN_REMOTE_OUTPUT_PREFIX` 设为独立目录，例如 `Research Intelligence`；KRIS 只在该输出前缀下追加系统产物，不覆盖或删除你的原始笔记。
+- 阿里云 OSS RAM policy 可以从下面的去敏模板开始。`oss:ListObjects` 需要授权到 bucket 级资源；`oss:GetObject` 和 `oss:PutObject` 授权到对象级资源即可。把 `YOUR_BUCKET_NAME` 替换为你的 bucket 名：
+
+```json
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "oss:ListObjects",
+      "Resource": "acs:oss:*:*:YOUR_BUCKET_NAME"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "oss:GetObject",
+        "oss:PutObject"
+      ],
+      "Resource": "acs:oss:*:*:YOUR_BUCKET_NAME/*"
+    }
+  ]
+}
+```
+
+## 主要能力
+
+- 项目上下文：从 Obsidian 本地 vault 或 OSS/S3/R2 远端对象存储同步研究笔记，识别项目主页、项目文件夹和项目状态。
+- 论文发现：按配置的 arXiv 分类抓取论文，做摘要级粗筛、PDF/TXT 缓存、正文分块和证据检索。
+- 项目匹配：把论文正文证据与项目上下文匹配，生成项目级候选论文、LLM 判定和推荐状态。
+- 实验进展接收：通过 [kris-agent](https://github.com/eX-De/kris-agent) 或其它脚本上报结构化实验报告，沉淀为项目 artifact 和项目上下文。
+- 论文阅读：支持导入 arXiv URL 或上传 PDF，生成全文报告，与论文上下文对话，保存阅读笔记到 Obsidian。
+- 自动产物：生成日报、论文报告、项目索引、实验进展记录等 Markdown artifact，并可导出到 Obsidian。
+- 调度与恢复：Node 服务管理手动任务、启动时每日任务、定时任务和论文报告队列；worker 记录任务历史并支持每日流程恢复/重试。
+- 部署选择：Docker Compose 默认使用 PostgreSQL 17；本地 SQLite 只适合快速试用或开发兜底；可选 Nginx HTTPS 反向代理。
+
+## 技术栈
+
+| 层 | 实现 |
+| --- | --- |
+| 前端 | Vite, React 19, React Router, React Markdown, KaTeX/GFM |
+| API 服务 | 原生 Node HTTP server，负责静态资源、认证、调度和 worker 代理 |
+| Worker | Python CLI，负责数据库、Obsidian、arXiv、RAG、LLM、报告和 API 数据 |
+| 数据库 | 推荐 PostgreSQL；Docker Compose 默认提供 PostgreSQL 17；SQLite 仅作为本地快速试用/兼容模式 |
+| 部署 | `npm start`、开发双进程、Docker Compose、可选 Nginx profile |
+
+## 仓库结构
+
+```text
+.
+├── src/                         # React dashboard
+├── public/                      # 静态资源，包含 research-mark.svg
+├── worker/                      # Python worker、API 适配、数据库和流水线逻辑
+├── tests/                       # unittest 测试
+├── deploy/nginx/                # 可选 HTTPS 反向代理模板和证书目录
+├── secrets/                     # Docker Compose secrets 示例说明，真实 *.txt 不进 Git
+├── data/                        # 本地数据库、PDF/TXT 缓存、远端 vault 镜像等运行数据
+├── server.js                    # Node API/static/scheduler 服务
+├── migrate_sqlite_to_postgres.py
+├── docker-compose.yml
+├── Dockerfile
+└── .env.example
+```
+
+## 源代码部署
+
+要求：
+
+- Node.js `>=22.12.0`
+- Python `>=3.11`
+
+本地 PowerShell 示例：
+
+```powershell
+npm ci
+
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+
+Copy-Item .env.example .env
 npm run init-db
-```
-
-3. 普通使用模式启动 dashboard：
-
-```bash
 npm start
 ```
 
-4. 如需启用单密码 panel 保护，在 `.env` 设置 `PANEL_PASSWORD`；留空时保持无密码模式。这只是单密码保护，不提供多用户、角色权限或单设备互踢。
-
-5. 打开 `http://localhost:3000`，默认进入“项目中心”。首次使用会出现一次性初始化弹窗：
-   - 选择连接 Obsidian 时，在弹窗里选择 vault，并填写扫描文件夹和项目中心页标签。
-   - 选择系统内项目时，在弹窗里创建第一个项目。
-   - 点击“立即执行每日流程”生成当天推荐；每日流程会先同步 Obsidian，再抓取和整理论文。
-   - 可以选择“每日首次启动 dashboard 时执行”，或点击“启动定时任务”按配置时间周期执行 `run-daily`。两种模式互斥，执行内容相同。
-
-每日流程由 dashboard 所在的 Node 进程触发。关闭 `npm start` 后，dashboard 和调度都会停止；下次启动时，如果启用了“每日首次启动 dashboard 时执行”，系统会检查当天是否已有成功的 `run-daily`，没有才自动补跑一次。如果启用了定时任务，则按配置时间恢复调度。
-
-## 启动方式
-
-### 普通使用模式
-
-先复制 `.env.example` 为 `.env`。如需启用单密码 panel 保护，设置 `PANEL_PASSWORD`；未设置时保持无密码模式。
-
-普通使用模式启动命令：
-
-```bash
-npm start
-```
-
-它会先执行 Vite 构建，再启动 `server.js`。访问地址：
+打开：
 
 ```text
 http://localhost:3000
 ```
 
-### Docker Compose 部署
+未配置 PostgreSQL 时，源代码模式会使用本地 SQLite 兼容模式，数据库路径是 `./data/research_intelligence.sqlite`。SQLite 不再作为长期运行后端重点支持；正式使用建议配置 PostgreSQL，或直接使用 Docker Compose。如果没有激活虚拟环境，可在 `.env` 中把 `PYTHON_BIN` 指向虚拟环境里的 Python，例如 `.venv\Scripts\python.exe`。
 
-Docker Compose 会启动 dashboard app 和一个内置 PostgreSQL 服务。先复制 `.env.example` 为 `.env`，按需修改 `POSTGRES_PASSWORD`。如需启用单密码 panel 保护，设置 `PANEL_PASSWORD`；未设置时保持无密码模式。生产或长期部署建议同时设置固定随机的 `PANEL_SESSION_SECRET`。只有在 dashboard 通过 HTTPS 访问时才需要设置 `PANEL_COOKIE_SECURE=true`。
+首次进入 dashboard 后，按 onboarding 配置 Obsidian 或创建第一个系统内项目，再到“设置”里配置 arXiv、RAG、LLM provider 和自动化策略。
 
-然后执行：
+## 开发模式
 
-```bash
-docker compose up -d --build
+开发时启动两个终端：
+
+```powershell
+# 终端 1：API 和 worker 代理
+npm run start:api
+
+# 终端 2：Vite dev server
+npm run dev
 ```
 
-app 会通过 Compose 网络连接 `db:5432`，启动时自动执行 `init-db` 创建或迁移 schema，并读取 `.env` 中的 panel 单密码配置。PostgreSQL 数据保存在 Docker named volume `pgdata` 中；`./data:/data` 仍用于 arXiv PDF/TXT 缓存等文件数据。
+访问：
 
-更新代码后重新构建并启动：
-
-```bash
-git pull
-docker compose up -d --build
+```text
+http://localhost:5173
 ```
 
-如果需要从宿主机直接连接 PostgreSQL，可以取消 `docker-compose.yml` 里 `db.ports` 的注释。
+Vite 会把 `/api` 代理到 `http://localhost:3000`。生产模式下 `npm start` 会先构建前端到 `dist/`，再由 `server.js` 托管静态文件和 API；如果 `dist/` 不存在，Node 会回退服务 `public/`。
 
-### Docker Compose + Nginx HTTPS
+## Dashboard 导航
 
-`docker-compose.yml` 内置了一个可选的 `nginx` profile。默认 `docker compose up -d --build` 不会启动 Nginx；需要 HTTPS 反向代理时，先把证书放到 `NGINX_CERT_DIR` 指向的目录，默认是 `./deploy/nginx/certs`：
+- 首页：每日流程状态、项目/论文/产物/知识上下文指标、提醒和最近更新。
+- 论文：
+  - 待判断：查看推荐论文、证据、项目判定，保存或丢弃，触发全文报告。
+  - 仓库：筛选、搜索和维护已保存论文，更新阅读状态。
+  - 报告队列：导入 URL/PDF，生成、取消、重试、删除论文报告，阅读 PDF/Markdown 并聊天。
+- 项目：项目列表、新建项目、提醒和项目统计。
+- 项目详情：编辑项目关键词与 Obsidian 路径，关联论文/笔记，查看候选论文、实验进展和项目产物。
+- 产物：按类型、范围和状态筛选 artifact，查看 Markdown 与来源数据，导出到 Obsidian。
+- 任务：运行每日流程、同步 Obsidian、抓取 arXiv、缓存全文、生成报告，查看任务历史和报告队列。
+- 设置：配置数据库可见状态、Obsidian、arXiv、RAG、LLM provider、模型路由、调度策略和本地路径选择。
+
+## 每日流水线
+
+`run-daily` 是系统的核心任务。当前 worker 按阶段记录进度，失败后可恢复或重试：
+
+1. 同步上下文来源：本地/远端 Obsidian、项目笔记、项目知识文档。
+2. 抓取 arXiv：按分类、回看天数和结果上限导入论文元数据。
+3. 构建每日快照：记录本次运行要处理的论文集合。
+4. 缓存全文：下载 PDF，用 PyMuPDF 提取 TXT。
+5. 全局排序：用 embedding、关键词、首页等 searcher 匹配研究上下文。
+6. 项目排序：把检索范围限制到项目关联上下文。
+7. 项目判定：用 LLM 对“项目 × 论文 × 证据”生成结构化判断。
+8. 同步推荐：生成项目论文推荐状态。
+9. 论文报告：为推荐或手动触发的论文处理报告队列。
+10. 归档零命中论文：降低后续噪音。
+11. 生成日报 artifact：汇总指标、候选论文、风险和下一步动作。
+
+常用命令：
+
+```powershell
+npm run run-daily
+npm run sync-obsidian
+npm run fetch-arxiv
+npm run cache-arxiv-text
+npm run generate-paper-reports
+npm run generate-reports
+```
+
+恢复和重试可直接调用 worker：
+
+```powershell
+python -m worker.cli resume-daily --job-id 123
+python -m worker.cli retry-daily
+python -m worker.cli generate-paper-reports --limit 10
+python -m worker.cli api-health
+python -m worker.cli api-jobs-history --limit 20
+```
+
+## 配置
+
+复制 `.env.example` 为 `.env` 后再修改。`.env` 适合放本地启动级配置和非密钥 Docker Compose 插值；Docker 密码、token、session secret 应放到 `./secrets/*.txt`。Dashboard 保存的业务配置会写入数据库，并作为 `.env` 默认值之上的运行配置。
+
+关键启动配置：
+
+- `PORT`：Node 服务端口，默认 `3000`。
+- `APP_DB_PATH`：SQLite 兼容模式数据库路径，默认 `./data/research_intelligence.sqlite`；仅建议用于本地试用或开发兜底。
+- `DATABASE_URL` / `DATABASE_URL_FILE`：PostgreSQL 连接串；长期运行建议配置 PostgreSQL，Docker Compose 会默认连接内置 PostgreSQL 17。
+- `PYTHON_BIN`：Node 调用 worker 的 Python 命令。
+- `PANEL_PASSWORD` / `PANEL_PASSWORD_FILE`：单密码保护；为空时无密码模式。
+- `PANEL_SESSION_SECRET` / `PANEL_SESSION_SECRET_FILE`：session 签名密钥；长期部署应固定。
+- `PANEL_COOKIE_SECURE`：HTTPS 访问时设为 `true`。
+- `KRIS_AGENT_TOKEN` / `KRIS_AGENT_TOKEN_FILE`：外部实验报告 agent 的受限 token。
+
+Obsidian：
+
+- `OBSIDIAN_VAULT_PATH`：本地 vault 路径。
+- `OBSIDIAN_INCLUDE_DIRS`、`OBSIDIAN_INCLUDE_TAGS`：扫描范围和标签过滤。
+- `OBSIDIAN_PROJECT_CENTER_TAGS`：用于识别项目主页的标签组合。
+- `OBSIDIAN_STORAGE_BACKEND`：`local`、`oss`、`s3` 或 `r2`。
+- `OBSIDIAN_REMOTE_*`：远端对象存储 endpoint、region、bucket、prefix、凭证、镜像目录和输出前缀。OSS 使用阿里云 OSS 客户端；`s3` / `r2` 使用 S3-compatible API。
+- 本地 Obsidian 可通过 [Remotely Save](https://github.com/remotely-save/remotely-save) 同步到 OSS/S3-compatible bucket，KRIS 再以远端模式读取同一个 bucket。
+- 远端模式只在 `OBSIDIAN_REMOTE_OUTPUT_PREFIX` 下追加系统产物，不覆盖或删除已有 Obsidian 对象。
+- 未来会提供更多外部笔记软件和知识库连接方式；当前推荐路径是 Obsidian + Remotely Save + OSS/S3-compatible storage。
+
+arXiv 与 RAG：
+
+- `ARXIV_CATEGORIES`、`ARXIV_DAILY_LOOKBACK_DAYS`、`ARXIV_MAX_RESULTS`：抓取范围。
+- `ARXIV_CACHE_FULL_TEXT`、`ARXIV_PDF_DIR`、`ARXIV_TEXT_DIR`：全文缓存策略和目录。
+- `RAG_SCORE_THRESHOLD`、`RAG_TOP_K`、`RAG_SEARCHERS`：证据检索和保留策略。
+- `RAG_PREFILTER_*`：摘要级粗筛阈值、top-k、保底数量和上限。
+- `VECTOR_INDEX_BACKEND`：向量索引后端，默认 `sqlite`；PostgreSQL 部署可配合 pgvector 相关能力使用。
+
+LLM provider 使用 OpenAI-compatible 接口配置。建议在 dashboard 设置页维护，也可用 `.env` 初始化默认值：
+
+```env
+LLM_PROVIDERS_JSON=[{"id":"provider-id","name":"Provider Name","base_url":"https://example.com/v1","api_key":"replace-me","chat_models":["chat-model-name"],"embedding_models":["embedding-model-name"]}]
+LLM_CHAT_PROVIDER_ID=provider-id
+LLM_CHAT_MODEL=chat-model-name
+LLM_EMBEDDING_PROVIDER_ID=provider-id
+LLM_EMBEDDING_MODEL=embedding-model-name
+PAPER_REPORT_PROVIDER_ID=provider-id
+PAPER_REPORT_MODEL=chat-model-name
+READER_CHAT_PROVIDER_ID=provider-id
+READER_CHAT_MODEL=chat-model-name
+```
+
+未配置 LLM provider 时，系统仍可初始化数据库、同步 Obsidian、抓取 arXiv、缓存全文和保存反馈；embedding、LLM 判定、报告生成或对话会跳过、失败或使用有限的本地说明，取决于具体功能。
+
+## API 和集成
+
+`server.js` 不使用 Express；它把大多数 `/api/*` 请求转换为 `python -m worker.cli api-*` 命令并返回 JSON。主要 API 类别包括：
+
+- 认证：`/api/auth/status`、`/api/auth/login`、`/api/auth/logout`
+- 项目：项目列表、详情、保存、Obsidian 导出、项目索引、关联论文/笔记
+- 设置和健康：`/api/settings`、`/api/health`、`/api/local-path/select`
+- 任务：scheduler、startup daily、run/resume/retry daily、单项 worker 任务、任务历史
+- 论文：inbox、library、paper detail、feedback、recommendation、report queue
+- Reader：PDF/URL 导入、PDF 服务、chat、SSE stream、保存 Obsidian、follow-up questions
+- Artifacts：列表、详情、导出 Obsidian
+- 外部实验报告：`GET /api/projects` 和 `POST /api/experiments/reports`
+
+外部 agent 只能通过 `x-experiment-agent-token: <KRIS_AGENT_TOKEN>` 访问项目列表和实验报告上报接口，不会获得完整 dashboard API 权限。
+
+### 外部实验报告 Agent
+
+KRIS 提供一个受限接入口，方便 Codex、Claude Code 或手工脚本把实验进展写回指定项目：
+
+- `GET /api/projects`：读取项目列表，供 agent 选择 `project_id`。
+- `POST /api/experiments/reports`：上报实验报告。
+
+这两个接口可以用 `x-experiment-agent-token: <KRIS_AGENT_TOKEN>` 认证；该 token 只放开这两个 agent 接口，不会放开完整 dashboard API。`KRIS_AGENT_TOKEN` 为空时，外部 agent 入口等同关闭。
+
+请求示例：
+
+```powershell
+$headers = @{ "x-experiment-agent-token" = $env:KRIS_AGENT_TOKEN }
+$body = @{
+  project_id = 1
+  title = "RAG reranker ablation"
+  markdown = "## 本次任务`n`n对 reranker 配置做消融实验。"
+  report_json = @{
+    task_summary = "测试 reranker 配置"
+    results = @("保存实验结果", "更新项目上下文")
+    next_actions = @("扩大样本")
+  }
+  source_agent = "codex"
+  idempotency_key = "workspace-a:ragrerank:2026-05-23"
+  metadata = @{ workspace = "D:/coding/project-a" }
+} | ConvertTo-Json -Depth 8
+
+Invoke-RestMethod -Method Post -Uri "http://localhost:3000/api/experiments/reports" -Headers $headers -ContentType "application/json" -Body $body
+```
+
+Payload 约束：
+
+- `project_id`：必填，正整数，必须指向已有项目。
+- `title`：必填，最多 240 字符。
+- `markdown`：必填，最多 200000 字符，作为 artifact 正文和项目上下文来源。
+- `report_json`：必填对象，保存结构化实验摘要。
+- `source_agent`：可选，默认 `manual`；允许值为 `codex`、`claude-code`、`manual`。
+- `idempotency_key`：必填，最多 240 字符；相同 key 会更新同一份实验报告，而不是重复创建。
+- `metadata`：可选对象，用于保存 workspace、commit、run id 等调用方上下文。
+
+写入成功后，KRIS 会创建或更新一个 `experiment_report` artifact，同时写入项目知识文档，relation 为 `experiment_progress`，后续项目上下文检索和论文匹配会读到这份实验进展。若已配置 Obsidian，本次实验报告会尝试导出到项目输出目录；导出失败不会阻断报告入库。
+
+## Docker Compose
+
+发布镜像是 `exde1968/kardashev-research-intelligence-system:0.1.0`。仓库内的 [docker-compose.yml](docker-compose.yml) 默认拉取该镜像，并启动 PostgreSQL 17：
+
+- `db`：`pgvector/pgvector:pg17`，数据在 named volume `pgdata17`。
+- `app`：Node 22 + Python venv，启动时先执行 `python -m worker.cli init-db`，再运行 `node server.js`。
+- `./data:/data`：PDF/TXT 缓存、远端 Obsidian 镜像等文件数据。
+- 密钥只以 `_FILE` 路径形式注入容器；非密钥配置仍通过环境变量传入。
+
+准备：
+
+```powershell
+Copy-Item .env.example .env
+New-Item -ItemType Directory -Force secrets
+Set-Content -NoNewline secrets/postgres_password.txt "replace-with-db-password"
+Set-Content -NoNewline secrets/panel_password.txt "replace-with-panel-password-or-empty"
+node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))" | Set-Content -NoNewline secrets/panel_session_secret.txt
+Set-Content -NoNewline secrets/kris_agent_token.txt "replace-with-agent-token-or-empty"
+```
+
+启动：
+
+```powershell
+docker compose up -d
+```
+
+访问 `http://localhost:3000`，或按 `.env` 中的 `APP_HOST_PORT` 访问。`panel_password.txt` 为空时保持无密码模式；`kris_agent_token.txt` 为空时关闭外部实验报告上报。
+
+如果容器需要访问本地 Obsidian vault，在 `docker-compose.yml` 中挂载 vault，并把 `OBSIDIAN_VAULT_PATH` 设置为容器内路径，例如 `/vault`。
+
+## Nginx HTTPS
+
+可选的 `nginx` profile 会把 HTTP 重定向到 HTTPS，并反代到内部 `app:3000`。准备证书：
 
 ```text
 deploy/nginx/certs/fullchain.pem
 deploy/nginx/certs/privkey.pem
 ```
 
-然后在 `.env` 中设置：
+在 `.env` 中设置：
 
 ```env
-PANEL_PASSWORD=your-strong-password
-PANEL_SESSION_SECRET=replace-with-a-fixed-random-string
 PANEL_COOKIE_SECURE=true
 APP_HOST_BIND=127.0.0.1
 NGINX_SERVER_NAME=research.example.com
@@ -92,145 +365,48 @@ NGINX_SERVER_NAME=research.example.com
 
 启动：
 
-```bash
-docker compose --profile nginx up -d --build
+```powershell
+docker compose --profile nginx up -d
 ```
 
-这样 Nginx 会监听 `NGINX_HTTP_PORT` 和 `NGINX_HTTPS_PORT`，默认 `80/443`，并把 HTTP 请求重定向到 HTTPS，再反代到内部 `app:3000`。`APP_HOST_BIND=127.0.0.1` 用来避免宿主机公网网卡继续暴露直连的 `3000` 端口。
+`APP_HOST_BIND=127.0.0.1` 用于避免宿主机公网网卡继续直接暴露 app 的 `3000` 端口。
 
-### 开发模式
+## 脚本速查
 
-开发模式需要两个终端。第一个终端启动 API server：
+| 命令 | 作用 |
+| --- | --- |
+| `npm run dev` | 启动 Vite dev server |
+| `npm run build` | 构建前端到 `dist/` |
+| `npm run preview` | 预览构建产物 |
+| `npm start` | 构建前端并启动 Node 服务 |
+| `npm run start:api` | 只启动 Node API/static 服务 |
+| `npm run init-db` | 初始化或迁移当前数据库 schema |
+| `npm run sync-obsidian` | 同步 Obsidian/项目上下文 |
+| `npm run fetch-arxiv` | 抓取 arXiv 并缓存粗筛后的全文 |
+| `npm run cache-arxiv-text` | 为已入库论文补缓存 PDF/TXT |
+| `npm run generate-paper-reports` | 处理论文全文报告队列 |
+| `npm run generate-reports` | 生成日报 artifact |
+| `npm run run-daily` | 执行完整每日流水线 |
+| `npm run test` | 运行 Python unittest |
+| `npm run check` | Node 语法检查、前端构建、Python compileall |
 
-```bash
-npm run start:api
-```
+## 验证
 
-第二个终端启动 Vite React dev server：
-
-```bash
-npm run dev
-```
-
-访问地址：
-
-```text
-http://localhost:5173
-```
-
-开发模式下，Vite 会把 `/api` 请求代理到 `http://localhost:3000`。
-
-## Dashboard 功能
-
-- 项目中心：默认主界面，只保留全局运行概览、提醒、项目列表和新建入口；项目特定配置与关联信息进入单独项目页。
-- 论文推荐：展示进入推荐池的 arXiv 论文，按相关性排序。Inbox 只是候选入口，不是系统主界面。
-- 论文详情：展示摘要、arXiv 链接、命中的 arXiv 正文段、Obsidian 证据片段、解释和标注按钮。
-- Obsidian 同步：项目详情可以把项目索引同步到 Obsidian，减少手写项目维护文本。
-- 配置与任务：保存系统配置，启动/停止定时任务，立即执行每日流程。`run-daily` 的第一步是同步 Obsidian。
-- 健康状态：显示数据库、Obsidian vault、LLM provider、索引数量和最近任务状态。
-- 任务历史：显示最近 worker 执行记录、状态、时间和结果摘要。
-
-## CLI 调试命令
-
-```bash
-npm run run-daily
-npm run fetch-arxiv
-npm run cache-arxiv-text
-npm run generate-reports
-npm run sync-obsidian
-```
-
-这些命令不是常驻服务，而是一次性 worker 任务：
-
-- `npm run run-daily`：完整每日流程，依次同步 Obsidian、抓取 arXiv、摘要粗筛、缓存通过粗筛的 PDF/TXT、匹配论文、生成解释和每日总报告。
-- `npm run fetch-arxiv`：抓取 arXiv 元数据，并按摘要粗筛结果缓存 PDF/TXT，适合补抓或调试。
-- `npm run cache-arxiv-text`：显式补缓存命令，会对已入库且未完成全文缓存的论文下载 PDF，并用 PyMuPDF 提取 TXT。
-- `npm run generate-reports`：生成一篇 Obsidian Markdown 每日总报告，汇总当天流程指标、项目候选论文、全局推荐论文、风险和下一步动作。
-- `npm run sync-obsidian`：只刷新 Obsidian 研究画像索引。
-
-## 开发验证命令
-
-```bash
+```powershell
 npm run test
 npm run check
 ```
 
-## 配置说明
+`npm run test` 实际执行 `python -m unittest discover -s tests`。`npm run check` 会执行 `node --check server.js`、`npm run build` 和 `python -m compileall worker tests`。
 
-启动级配置在 `.env.example` 中：
+## 常见问题
 
-- `PORT`：dashboard 监听端口。
-- `APP_DB_PATH`：SQLite 数据库路径。
-- `DATABASE_URL`：PostgreSQL 连接串；本地 npm 模式留空时使用 SQLite。Docker Compose 默认注入内置 PostgreSQL 连接串。
-- `PYTHON_BIN`：Node 调用 Python worker 的命令。
-- `PANEL_PASSWORD`：panel 单密码保护；留空时不启用密码保护。
-- `PANEL_SESSION_TTL_SECONDS`：panel 登录会话有效期，默认 `604800` 秒。
-- `PANEL_SESSION_SECRET`：可选会话密钥；生产或长期部署建议设置固定随机值。
-- `PANEL_COOKIE_SECURE`：可选；通过 HTTPS 访问 dashboard 时可设为 `true`，普通本地或 Docker HTTP 访问保持空。
-- `POSTGRES_DB`、`POSTGRES_USER`、`POSTGRES_PASSWORD`：Docker Compose 内置 PostgreSQL 的数据库、用户和密码。
-- `APP_HOST_BIND`、`APP_HOST_PORT`：Docker Compose 直连 app 的宿主机绑定地址和端口；启用 Nginx HTTPS 时建议把 `APP_HOST_BIND` 设为 `127.0.0.1`。
-- `NGINX_SERVER_NAME`、`NGINX_HTTP_PORT`、`NGINX_HTTPS_PORT`、`NGINX_CERT_DIR`：可选 Nginx profile 的域名、端口和证书目录。
+- `python` 不在 PATH：激活虚拟环境，或在 `.env` 设置 `PYTHON_BIN`。
+- 登录状态重启后失效：设置固定的 `PANEL_SESSION_SECRET` 或 `PANEL_SESSION_SECRET_FILE`。
+- Docker 中看不到本地 Obsidian：需要把 vault mount 到容器，并使用容器内路径。
+- 报告或聊天失败：检查 LLM provider 是否有 API key、base URL、模型名，以及 `PAPER_REPORT_*` / `READER_*` 模型路由。
+- 每日流程中断：查看“任务”页或 `python -m worker.cli api-jobs-history --limit 20`，再使用 `resume-daily` 或 `retry-daily`。
 
-## PostgreSQL 迁移
+## License
 
-先停止 dashboard/API server，避免迁移时 SQLite 仍在写入。确认目标 PostgreSQL 数据库为空或可以重建后执行：
-
-```powershell
-$env:DATABASE_URL="postgresql://research_app:password@localhost:5432/research_intelligence"
-python migrate_sqlite_to_postgres.py --reset
-```
-
-迁移脚本会在目标库创建 schema、导入 SQLite 数据、校验每张表行数并重置自增序列。迁移完成后，把同一个 `DATABASE_URL` 写入 `.env` 并重启 dashboard，即可让 worker 使用 PostgreSQL。
-
-业务配置可以在 dashboard 的“配置与任务”里修改：
-
-- `OBSIDIAN_VAULT_PATH`：Obsidian vault 路径。
-- `OBSIDIAN_STORAGE_BACKEND`：`local`、`oss`、`s3` 或 `r2`。远端模式用于服务器部署，从对象存储读取 Markdown，并把系统生成内容追加到对象存储。
-- `OBSIDIAN_REMOTE_ENDPOINT_URL`、`OBSIDIAN_REMOTE_REGION`、`OBSIDIAN_REMOTE_BUCKET`、`OBSIDIAN_REMOTE_PREFIX`：远端 vault 的对象存储连接和根前缀。阿里云 OSS 使用 OSS endpoint；S3/R2 使用 S3 兼容 endpoint。
-- `OBSIDIAN_REMOTE_ACCESS_KEY_ID`、`OBSIDIAN_REMOTE_SECRET_ACCESS_KEY`：对象存储访问密钥；R2 和 OSS 必填，S3 可使用实例角色或环境凭证。
-- `OBSIDIAN_REMOTE_MIRROR_DIR`：服务器上的本地镜像目录，只作为索引缓存。
-- `OBSIDIAN_REMOTE_OUTPUT_PREFIX`：远端模式下系统新增 Markdown 的固定输出前缀，默认 `Research Intelligence`。代码不执行远端删除，也不会修改项目中心页或覆盖已有对象。
-- 路径输入框支持手动输入，也可以点击“选择”由本地 Node 服务打开 Finder / 系统文件选择器；选择 vault 本身不需要先保存配置，项目主页和输出目录会优先按当前表单里的 vault 转成相对路径。
-- `OBSIDIAN_INCLUDE_DIRS`：需要扫描的文件夹，例如 `Research,Papers`。
-- `OBSIDIAN_INCLUDE_TAGS`：需要纳入研究画像的标签，例如 `research,paper,direction`。
-- `OBSIDIAN_PROJECT_CENTER_TAGS`：项目中心页必须同时具备的标签组合。匹配的 Markdown 会被识别为项目中心页，它所在的父文件夹会作为项目文件夹。
-- `ARXIV_CATEGORIES`：每日抓取的 arXiv 分类，例如 `cs.AI,cs.CL,cs.IR`。
-- `ARXIV_CACHE_FULL_TEXT`：是否下载 arXiv PDF 并提取 TXT。每日流程和 `fetch-arxiv` 只会缓存摘要粗筛通过或保底保留的论文；手动 `cache-arxiv-text` 会显式补缓存已入库论文。
-- `ARXIV_PDF_DIR`、`ARXIV_TEXT_DIR`：PDF 缓存目录和 TXT 输出目录。
-- `RAG_SCORE_THRESHOLD`：进入 inbox 的相关性阈值。
-- `RAG_TOP_K`：每篇论文保留的证据 chunk 数量。
-- `RAG_PREFILTER_ENABLED`：是否先用论文标题 + 摘要 embedding 做粗筛。
-- `RAG_PREFILTER_THRESHOLD`：粗筛通过阈值，默认偏宽松。
-- `RAG_PREFILTER_TOP_K`：粗筛时参与评分的 Obsidian chunk 数量。
-- `RAG_PREFILTER_MIN_KEEP`：每天即使低于阈值也保底进入精排的论文数量。
-- `RAG_PREFILTER_MAX_KEEP`：每天最多进入精排的论文数量，`0` 表示不限制。
-- `RUN_DAILY_ON_STARTUP_ENABLED`：dashboard 每日首次启动时是否自动执行 `run-daily`。
-- `SCHEDULER_ENABLED`、`SCHEDULER_RUN_TIME`、`SCHEDULER_INTERVAL_HOURS`：dashboard 定时任务默认值。`RUN_DAILY_ON_STARTUP_ENABLED` 与 `SCHEDULER_ENABLED` 互斥。
-- `LLM_PROVIDERS_JSON`、`LLM_CHAT_PROVIDER_ID`、`LLM_CHAT_MODEL`、`LLM_EMBEDDING_PROVIDER_ID`、`LLM_EMBEDDING_MODEL`：LLM provider 默认值。日常建议直接在 dashboard 中配置多个 provider 和模型。
-
-dashboard 保存的业务配置会写入 SQLite，并覆盖 `.env` 中的对应默认值。启动级配置不会暴露在 dashboard，需要改 `.env` 并重启。
-
-项目配置保存在 SQLite，但可读内容以 Obsidian 为准。项目中心只显示列表，单独项目页负责这些项目特定信息：
-
-- `obsidian_project_path`：项目主页 Markdown 路径，例如 `Projects/Agentic RAG.md`。
-- `obsidian_output_dir`：自动生成论文卡片、综述、实验记录整理结果的输出目录。
-- 项目页可修改项目名、状态、关键词、Obsidian 项目主页和输出目录。
-- 项目页可查看候选论文、项目证据、生成产物，并手动关联或移除论文/笔记。
-
-dashboard 不再把“项目摘要/目标/备注”作为主要手写输入。项目状态、论文集合、笔记集合和自动化结果由系统维护；需要人阅读和编辑的内容落在 Obsidian Markdown 中。
-
-项目可以从 Obsidian 自动识别：在设置里配置“项目中心页标签组合”，例如 `project,center`。同步 Obsidian 时，所有同时包含这些标签的 Markdown 会成为项目中心页；它的父文件夹就是项目文件夹，文件夹内已索引的 Markdown 会自动关联为项目上下文。项目状态使用 Obsidian 标签 `Status/进行中`、`Status/已完成`、`Status/搁置`、`Status/计划中`。如果中心页已经有状态标签，dashboard 会按该标签显示；本地 vault 模式下，在 dashboard 修改状态时会写回中心页 frontmatter 的 `tags`。远端对象存储模式只追加系统产物，不改项目页。
-
-PDF 正文提取依赖 PyMuPDF，依赖写在 `requirements.txt`。提取出的 TXT 路径会写入 SQLite 的 `arxiv_papers.text_path`，PDF 路径会写入 `arxiv_papers.pdf_path`。在每日流程中，系统会先做 `title + abstract` 粗筛，再只对粗筛通过或 `RAG_PREFILTER_MIN_KEEP` 保底保留的论文做 PDF/TXT 缓存。
-
-arXiv 正文会切成 `arxiv_text_chunks` 后逐段匹配 Obsidian 的 `research_chunks`。`matches` 表会记录最佳命中的 `arxiv_chunk_id` 和 Obsidian `chunk_id`，因此 dashboard 可以展示“论文哪一段/哪一页”匹配到了“哪条个人研究笔记”。
-
-项目级论文匹配会把检索范围限制在该项目自动关联的 Obsidian 笔记 chunk 中，结果写入 `project_paper_matches`。RRF 分数只用于证据排序，`quality_score` 用于便宜过滤；随后系统对通过过滤的 `项目 × 论文` 生成项目级判定，写入 `project_paper_judgments`。项目详情页会显示项目候选论文、命中分数、论文/项目证据片段和判定结果。
-
-每日流程最后会生成一篇每日总报告，写入 `Research Intelligence/Daily/YYYY-MM-DD.md`。报告只读取通过项目级判定的项目候选论文，汇总当天流程指标、风险/不确定点和下一步动作；不再为每个“项目 × 论文”生成单篇用途报告。
-
-如果配置了 embedding provider 和 embedding model，系统会为 arXiv 正文段生成 embedding，并写入 `arxiv_chunk_embeddings`。后续重跑 ranking 时会优先复用缓存，避免对同一个 arXiv chunk 重复请求 embedding API。
-
-ranking 采用两阶段流程：先用论文 `title + abstract` 的 embedding 做 paper-level 粗筛，并把分数、rank、通过原因写入 `paper_prefilter_runs`；通过粗筛或进入 `RAG_PREFILTER_MIN_KEEP` 保底集合、且未超过 `RAG_PREFILTER_MAX_KEEP` 上限的论文，才下载 PDF/TXT 并进入正文 chunk-level 精排。这样能减少全文下载、分段和匹配成本，同时避免固定阈值误杀当天的潜在相关论文。
-
-没有配置 LLM provider API key 时，系统仍然可以完成 arXiv 抓取、PDF/TXT 缓存、Obsidian 解析、关键词排序和反馈持久化。embedding 和 LLM 解释会跳过，或使用仅基于证据片段的本地说明代替。
+AGPL-3.0-only。详见 [LICENSE](LICENSE)。

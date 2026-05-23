@@ -14,6 +14,7 @@ import {
   snippet
 } from "../lib/dashboard.js";
 import { friendlyObsidianMessage, postObsidianJson, useObsidianCapability } from "../lib/obsidianCapability.js";
+import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
 
 function relationOptions(options) {
   return options.map(([value, label]) => <option key={value} value={value}>{label}</option>);
@@ -180,6 +181,47 @@ function ProjectMatchesPanel({ matches }) {
   );
 }
 
+function ExperimentProgressPanel({ reports, obsidianCapability, onExport }) {
+  const exportDisabled = !obsidianCapability?.available;
+  const obsidianHint = obsidianCapability?.disabledReason || "请先配置可选 Obsidian 集成。";
+  return (
+    <section className="panel experiment-progress-panel">
+      <div className="panel-title">
+        <h2>实验进展</h2>
+        <p>{reports.length} reports</p>
+      </div>
+      <div className="experiment-report-list">
+        {reports.length ? reports.map((report) => {
+          const content = report.content_json || {};
+          const reportJson = content.report_json || {};
+          const sourceAgent = content.source_agent || report.source?.source_agent || "manual";
+          const summary = reportJson.task_summary || reportJson.goal || reportJson.conclusion || snippet(report.content_markdown || "", 220);
+          return (
+            <article className="experiment-report-item" key={report.id}>
+              <div className="experiment-report-head">
+                <div>
+                  <strong>{report.title}</strong>
+                  <p className="muted">{sourceAgent} · {fmtDate(report.updated_at)}{report.obsidian_path ? ` · ${report.obsidian_path}` : ""}</p>
+                </div>
+                <div className="experiment-report-actions">
+                  <a href={`/artifacts/${report.id}`}>打开产物</a>
+                  <button disabled={exportDisabled} title={exportDisabled ? obsidianHint : undefined} type="button" onClick={() => onExport(report.id)}>导出</button>
+                </div>
+              </div>
+              {summary ? <p className="summary">{summary}</p> : null}
+              {report.content_markdown ? (
+                <div className="experiment-report-preview">
+                  <LazyMarkdownReport markdown={report.content_markdown.slice(0, 1400)} />
+                </div>
+              ) : null}
+            </article>
+          );
+        }) : <p className="muted">暂无实验进展报告。</p>}
+      </div>
+    </section>
+  );
+}
+
 function LinkedResourcesPanel({ detail, onLinkPaper, onLinkNote, onUnlinkPaper, onUnlinkNote }) {
   const linkedPapers = detail.papers || [];
   const linkedNotes = detail.notes || [];
@@ -280,6 +322,10 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
   const project = detail?.project || {};
   const title = isNew ? "新建项目" : project.name || "项目";
   const artifacts = detail?.artifacts || [];
+  const experimentReports = useMemo(
+    () => artifacts.filter((artifact) => artifact.artifact_type === "experiment_report"),
+    [artifacts]
+  );
   const contextDocuments = detail?.context_documents || [];
   const matches = detail?.retrieval_hits || detail?.project_matches || [];
 
@@ -350,6 +396,21 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
     }
   }
 
+  async function exportArtifact(artifactId) {
+    if (!artifactId) return;
+    if (!obsidianCapability.available) {
+      setStatusMessage(obsidianCapability.disabledReason);
+      return;
+    }
+    try {
+      const data = await postObsidianJson(`/api/artifacts/${artifactId}/export-obsidian`, {});
+      await loadProject();
+      setStatusMessage(`Synced ${data.export?.path || "artifact"}`);
+    } catch (error) {
+      setStatusMessage(friendlyObsidianMessage(error));
+    }
+  }
+
   async function submitLink(event, type) {
     event.preventDefault();
     if (!projectId) return;
@@ -392,6 +453,7 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
         {!isNew ? (
           <>
             <ObsidianPanel project={project} artifacts={artifacts} contextDocuments={contextDocuments} obsidianCapability={obsidianCapability} onExport={exportProject} />
+            <ExperimentProgressPanel reports={experimentReports} obsidianCapability={obsidianCapability} onExport={exportArtifact} />
             <ProjectMatchesPanel matches={matches} />
             <LinkedResourcesPanel
               detail={detail || {}}

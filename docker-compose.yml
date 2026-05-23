@@ -1,12 +1,14 @@
 services:
   db:
-    image: postgres:16-bookworm
+    image: pgvector/pgvector:pg17
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-research_intelligence}
       POSTGRES_USER: ${POSTGRES_USER:-research_app}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-research_password}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata17:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 10s
@@ -19,30 +21,39 @@ services:
     restart: unless-stopped
 
   app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: research-intelligence:local
+    image: ${KRIS_IMAGE:-exde1968/kardashev-research-intelligence-system:0.1.0}
     depends_on:
       db:
         condition: service_healthy
     ports:
       - "${APP_HOST_BIND:-0.0.0.0}:${APP_HOST_PORT:-3000}:3000"
-    env_file:
-      - .env
     environment:
+      NODE_ENV: production
       PORT: "3000"
+      PYTHONUNBUFFERED: "1"
+      PYTHONUTF8: "1"
       PYTHON_BIN: /opt/venv/bin/python
-      DATABASE_URL: postgresql://${POSTGRES_USER:-research_app}:${POSTGRES_PASSWORD:-research_password}@db:5432/${POSTGRES_DB:-research_intelligence}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-research_intelligence}
+      POSTGRES_USER: ${POSTGRES_USER:-research_app}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
       APP_DB_PATH: /data/research_intelligence.sqlite
-      PANEL_PASSWORD: ${PANEL_PASSWORD:-}
+      PANEL_PASSWORD_FILE: /run/secrets/panel_password
       PANEL_SESSION_TTL_SECONDS: ${PANEL_SESSION_TTL_SECONDS:-604800}
-      PANEL_SESSION_SECRET: ${PANEL_SESSION_SECRET:-}
+      PANEL_SESSION_SECRET_FILE: /run/secrets/panel_session_secret
       PANEL_COOKIE_SECURE: ${PANEL_COOKIE_SECURE:-}
+      KRIS_AGENT_TOKEN_FILE: /run/secrets/kris_agent_token
       ARXIV_PDF_DIR: /data/arxiv_pdfs
       ARXIV_TEXT_DIR: /data/arxiv_text
+      VECTOR_INDEX_BACKEND: ${VECTOR_INDEX_BACKEND:-sqlite}
       # Set OBSIDIAN_VAULT_PATH to /vault if you mount a vault below.
       # OBSIDIAN_VAULT_PATH: /vault
+    secrets:
+      - postgres_password
+      - panel_password
+      - panel_session_secret
+      - kris_agent_token
     volumes:
       - ./data:/data
       # Mount your Obsidian vault when needed, then set OBSIDIAN_VAULT_PATH=/vault.
@@ -72,4 +83,14 @@ services:
     restart: unless-stopped
 
 volumes:
-  pgdata:
+  pgdata17:
+
+secrets:
+  postgres_password:
+    file: ${POSTGRES_PASSWORD_FILE:-./secrets/postgres_password.txt}
+  panel_password:
+    file: ${PANEL_PASSWORD_FILE:-./secrets/panel_password.txt}
+  panel_session_secret:
+    file: ${PANEL_SESSION_SECRET_FILE:-./secrets/panel_session_secret.txt}
+  kris_agent_token:
+    file: ${KRIS_AGENT_TOKEN_FILE:-./secrets/kris_agent_token.txt}

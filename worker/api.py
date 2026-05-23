@@ -12,7 +12,9 @@ from .artifacts import (
     generate_project_index_artifact,
     get_artifact,
     list_artifacts,
+    update_artifact,
 )
+from .experiment_reports import create_experiment_report
 from .knowledge import save_manual_project_context
 from .obsidian import (
     OBSIDIAN_NOT_CONFIGURED,
@@ -326,7 +328,7 @@ def project_detail(conn: sqlite3.Connection, project_id: int) -> dict[str, objec
     ).fetchall()
     artifacts = conn.execute(
         """
-        SELECT id, artifact_type, title, content_markdown, '' AS obsidian_path, status, source_json, updated_at
+        SELECT id, artifact_type, title, content_markdown, content_json, status, source_json, updated_at
         FROM artifacts
         WHERE scope_type = 'project' AND scope_id = ?
         ORDER BY updated_at DESC
@@ -455,19 +457,7 @@ def project_detail(conn: sqlite3.Connection, project_id: int) -> dict[str, objec
             }
             for note in candidate_notes
         ],
-        "artifacts": [
-            {
-                "id": int(artifact["id"]),
-                "artifact_type": artifact["artifact_type"],
-                "title": artifact["title"],
-                "obsidian_path": artifact["obsidian_path"] if "obsidian_path" in artifact.keys() else "",
-                "content_markdown": artifact["content_markdown"] if "content_markdown" in artifact.keys() else "",
-                "status": artifact["status"],
-                "source": from_json(artifact["source_json"], {}),
-                "updated_at": artifact["updated_at"],
-            }
-            for artifact in artifacts
-        ],
+        "artifacts": [_project_artifact_payload(artifact) for artifact in artifacts],
         "retrieval_hits": [
             {
                 "paper_id": int(match["paper_id"]),
@@ -1054,6 +1044,28 @@ def paper_reports_queue(conn: sqlite3.Connection, limit: int = 300) -> dict[str,
     }
 
 
+def _project_artifact_payload(artifact: sqlite3.Row) -> dict[str, object]:
+    content = from_json(artifact["content_json"], {})
+    source = from_json(artifact["source_json"], {})
+    obsidian_export = content.get("obsidian_export") if isinstance(content, dict) else None
+    obsidian_path = ""
+    if isinstance(obsidian_export, dict):
+        obsidian_path = clean_unicode(str(obsidian_export.get("path") or ""))
+    if not obsidian_path and isinstance(source, dict):
+        obsidian_path = clean_unicode(str(source.get("obsidian_path") or ""))
+    return {
+        "id": int(artifact["id"]),
+        "artifact_type": artifact["artifact_type"],
+        "title": artifact["title"],
+        "obsidian_path": obsidian_path,
+        "content_markdown": artifact["content_markdown"] if "content_markdown" in artifact.keys() else "",
+        "content_json": content if isinstance(content, dict) else {},
+        "status": artifact["status"],
+        "source": source if isinstance(source, dict) else {},
+        "updated_at": artifact["updated_at"],
+    }
+
+
 def remove_paper_report(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
     result = remove_paper_report_from_queue(conn, paper_id)
     return {"ok": True, "paper_id": paper_id, **result}
@@ -1464,8 +1476,22 @@ def export_artifact(
         artifact_id,
         relative_path=clean_unicode(str(payload.get("relative_path") or "")).strip() or None,
     )
+    artifact = get_artifact(conn, artifact_id)
+    if artifact:
+        content = artifact["content_json"] if isinstance(artifact.get("content_json"), dict) else {}
+        content = dict(content)
+        content["obsidian_export"] = {**result, "status": result.get("status") or "synced", "exported_at": utc_now()}
+        artifact = update_artifact(conn, artifact_id, content_json=content, commit=False)
     conn.commit()
-    return {"ok": True, "export": result, "artifact": get_artifact(conn, artifact_id)}
+    return {"ok": True, "export": result, "artifact": artifact or get_artifact(conn, artifact_id)}
+
+
+def receive_experiment_report(
+    conn: sqlite3.Connection,
+    settings: Settings,
+    payload: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return create_experiment_report(conn, settings, payload or {})
 
 
 def generate_project_index(

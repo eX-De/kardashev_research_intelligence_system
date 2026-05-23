@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from worker.db import clean_unicode, init_db
+from worker.env import env_value
 from worker.pg import IDENTITY_TABLES, TABLE_ORDER, PgConnection
 
 
@@ -112,9 +113,9 @@ def migrate(args: argparse.Namespace) -> dict[str, int]:
         if args.dry_run:
             return source_counts
 
-        database_url = str(args.database_url or os.environ.get("DATABASE_URL", "")).strip()
+        database_url = str(args.database_url or env_value("DATABASE_URL", "")).strip()
         if not database_url:
-            raise RuntimeError("Provide --database-url or set DATABASE_URL")
+            raise RuntimeError("Provide --database-url, set DATABASE_URL, or set DATABASE_URL_FILE")
 
         pg_conn = _connect_pg(database_url)
         try:

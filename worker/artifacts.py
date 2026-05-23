@@ -555,6 +555,27 @@ def _default_obsidian_relative_path(
             if folder:
                 return f"{folder}/中心页.md"
             return f"Research Intelligence/Projects/{_safe_filename(str(project['name']), 'project')}.md"
+    if artifact_type == "experiment_report" and artifact.get("scope_type") == "project" and artifact.get("scope_id"):
+        project = conn.execute(
+            """
+            SELECT name, obsidian_project_path, obsidian_folder, obsidian_output_dir
+            FROM research_projects
+            WHERE id = ?
+            """,
+            (int(artifact["scope_id"]),),
+        ).fetchone()
+        source = artifact.get("source") if isinstance(artifact.get("source"), dict) else {}
+        identity = _safe_filename(str(source.get("idempotency_key") or artifact.get("id") or ""), "report")[:48]
+        filename = f"{title}-{identity}" if identity else title
+        if project:
+            folder = clean_unicode(project["obsidian_folder"] or project["obsidian_output_dir"]).replace("\\", "/").strip("/")
+            if not folder and project["obsidian_project_path"]:
+                folder = Path(clean_unicode(project["obsidian_project_path"]).replace("\\", "/")).parent.as_posix()
+            if folder:
+                return f"{folder}/实验进展/{filename}.md"
+            project_name = _safe_filename(str(project["name"]), "project")
+            return f"Research Intelligence/Experiments/{project_name}/{filename}.md"
+        return f"Research Intelligence/Experiments/{filename}.md"
     if artifact_type == "paper_report":
         return f"Research Intelligence/Paper Reports/{title}.md"
     return f"Research Intelligence/Artifacts/{artifact_type}/{title}.md"
@@ -581,6 +602,13 @@ def _remote_obsidian_relative_path(
         ).fetchone()
         name = _safe_filename(str(project["name"] if project else title), "project")
         return f"{prefix}/Projects/{name}-{suffix}.md"
+    if artifact_type == "experiment_report" and artifact.get("scope_type") == "project" and artifact.get("scope_id"):
+        project = conn.execute(
+            "SELECT name FROM research_projects WHERE id = ?",
+            (int(artifact["scope_id"]),),
+        ).fetchone()
+        name = _safe_filename(str(project["name"] if project else "project"), "project")
+        return f"{prefix}/Experiments/{name}/{title}-{suffix}.md"
     if artifact_type == "paper_report":
         return f"{prefix}/Paper Reports/{title}-{suffix}.md"
     return f"{prefix}/Artifacts/{artifact_type}/{title}-{suffix}.md"

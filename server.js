@@ -14,10 +14,11 @@ const PORT = Number(process.env.PORT || 3000);
 const PYTHON_BIN = process.env.PYTHON_BIN || "python";
 const DIST_DIR = join(__dirname, "dist");
 const PUBLIC_DIR = existsSync(DIST_DIR) ? DIST_DIR : join(__dirname, "public");
-const PANEL_PASSWORD = process.env.PANEL_PASSWORD || "";
-const PANEL_SESSION_SECRET = process.env.PANEL_SESSION_SECRET || randomBytes(32).toString("base64url");
+const PANEL_PASSWORD = envValue("PANEL_PASSWORD", "");
+const PANEL_SESSION_SECRET = envValue("PANEL_SESSION_SECRET", "") || randomBytes(32).toString("base64url");
 const PANEL_SESSION_TTL_SECONDS = positiveInteger(process.env.PANEL_SESSION_TTL_SECONDS, 604800);
 const PANEL_SESSION_COOKIE_NAME = "panel_session";
+const KRIS_AGENT_TOKEN = envValue("KRIS_AGENT_TOKEN", "");
 const PAPER_REPORT_QUEUE_INTERVAL_MS = Math.max(2000, Number(process.env.PAPER_REPORT_QUEUE_INTERVAL_MS || 5000));
 const PAPER_REPORT_QUEUE_DEFAULT_CONCURRENCY = Math.max(
   1,
@@ -86,6 +87,18 @@ function loadDotEnv(path) {
     const value = trimmed.slice(eq + 1).trim().replace(/^['"]|['"]$/g, "");
     if (!(key in process.env)) process.env[key] = value;
   }
+}
+
+function envValue(name, fallback = "") {
+  const filePath = String(process.env[`${name}_FILE`] || "").trim();
+  if (filePath) {
+    try {
+      return readFileSync(filePath, "utf8").replace(/\r?\n$/, "");
+    } catch (error) {
+      throw new Error(`Failed to read ${name}_FILE (${filePath}): ${error.message}`);
+    }
+  }
+  return process.env[name] ?? fallback;
 }
 
 function positiveInteger(value, fallback) {
@@ -731,6 +744,19 @@ function isAuthenticatedRequest(req) {
   return isValidSessionCookie(cookies[PANEL_SESSION_COOKIE_NAME]);
 }
 
+function isAgentApiRequest(req, pathname) {
+  return (
+    (req.method === "GET" && pathname === "/api/projects") ||
+    (req.method === "POST" && pathname === "/api/experiments/reports")
+  );
+}
+
+function isAgentAuthenticatedRequest(req) {
+  if (!KRIS_AGENT_TOKEN) return false;
+  const token = String(req.headers["x-experiment-agent-token"] || "");
+  return token !== "" && timingSafeStringEqual(token, KRIS_AGENT_TOKEN);
+}
+
 function shouldUseSecureCookie(req) {
   const configured = String(process.env.PANEL_COOKIE_SECURE || "").trim().toLowerCase();
   if (["1", "true", "yes", "on"].includes(configured)) return true;
@@ -999,6 +1025,13 @@ async function tryServeStaticFile(filePath, res) {
 async function routeApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/projects") {
     const data = await jsonFromWorker(["api-projects"]);
+    sendJson(res, 200, data);
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/experiments/reports") {
+    const body = await readRequestJson(req);
+    const data = await jsonFromWorker(["api-experiment-report"], JSON.stringify(body));
     sendJson(res, 200, data);
     return;
   }
@@ -1473,7 +1506,8 @@ const server = createServer(async (req, res) => {
       if (await routeAuthApi(req, res, url)) {
         return;
       }
-      if (!isAuthApiRequest(req, url.pathname) && !isAuthenticatedRequest(req)) {
+      const agentAuthenticated = isAgentApiRequest(req, url.pathname) && isAgentAuthenticatedRequest(req);
+      if (!isAuthApiRequest(req, url.pathname) && !isAuthenticatedRequest(req) && !agentAuthenticated) {
         sendJson(res, 401, { error: "Authentication required", code: "auth_required" });
         return;
       }

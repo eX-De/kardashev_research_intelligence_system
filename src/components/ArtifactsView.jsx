@@ -7,6 +7,7 @@ import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
 const TYPES = [
   ["", "全部类型"],
   ["daily_report", "日报"],
+  ["experiment_report", "实验报告"],
   ["paper_report", "论文报告"],
   ["project_index", "项目索引"],
   ["project_digest", "项目摘要"],
