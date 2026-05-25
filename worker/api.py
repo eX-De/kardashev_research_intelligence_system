@@ -929,11 +929,11 @@ def inbox(conn: sqlite3.Connection) -> dict[str, object]:
     return {"items": items}
 
 
-def paper_reports_queue(conn: sqlite3.Connection, limit: int = 300) -> dict[str, object]:
+def _paper_report_stats(conn: sqlite3.Connection) -> dict[str, object]:
     stats = {"queued": 0, "processing": 0, "done": 0, "failed": 0, "total": 0}
     for row in conn.execute(
         """
-        SELECT status, COUNT(*) AS count
+        SELECT status, COUNT(*) AS count, MAX(updated_at) AS latest_updated_at
         FROM artifacts
         WHERE scope_type = 'paper'
           AND artifact_type = ?
@@ -946,6 +946,73 @@ def paper_reports_queue(conn: sqlite3.Connection, limit: int = 300) -> dict[str,
         count = int(row["count"] or 0)
         stats[status] = count
         stats["total"] += count
+        latest_updated_at = row["latest_updated_at"]
+        if latest_updated_at and (
+            not stats.get("latest_updated_at")
+            or str(latest_updated_at) > str(stats["latest_updated_at"])
+        ):
+            stats["latest_updated_at"] = latest_updated_at
+    return stats
+
+
+def _paper_report_legacy_paper_id(conn: sqlite3.Connection, row: sqlite3.Row) -> int:
+    content = from_json(row["content_json"], {}) if "content_json" in row.keys() else {}
+    source = from_json(row["source_json"], {}) if "source_json" in row.keys() else {}
+    if not isinstance(content, dict):
+        content = {}
+    if not isinstance(source, dict):
+        source = {}
+    paper_id = int(content.get("legacy_arxiv_paper_id") or source.get("legacy_arxiv_paper_id") or 0)
+    if paper_id:
+        return paper_id
+    source_row = conn.execute(
+        """
+        SELECT ap.id
+        FROM arxiv_papers ap
+        JOIN paper_sources ps ON ps.source_identifier = ap.arxiv_id
+        WHERE ps.paper_id = ?
+        ORDER BY ap.id
+        LIMIT 1
+        """,
+        (int(row["scope_id"] or 0),),
+    ).fetchone()
+    return int(source_row["id"]) if source_row else 0
+
+
+def paper_reports_summary(conn: sqlite3.Connection) -> dict[str, object]:
+    latest_rows = conn.execute(
+        """
+        SELECT id, scope_id, status, content_json, source_json, updated_at
+        FROM artifacts
+        WHERE scope_type = 'paper'
+          AND artifact_type = ?
+          AND status != 'removed'
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 20
+        """,
+        (PAPER_REPORT_ARTIFACT_TYPE,),
+    ).fetchall()
+    latest_payload = None
+    for latest in latest_rows:
+        paper_id = _paper_report_legacy_paper_id(conn, latest)
+        if not paper_id:
+            continue
+        latest_payload = {
+            "artifact_id": int(latest["id"]),
+            "paper_id": paper_id,
+            "library_paper_id": int(latest["scope_id"] or 0),
+            "status": latest["status"],
+            "updated_at": latest["updated_at"],
+        }
+        break
+    return {
+        "stats": _paper_report_stats(conn),
+        "latest": latest_payload,
+    }
+
+
+def paper_reports_queue(conn: sqlite3.Connection, limit: int = 300) -> dict[str, object]:
+    stats = _paper_report_stats(conn)
     row_limit = max(1, min(int(limit or 300), 1000))
     rows = conn.execute(
         """
@@ -973,25 +1040,9 @@ def paper_reports_queue(conn: sqlite3.Connection, limit: int = 300) -> dict[str,
     items = []
     for row in rows:
         content = from_json(row["content_json"], {})
-        source = from_json(row["source_json"], {})
         if not isinstance(content, dict):
             content = {}
-        if not isinstance(source, dict):
-            source = {}
-        paper_id = int(content.get("legacy_arxiv_paper_id") or source.get("legacy_arxiv_paper_id") or 0)
-        if not paper_id:
-            source_row = conn.execute(
-                """
-                SELECT ap.id
-                FROM arxiv_papers ap
-                JOIN paper_sources ps ON ps.source_identifier = ap.arxiv_id
-                WHERE ps.paper_id = ?
-                ORDER BY ap.id
-                LIMIT 1
-                """,
-                (int(row["scope_id"] or 0),),
-            ).fetchone()
-            paper_id = int(source_row["id"]) if source_row else 0
+        paper_id = _paper_report_legacy_paper_id(conn, row)
         if not paper_id:
             continue
         paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
@@ -1543,6 +1594,111 @@ def job_history(conn: sqlite3.Connection, limit: int = 20) -> dict[str, object]:
             }
             for row in rows
         ]
+    }
+
+
+def _table_count(conn: sqlite3.Connection, table: str) -> int:
+    if getattr(conn, "dialect", "") == "postgres":
+        exists = conn.execute(
+            """
+            SELECT table_name AS name
+            FROM information_schema.tables
+            WHERE table_schema = current_schema()
+              AND table_name = ?
+            """,
+            (table,),
+        ).fetchone()
+        if not exists:
+            return 0
+    else:
+        exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        if not exists:
+            return 0
+    return int(conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()["count"])
+
+
+def job_summary(conn: sqlite3.Connection) -> dict[str, object]:
+    latest_job = conn.execute(
+        """
+        SELECT id, job_type, status, started_at, finished_at, message, heartbeat_at
+        FROM job_runs
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    running = conn.execute(
+        "SELECT COUNT(*) AS count FROM job_runs WHERE status = 'running'"
+    ).fetchone()
+    return {
+        "running_count": int(running["count"] or 0),
+        "latest_job": None
+        if not latest_job
+        else {
+            "id": int(latest_job["id"]),
+            "job_type": latest_job["job_type"],
+            "status": latest_job["status"],
+            "started_at": latest_job["started_at"],
+            "finished_at": latest_job["finished_at"],
+            "message": latest_job["message"],
+            "heartbeat_at": latest_job["heartbeat_at"],
+        },
+    }
+
+
+def health_summary(conn: sqlite3.Connection, settings: Settings) -> dict[str, object]:
+    remote = obsidian_remote_status(settings)
+    remote_enabled = obsidian_remote_enabled(settings)
+    vault = settings.obsidian_vault_path
+    vault_path = str(vault or "")
+    vault_exists = bool(vault and Path(vault).exists())
+    obsidian_configured = obsidian_remote_configured(settings) if remote_enabled else bool(vault)
+    obsidian_status = (
+        "remote_configured"
+        if remote_enabled and obsidian_remote_configured(settings)
+        else "remote_incomplete"
+        if remote_enabled
+        else "ok"
+        if vault_exists
+        else "missing"
+        if vault
+        else "not_configured"
+    )
+    database = database_target(conn, settings.db_path)
+    return {
+        "database": {
+            "ok": True,
+            **database,
+        },
+        "obsidian": {
+            "configured": obsidian_configured,
+            "path": vault_path,
+            "exists": vault_exists,
+            "status": obsidian_status,
+            "storage_backend": remote["backend"],
+            "remote": remote,
+        },
+        "counts": {
+            "notes": _table_count(conn, "obsidian_notes"),
+            "knowledge_documents": _table_count(conn, "knowledge_documents"),
+            "projects": _table_count(conn, "research_projects"),
+            "artifacts": _table_count(conn, "artifacts"),
+            "paper_report_artifacts": int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM artifacts
+                    WHERE scope_type = 'paper'
+                      AND artifact_type = ?
+                    """,
+                    (PAPER_REPORT_ARTIFACT_TYPE,),
+                ).fetchone()["count"]
+            ),
+            "papers": _table_count(conn, "papers"),
+        },
+        **job_summary(conn),
     }
 
 

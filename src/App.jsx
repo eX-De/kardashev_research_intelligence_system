@@ -21,7 +21,9 @@ import { ProjectsView } from "./components/ProjectsView.jsx";
 import { Sidebar } from "./components/Sidebar.jsx";
 import { TasksView } from "./components/TasksView.jsx";
 import { ToastHost } from "./components/ToastHost.jsx";
+import { ApiCacheProvider } from "./lib/apiCache.jsx";
 import { AUTH_REQUIRED_EVENT, api, postJson } from "./lib/dashboard.js";
+import { useServerEvents } from "./lib/serverEvents.js";
 
 const TOAST_TYPES = new Set(["success", "error", "info", "warning"]);
 const DEFAULT_TOAST_DURATION = 3500;
@@ -266,6 +268,20 @@ function ProtectedShell({ authInfo, authStatusLabel, notify, onLogout, setStatus
   );
 }
 
+function ServerEventBridge({ notify }) {
+  useServerEvents({ notify });
+  return null;
+}
+
+function CachedProtectedShell(props) {
+  return (
+    <ApiCacheProvider>
+      <ServerEventBridge notify={props.notify} />
+      <ProtectedShell {...props} />
+    </ApiCacheProvider>
+  );
+}
+
 function AuthenticatedApp() {
   const [statusMessage, setStatusMessage] = useState("Idle");
   const [toasts, setToasts] = useState([]);
@@ -381,7 +397,7 @@ function AuthenticatedApp() {
         path="/*"
         element={
           <RequireAuth authenticated={authState.authenticated}>
-            <ProtectedShell
+            <CachedProtectedShell
               authInfo={authState.info}
               authStatusLabel={authStatusLabel(authState.info)}
               notify={notify}

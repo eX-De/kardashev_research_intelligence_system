@@ -415,6 +415,7 @@ def remove_paper_report_from_queue(conn: sqlite3.Connection, paper_id: int) -> d
     state = _paper_report_state(conn, paper_id)
     if not state or not state.get("artifact_id"):
         return {"paper_reports_removed": 0}
+    artifact_id = int(state["artifact_id"] or 0)
     status = str(state["status"] or "")
     if status == "processing":
         raise RuntimeError("Processing reports cannot be removed from the queue")
@@ -425,7 +426,7 @@ def remove_paper_report_from_queue(conn: sqlite3.Connection, paper_id: int) -> d
     state["finished_at"] = now
     _save_paper_report_state(conn, state, commit=False)
     conn.commit()
-    return {"paper_reports_removed": 1}
+    return {"artifact_id": artifact_id, "paper_reports_removed": 1}
 
 
 def cancel_paper_report_from_queue(conn: sqlite3.Connection, paper_id: int) -> dict[str, int]:

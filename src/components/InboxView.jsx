@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
+import { useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { api, fmtScore, postJson } from "../lib/dashboard.js";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
 
@@ -220,42 +221,56 @@ function PaperDetail({ detail, onOpenReportQueue, onRecommendation, onGenerateRe
 }
 
 export function InboxView({ onOpenReportQueue, onSelectPaper, selectedPaperId, setStatusMessage }) {
-  const [papers, setPapers] = useState([]);
+  const cache = useApiCacheClient();
   const [activePaperId, setActivePaperId] = useState(null);
-  const [detail, setDetail] = useState(null);
 
-  const loadPaper = useCallback(async (id) => {
-    const data = await api(`/api/papers/${id}`);
-    setDetail(data);
-    setActivePaperId(Number(id));
-  }, []);
-
-  const loadInbox = useCallback(async () => {
-    const data = await api("/api/inbox");
-    const items = data.items || [];
-    setPapers(items);
-    const routePaperId = Number(selectedPaperId || 0);
-    const routePaperInInbox = routePaperId && items.some((paper) => Number(paper.id) === routePaperId);
-    const nextId = routePaperInInbox ? routePaperId : items[0]?.id;
-    if (nextId) {
-      if (Number(nextId) !== routePaperId) onSelectPaper?.(nextId, { replace: true });
-      await loadPaper(nextId);
-      return;
-    }
-    setDetail(null);
-    setActivePaperId(null);
-  }, [loadPaper, onSelectPaper, selectedPaperId]);
+  const inboxQuery = useCachedApi(["inbox"], () => api("/api/inbox"), { staleTime: 30000 });
+  const papers = inboxQuery.data?.items || [];
+  const detailQuery = useCachedApi(
+    ["paper", "detail", String(activePaperId || "")],
+    () => api(`/api/papers/${activePaperId}`),
+    { enabled: Boolean(activePaperId), staleTime: 60000 }
+  );
+  const detail = detailQuery.data || null;
 
   useEffect(() => {
-    loadInbox().catch((error) => setStatusMessage(error.message));
-  }, [loadInbox, setStatusMessage]);
+    if (!inboxQuery.hasData) return;
+    const routePaperId = Number(selectedPaperId || 0);
+    const routePaperInInbox = routePaperId && papers.some((paper) => Number(paper.id) === routePaperId);
+    const activeStillExists = activePaperId && papers.some((paper) => Number(paper.id) === Number(activePaperId));
+    const nextId = routePaperInInbox ? routePaperId : activeStillExists ? activePaperId : papers[0]?.id;
+    if (nextId) {
+      setActivePaperId(Number(nextId));
+      if (Number(nextId) !== routePaperId) onSelectPaper?.(nextId, { replace: true });
+      return;
+    }
+    setActivePaperId(null);
+  }, [activePaperId, inboxQuery.hasData, onSelectPaper, papers, selectedPaperId]);
+
+  useEffect(() => {
+    const error = inboxQuery.error || detailQuery.error;
+    if (error) setStatusMessage(error.message);
+  }, [detailQuery.error, inboxQuery.error, setStatusMessage]);
+
+  async function refresh() {
+    await Promise.all([
+      inboxQuery.refresh({ force: true }),
+      activePaperId ? detailQuery.refresh({ force: true }) : Promise.resolve()
+    ]);
+  }
 
   async function updateRecommendation(payload) {
     if (!activePaperId) return;
     try {
+      const paperId = Number(activePaperId);
       await postJson(`/api/papers/${activePaperId}/recommendation`, payload);
+      inboxQuery.patch((current) => ({
+        ...(current || {}),
+        items: (current?.items || []).filter((paper) => Number(paper.id) !== paperId)
+      }));
+      cache.markStale(["library", "list"]);
+      cache.markStale(["projects"]);
       setStatusMessage(payload.action === "discard" ? "已遗弃推荐" : "已保存到论文仓库");
-      await loadInbox();
     } catch (error) {
       setStatusMessage(error.message);
     }
@@ -265,13 +280,22 @@ export function InboxView({ onOpenReportQueue, onSelectPaper, selectedPaperId, s
     if (!activePaperId) return;
     try {
       const data = await postJson(`/api/papers/${activePaperId}/report`, { force });
-      setDetail(data);
+      cache.setCache(["paper", "detail", String(activePaperId)], data);
+      inboxQuery.patch((current) => ({
+        ...(current || {}),
+        items: (current?.items || []).map((paper) => (
+          Number(paper.id) === Number(activePaperId)
+            ? { ...paper, report_status: data.paper_report?.status || paper.report_status }
+            : paper
+        ))
+      }));
+      cache.markStale(["paper-reports", "summary"]);
+      cache.markStale(["reader", "papers"]);
       const nextReport = data.paper_report || {};
       setStatusMessage(nextReport.status === "done" ? "全文报告已生成" : reportStatusLabel(nextReport.status));
-      await loadInbox();
     } catch (error) {
       setStatusMessage(error.message);
-      await loadPaper(activePaperId).catch(() => {});
+      await detailQuery.refresh({ force: true }).catch(() => {});
     }
   }
 
@@ -283,7 +307,7 @@ export function InboxView({ onOpenReportQueue, onSelectPaper, selectedPaperId, s
             <h1>论文推荐</h1>
             <p>{papers.length} 篇待判断论文</p>
           </div>
-          <button className="icon-button" title="刷新" aria-label="刷新" onClick={() => loadInbox().catch((error) => setStatusMessage(error.message))} type="button">
+          <button className="icon-button" title="刷新" aria-label="刷新" onClick={() => refresh().catch((error) => setStatusMessage(error.message))} type="button">
             <span aria-hidden="true">↻</span>
           </button>
         </header>
@@ -296,7 +320,7 @@ export function InboxView({ onOpenReportQueue, onSelectPaper, selectedPaperId, s
                 onSelectPaper(id);
                 return;
               }
-              loadPaper(id).catch((error) => setStatusMessage(error.message));
+              setActivePaperId(Number(id));
             }}
           />
         </div>

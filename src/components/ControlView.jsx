@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { PanelTitle } from "./PanelTitle.jsx";
 import { normalizeProviders, providerPayload, SettingsForm } from "./SettingsForm.jsx";
+import { useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { api, chooseLocalPath, postJson } from "../lib/dashboard.js";
 import { friendlyObsidianMessage, obsidianCapabilityFrom } from "../lib/obsidianCapability.js";
 
@@ -54,7 +55,6 @@ function HealthGrid({ health, settings }) {
 export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) {
   const [settings, setSettings] = useState({});
   const [providers, setProviders] = useState([]);
-  const [health, setHealth] = useState(null);
   const [saveStatus, setSaveStatus] = useState("idle");
   const settingsRef = useRef(settings);
   const providersRef = useRef(providers);
@@ -65,37 +65,60 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
   const pendingAutosaveRef = useRef(null);
   const lastSavedSignatureRef = useRef("");
   const lastSuccessToastAtRef = useRef(0);
+  const cache = useApiCacheClient();
+  const settingsQuery = useCachedApi(["settings"], () => api("/api/settings"), { staleTime: Infinity });
+  const jobStatusQuery = useCachedApi(["jobs", "status"], () => api("/api/jobs/status"), { staleTime: 5000 });
+  const healthQuery = useCachedApi(["health"], () => api("/api/health"), { staleTime: 30000 });
+  const refreshSettingsCache = settingsQuery.refresh;
+  const refreshJobStatusCache = jobStatusQuery.refresh;
+  const refreshHealthCache = healthQuery.refresh;
+  const health = healthQuery.data || null;
 
   settingsRef.current = settings;
   providersRef.current = providers;
 
-  const loadControl = useCallback(async ({ hydrate = false } = {}) => {
-    const [settingsData, statusData, healthData] = await Promise.all([
-      hydrate ? api("/api/settings") : Promise.resolve(null),
-      api("/api/jobs/status"),
-      api("/api/health")
+  const hydrateSettings = useCallback((settingsData, { force = false } = {}) => {
+    const nextSettings = settingsData?.settings || {};
+    const nextProviders = normalizeProviders(nextSettings.llm_providers || []);
+    const nextSignature = settingsSignature(nextSettings, nextProviders);
+    const currentSignature = settingsSignature(settingsRef.current, providersRef.current);
+    const dirty = hydratedRef.current && currentSignature !== lastSavedSignatureRef.current;
+    if (!force && dirty) return false;
+    if (!force && hydratedRef.current && nextSignature === lastSavedSignatureRef.current) return true;
+    lastSavedSignatureRef.current = nextSignature;
+    hydratedRef.current = true;
+    setSettings(nextSettings);
+    setProviders(nextProviders);
+    setSaveStatus("idle");
+    return true;
+  }, []);
+
+  const refreshControl = useCallback(async ({ hydrate = false } = {}) => {
+    const [settingsData, statusData] = await Promise.all([
+      hydrate ? refreshSettingsCache({ force: true }) : Promise.resolve(null),
+      refreshJobStatusCache({ force: true }),
+      refreshHealthCache({ force: true })
     ]);
-    if (hydrate) {
-      const nextSettings = settingsData.settings || {};
-      const nextProviders = normalizeProviders(nextSettings.llm_providers || []);
-      lastSavedSignatureRef.current = settingsSignature(nextSettings, nextProviders);
-      hydratedRef.current = true;
-      setSettings(nextSettings);
-      setProviders(nextProviders);
-      setSaveStatus("idle");
-    }
-    setHealth(healthData);
+    if (hydrate) hydrateSettings(settingsData, { force: true });
     const current = statusData.scheduler?.current_job;
     setStatusMessage(current ? `Running ${current.command}...` : statusData.scheduler?.last_job?.message || statusData.scheduler?.last_error?.message || "Idle");
-  }, [setStatusMessage]);
+  }, [hydrateSettings, refreshHealthCache, refreshJobStatusCache, refreshSettingsCache, setStatusMessage]);
 
   useEffect(() => {
-    loadControl({ hydrate: true }).catch((error) => setStatusMessage(error.message));
-    const timer = setInterval(() => {
-      loadControl({ hydrate: false }).catch((error) => setStatusMessage(error.message));
-    }, 5000);
-    return () => clearInterval(timer);
-  }, [loadControl, setStatusMessage]);
+    if (settingsQuery.data?.settings) hydrateSettings(settingsQuery.data);
+  }, [hydrateSettings, settingsQuery.data]);
+
+  useEffect(() => {
+    if (!jobStatusQuery.data?.scheduler) return;
+    const scheduler = jobStatusQuery.data.scheduler;
+    const current = scheduler.current_job;
+    setStatusMessage(current ? `Running ${current.command}...` : scheduler.last_job?.message || scheduler.last_error?.message || "Idle");
+  }, [jobStatusQuery.data, setStatusMessage]);
+
+  useEffect(() => {
+    const error = settingsQuery.error || jobStatusQuery.error || healthQuery.error;
+    if (error) setStatusMessage(error.message);
+  }, [healthQuery.error, jobStatusQuery.error, setStatusMessage, settingsQuery.error]);
 
   const showSaveSuccess = useCallback(({ force = false } = {}) => {
     const now = Date.now();
@@ -124,20 +147,23 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
 
       const savedSettings = data.settings || payload;
       const savedProviders = normalizeProviders(savedSettings.llm_providers || payload.llm_providers || []);
+      cache.setCache(["settings"], data);
+      if (data.scheduler) cache.setCache(["jobs", "status"], { scheduler: data.scheduler });
+      cache.markStale(["health"]);
       lastSavedSignatureRef.current = settingsSignature(savedSettings, savedProviders);
       setSettings(savedSettings);
       setProviders(savedProviders);
       setSaveStatus("saved");
       setStatusMessage("Settings saved");
       if (notifyOnSuccess) showSaveSuccess({ force: forceSuccessToast });
-      loadControl({ hydrate: false }).catch((error) => setStatusMessage(error.message));
+      refreshControl({ hydrate: false }).catch((error) => setStatusMessage(error.message));
     } catch (error) {
       if (requestId !== saveRequestRef.current || editVersion !== editVersionRef.current) return;
       setSaveStatus("error");
       setStatusMessage(error.message);
       notify(error.message, { type: "error" });
     }
-  }, [loadControl, notify, setStatusMessage, showSaveSuccess]);
+  }, [notify, refreshControl, setStatusMessage, showSaveSuccess]);
 
   useEffect(() => {
     if (!hydratedRef.current) return undefined;
@@ -279,7 +305,7 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
           <h1>设置</h1>
           <p>系统连接、模型路由、论文源、检索策略和自动化规则。</p>
         </div>
-        <button onClick={() => loadControl({ hydrate: false }).catch((error) => setStatusMessage(error.message))} type="button">
+        <button onClick={() => refreshControl({ hydrate: false }).catch((error) => setStatusMessage(error.message))} type="button">
           刷新状态
         </button>
       </header>

@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { api, fmtDate } from "../lib/dashboard.js";
+import { cacheNamespace, useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { friendlyObsidianMessage, postObsidianJson, useObsidianCapability } from "../lib/obsidianCapability.js";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
 
@@ -15,49 +16,84 @@ const TYPES = [
   ["reading_note", "阅读笔记"]
 ];
 
+function sortArtifactsByUpdatedAt(left, right) {
+  return new Date(right.updated_at || 0) - new Date(left.updated_at || 0);
+}
+
+function patchArtifactItems(items, artifact) {
+  if (!artifact?.id || !Array.isArray(items)) return items || [];
+  let found = false;
+  const next = items.map((item) => {
+    if (Number(item.id) !== Number(artifact.id)) return item;
+    found = true;
+    return { ...item, ...artifact };
+  });
+  return found ? next.sort(sortArtifactsByUpdatedAt) : next;
+}
+
 export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusMessage }) {
-  const [items, setItems] = useState([]);
-  const [detail, setDetail] = useState(null);
   const [activeId, setActiveId] = useState(null);
   const [artifactType, setArtifactType] = useState("");
   const [scopeType, setScopeType] = useState("");
   const [busy, setBusy] = useState(false);
+  const cache = useApiCacheClient();
   const selectedRouteId = Number.isFinite(Number(selectedArtifactId)) ? Number(selectedArtifactId) : null;
   const handleCapabilityError = useCallback((error) => setStatusMessage(error.message), [setStatusMessage]);
   const obsidianCapability = useObsidianCapability({ onError: handleCapabilityError });
 
-  const loadDetail = useCallback(async (id) => {
-    const data = await api(`/api/artifacts/${encodeURIComponent(String(id))}`);
-    setDetail(data.artifact);
-    setActiveId(Number(data.artifact?.id || id));
-  }, []);
-
-  const load = useCallback(async () => {
+  const queryString = useMemo(() => {
     const params = new URLSearchParams({ limit: "100" });
     if (artifactType) params.set("artifact_type", artifactType);
     if (scopeType) params.set("scope_type", scopeType);
-    const data = await api(`/api/artifacts?${params.toString()}`);
-    const next = data.items || [];
-    setItems(next);
-    const nextId = selectedRouteId || (activeId && next.some((item) => item.id === activeId) ? activeId : next[0]?.id);
-    if (nextId) await loadDetail(nextId);
-    if (!nextId) {
-      setDetail(null);
-      setActiveId(null);
-    }
-  }, [activeId, artifactType, loadDetail, scopeType, selectedRouteId]);
+    return params.toString();
+  }, [artifactType, scopeType]);
+
+  const listQuery = useCachedApi(
+    ["artifacts", "list", queryString],
+    () => api(`/api/artifacts?${queryString}`),
+    { staleTime: 120000 }
+  );
+  const items = listQuery.data?.items || [];
+  const activeStillExists = activeId && items.some((item) => Number(item.id) === Number(activeId));
+  const detailId = selectedRouteId || (activeStillExists ? activeId : items[0]?.id);
+  const detailQuery = useCachedApi(
+    ["artifact", String(detailId || "")],
+    () => api(`/api/artifacts/${encodeURIComponent(String(detailId))}`),
+    { enabled: Boolean(detailId), staleTime: 300000 }
+  );
+  const detail = detailQuery.data?.artifact || null;
 
   useEffect(() => {
-    load().catch((error) => setStatusMessage(error.message));
-  }, [load, setStatusMessage]);
+    const error = listQuery.error || detailQuery.error;
+    if (error) setStatusMessage(error.message);
+  }, [detailQuery.error, listQuery.error, setStatusMessage]);
+
+  useEffect(() => {
+    if (detailId) {
+      setActiveId(Number(detailId));
+      return;
+    }
+    setActiveId(null);
+  }, [detailId]);
 
   const selectArtifact = useCallback((id) => {
     if (onSelectArtifact) {
       onSelectArtifact(id);
       return;
     }
-    loadDetail(id).catch((error) => setStatusMessage(error.message));
-  }, [loadDetail, onSelectArtifact, setStatusMessage]);
+    setActiveId(Number(id));
+  }, [onSelectArtifact]);
+
+  async function refresh() {
+    try {
+      await Promise.all([
+        listQuery.refresh({ force: true }),
+        detailId ? detailQuery.refresh({ force: true }) : Promise.resolve()
+      ]);
+    } catch (error) {
+      setStatusMessage(error.message);
+    }
+  }
 
   async function exportObsidian() {
     if (!detail?.id) return;
@@ -68,6 +104,15 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
     setBusy(true);
     try {
       const data = await postObsidianJson(`/api/artifacts/${detail.id}/export-obsidian`, {});
+      if (data.artifact?.id) {
+        cache.setCache(["artifact", String(data.artifact.id)], { artifact: data.artifact });
+        cache.patch(cacheNamespace("artifacts", "list"), (current) => ({
+          ...(current || {}),
+          items: patchArtifactItems(current?.items || [], data.artifact)
+        }));
+      }
+      cache.markStale(["artifacts"]);
+      cache.markStale(["health"]);
       setStatusMessage(`已导出 ${data.export?.path || "artifact"}`);
     } catch (error) {
       setStatusMessage(friendlyObsidianMessage(error));
@@ -84,7 +129,7 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
             <h1>产物</h1>
             <p>{items.length} 个系统内产物</p>
           </div>
-          <button onClick={() => load().catch((error) => setStatusMessage(error.message))} type="button">刷新</button>
+          <button onClick={refresh} type="button">刷新</button>
         </header>
         <div className="filter-row">
           <select value={artifactType} onChange={(event) => setArtifactType(event.target.value)}>

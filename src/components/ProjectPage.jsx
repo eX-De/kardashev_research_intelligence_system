@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   api,
@@ -13,6 +13,7 @@ import {
   PROJECT_STATUSES,
   snippet
 } from "../lib/dashboard.js";
+import { useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { friendlyObsidianMessage, postObsidianJson, useObsidianCapability } from "../lib/obsidianCapability.js";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
 
@@ -29,6 +30,40 @@ function projectToForm(project = {}) {
     obsidian_project_path: project.obsidian_project_path || "",
     obsidian_output_dir: project.obsidian_output_dir || ""
   };
+}
+
+const PROJECT_STATUS_ORDER = {
+  active: 1,
+  exploring: 2,
+  writing: 3,
+  paused: 4
+};
+
+function projectListItemFromDetail(detail) {
+  const project = detail?.project;
+  if (!project) return null;
+  const artifacts = Array.isArray(detail.artifacts) ? detail.artifacts : [];
+  return {
+    ...project,
+    artifact_count: artifacts.length || project.artifact_count || 0,
+    latest_artifact_at: artifacts[0]?.updated_at || project.latest_artifact_at || ""
+  };
+}
+
+function sortProjectRows(left, right) {
+  const leftRank = PROJECT_STATUS_ORDER[left.status] || 5;
+  const rightRank = PROJECT_STATUS_ORDER[right.status] || 5;
+  if (leftRank !== rightRank) return leftRank - rightRank;
+  return new Date(right.updated_at || 0) - new Date(left.updated_at || 0);
+}
+
+function upsertProjectRow(projects, project) {
+  if (!project?.id) return projects;
+  const next = Array.isArray(projects) ? [...projects] : [];
+  const index = next.findIndex((item) => Number(item.id) === Number(project.id));
+  if (index >= 0) next[index] = { ...next[index], ...project };
+  else next.push(project);
+  return next.sort(sortProjectRows);
 }
 
 function ProjectForm({ project, form, setForm, obsidianCapability, onPickPath, onSubmit }) {
@@ -301,23 +336,65 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
   const [detail, setDetail] = useState(null);
   const [form, setForm] = useState(projectToForm());
   const isNew = !projectId;
+  const cache = useApiCacheClient();
+  const hydratedProjectRef = useRef("");
+  const projectCacheKey = useMemo(() => ["project", String(projectId || "")], [projectId]);
   const handleCapabilityError = useCallback((error) => setStatusMessage(error.message), [setStatusMessage]);
   const obsidianCapability = useObsidianCapability({ onError: handleCapabilityError });
+  const projectQuery = useCachedApi(
+    projectCacheKey,
+    () => api(`/api/projects/${projectId}`),
+    { enabled: !isNew, staleTime: 120000 }
+  );
+  const refreshProjectCache = projectQuery.refresh;
 
-  const loadProject = useCallback(async () => {
-    if (!projectId) {
-      setDetail(null);
-      setForm(projectToForm({ status: "active" }));
-      return;
-    }
-    const data = await api(`/api/projects/${projectId}`);
+  const applyProjectDetail = useCallback((data, { updateForm = false } = {}) => {
     setDetail(data);
-    setForm((current) => ({ ...projectToForm(data.project), raw_context: current.raw_context }));
-  }, [projectId]);
+    if (data?.project?.id) {
+      const listProject = projectListItemFromDetail(data);
+      cache.setCache(["project", String(data.project.id)], data);
+      if (listProject) {
+        cache.patch({ key: "projects" }, (current) => ({
+          ...(current || {}),
+          items: upsertProjectRow(current?.items || [], listProject)
+        }));
+      }
+      cache.markStale(["projects"]);
+      cache.markStale(["health"]);
+      cache.markStale(["reminders"]);
+    }
+    if (updateForm && data?.project) {
+      setForm(projectToForm(data.project));
+    }
+  }, [cache]);
+
+  const refreshProject = useCallback(async () => {
+    if (isNew) return null;
+    const data = await refreshProjectCache({ force: true });
+    applyProjectDetail(data);
+    return data;
+  }, [applyProjectDetail, isNew, refreshProjectCache]);
 
   useEffect(() => {
-    loadProject().catch((error) => setStatusMessage(error.message));
-  }, [loadProject, setStatusMessage]);
+    if (isNew) {
+      hydratedProjectRef.current = "new";
+      setDetail(null);
+      setForm(projectToForm({ status: "active" }));
+    }
+  }, [isNew]);
+
+  useEffect(() => {
+    if (isNew || !projectQuery.data?.project) return;
+    const signature = `${projectId}:${projectQuery.updatedAt}`;
+    if (hydratedProjectRef.current === signature) return;
+    hydratedProjectRef.current = signature;
+    setDetail(projectQuery.data);
+    setForm((current) => ({ ...projectToForm(projectQuery.data.project), raw_context: current.raw_context }));
+  }, [isNew, projectId, projectQuery.data, projectQuery.updatedAt]);
+
+  useEffect(() => {
+    if (projectQuery.error) setStatusMessage(projectQuery.error.message);
+  }, [projectQuery.error, setStatusMessage]);
 
   const project = detail?.project || {};
   const title = isNew ? "新建项目" : project.name || "项目";
@@ -372,8 +449,7 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
         obsidian_output_dir: form.obsidian_output_dir
       };
       const data = await postJson(projectId ? `/api/projects/${projectId}` : "/api/projects", payload);
-      setDetail(data);
-      setForm(projectToForm(data.project));
+      applyProjectDetail(data, { updateForm: true });
       setStatusMessage("Project saved");
       if (!projectId) onSavedProject(data.project.id);
     } catch (error) {
@@ -389,7 +465,8 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
     }
     try {
       const data = await postObsidianJson(`/api/projects/${projectId}/export-obsidian`);
-      setDetail(data);
+      applyProjectDetail(data);
+      cache.markStale(["artifacts"]);
       setStatusMessage(`Synced ${data.export?.obsidian_path || "project index"}`);
     } catch (error) {
       setStatusMessage(friendlyObsidianMessage(error));
@@ -404,7 +481,9 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
     }
     try {
       const data = await postObsidianJson(`/api/artifacts/${artifactId}/export-obsidian`, {});
-      await loadProject();
+      cache.markStale(["artifact", String(artifactId)]);
+      cache.markStale(["artifacts"]);
+      await refreshProject();
       setStatusMessage(`Synced ${data.export?.path || "artifact"}`);
     } catch (error) {
       setStatusMessage(friendlyObsidianMessage(error));
@@ -420,7 +499,8 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
       : { note_id: formData.get("note_id"), relation: formData.get("relation") };
     try {
       const data = await postJson(`/api/projects/${projectId}/${type === "paper" ? "papers" : "notes"}`, payload);
-      setDetail(data);
+      applyProjectDetail(data);
+      if (type === "paper") cache.markStale(["library"]);
       setStatusMessage(type === "paper" ? "Paper linked" : "Note linked");
     } catch (error) {
       setStatusMessage(error.message);
@@ -431,7 +511,8 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
     if (!projectId) return;
     try {
       const data = await api(`/api/projects/${projectId}/${type === "paper" ? "papers" : "notes"}/${id}`, { method: "DELETE" });
-      setDetail(data);
+      applyProjectDetail(data);
+      if (type === "paper") cache.markStale(["library"]);
       setStatusMessage(type === "paper" ? "Paper removed from project" : "Note removed from project");
     } catch (error) {
       setStatusMessage(error.message);
@@ -446,6 +527,7 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
           <h1>{title}</h1>
           <p>{isNew ? "创建系统内项目配置；也可以稍后接入可选 Obsidian 同步。" : `${project.paper_count || 0} papers · ${project.note_count || 0} notes · ${artifacts.length} outputs`}</p>
         </div>
+        {!isNew ? <button onClick={() => refreshProject().catch((error) => setStatusMessage(error.message))} type="button">刷新</button> : null}
       </header>
 
       <div className="project-page-grid">

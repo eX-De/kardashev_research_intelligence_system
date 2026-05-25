@@ -18,7 +18,9 @@ from .api import (
     generate_paper_reading_report,
     generate_project_index,
     health,
+    health_summary,
     inbox,
+    job_summary,
     job_history,
     library_paper_detail,
     link_project_note,
@@ -27,6 +29,7 @@ from .api import (
     paper_library,
     remove_paper_report,
     paper_reports_queue,
+    paper_reports_summary,
     project_detail,
     projects,
     receive_experiment_report,
@@ -1694,6 +1697,11 @@ def cmd_api_paper_reports(args: argparse.Namespace) -> None:
     _print_json(result)
 
 
+def cmd_api_paper_reports_summary(_: argparse.Namespace) -> None:
+    result = _with_db(lambda conn, settings: paper_reports_summary(conn))
+    _print_json(result)
+
+
 def cmd_api_paper_library(args: argparse.Namespace) -> None:
     project_id = int(args.project_id) if str(args.project_id or "").strip() else None
     result = _with_db(
@@ -1919,6 +1927,16 @@ def cmd_api_health(_: argparse.Namespace) -> None:
     _print_json(result)
 
 
+def cmd_api_health_summary(_: argparse.Namespace) -> None:
+    result = _with_db(lambda conn, settings: health_summary(conn, settings))
+    _print_json(result)
+
+
+def cmd_api_jobs_summary(_: argparse.Namespace) -> None:
+    result = _with_db(lambda conn, settings: job_summary(conn))
+    _print_json(result)
+
+
 def cmd_api_jobs_history(args: argparse.Namespace) -> None:
     result = _with_db(lambda conn, settings: job_history(conn, int(args.limit)))
     _print_json(result)
@@ -2098,6 +2116,9 @@ def build_parser() -> argparse.ArgumentParser:
     api_paper_reports.add_argument("--limit", default="300")
     api_paper_reports.set_defaults(func=cmd_api_paper_reports)
 
+    api_paper_reports_summary = sub.add_parser("api-paper-reports-summary")
+    api_paper_reports_summary.set_defaults(func=cmd_api_paper_reports_summary)
+
     api_paper_library = sub.add_parser("api-paper-library")
     api_paper_library.add_argument("--status", default="")
     api_paper_library.add_argument("--source-type", default="")
@@ -2223,6 +2244,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     api_health = sub.add_parser("api-health")
     api_health.set_defaults(func=cmd_api_health)
+
+    api_health_summary = sub.add_parser("api-health-summary")
+    api_health_summary.set_defaults(func=cmd_api_health_summary)
+
+    api_jobs_summary = sub.add_parser("api-jobs-summary")
+    api_jobs_summary.set_defaults(func=cmd_api_jobs_summary)
 
     api_jobs_history = sub.add_parser("api-jobs-history")
     api_jobs_history.add_argument("--limit", default="20")

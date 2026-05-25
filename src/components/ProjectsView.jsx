@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
 
 import { LoadingPanel } from "./Loading.jsx";
 import { PanelTitle } from "./PanelTitle.jsx";
 import { api, fmtDate, statusLabel } from "../lib/dashboard.js";
+import { useCachedApi } from "../lib/apiCache.jsx";
 
 function sumProject(projects, field) {
   return projects.reduce((total, project) => total + Number(project[field] || 0), 0);
@@ -38,34 +39,28 @@ function ProjectReminders({ reminders }) {
 }
 
 export function ProjectsView({ onOpenProject, onNewProject, setStatusMessage }) {
-  const [projects, setProjects] = useState([]);
-  const [reminders, setReminders] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  const loadProjects = useCallback(async () => {
-    const [data, reminderData] = await Promise.all([
-      api("/api/projects"),
-      api("/api/reminders?limit=5")
-    ]);
-    setProjects(data.items || []);
-    setReminders(reminderData.items || []);
-  }, []);
+  const projectsQuery = useCachedApi(["projects"], () => api("/api/projects"), { staleTime: 60000 });
+  const remindersQuery = useCachedApi(["reminders", 5], () => api("/api/reminders?limit=5"), { staleTime: 30000 });
 
   useEffect(() => {
-    let cancelled = false;
-    loadProjects()
-      .catch((error) => setStatusMessage(error.message))
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    const timer = setInterval(() => {
-      loadProjects().catch((error) => setStatusMessage(error.message));
-    }, 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [loadProjects, setStatusMessage]);
+    const error = projectsQuery.error || remindersQuery.error;
+    if (error) setStatusMessage(error.message);
+  }, [projectsQuery.error, remindersQuery.error, setStatusMessage]);
+
+  const projects = projectsQuery.data?.items || [];
+  const reminders = remindersQuery.data?.items || [];
+  const loading = !projectsQuery.hasData || !remindersQuery.hasData;
+
+  async function refresh() {
+    try {
+      await Promise.all([
+        projectsQuery.refresh({ force: true }),
+        remindersQuery.refresh({ force: true })
+      ]);
+    } catch (error) {
+      setStatusMessage(error.message);
+    }
+  }
 
   const stats = useMemo(() => {
     const activeCount = projects.filter((project) => ["active", "exploring", "writing"].includes(project.status)).length;
@@ -84,6 +79,7 @@ export function ProjectsView({ onOpenProject, onNewProject, setStatusMessage }) 
           <h1>项目中心</h1>
           <p>{loading ? "正在读取项目..." : `${projects.length} 个项目正在跟踪`}</p>
         </div>
+        <button onClick={refresh} type="button">刷新</button>
         <button className="primary" onClick={onNewProject} type="button">
           新建项目
         </button>

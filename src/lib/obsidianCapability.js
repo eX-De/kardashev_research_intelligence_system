@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
 
+import { useCachedApi } from "./apiCache.jsx";
 import {
   api,
   createApiError,
@@ -73,24 +74,17 @@ export function obsidianCapabilityFrom({ health, settings } = {}) {
 }
 
 export function useObsidianCapability({ health: providedHealth, settings, onError } = {}) {
-  const [health, setHealth] = useState(providedHealth || null);
+  const healthQuery = useCachedApi(
+    ["health", "summary"],
+    () => api("/api/health/summary"),
+    { enabled: !providedHealth, staleTime: 60000 }
+  );
 
   useEffect(() => {
-    if (providedHealth) setHealth(providedHealth);
-  }, [providedHealth]);
+    if (!providedHealth && healthQuery.error) onError?.(healthQuery.error);
+  }, [healthQuery.error, onError, providedHealth]);
 
-  useEffect(() => {
-    if (providedHealth) return undefined;
-    let cancelled = false;
-    api("/api/health").then((data) => {
-      if (!cancelled) setHealth(data);
-    }).catch((error) => {
-      if (!cancelled) onError?.(error);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [onError, providedHealth]);
+  const health = providedHealth || healthQuery.data || null;
 
   return useMemo(
     () => obsidianCapabilityFrom({ health, settings }),

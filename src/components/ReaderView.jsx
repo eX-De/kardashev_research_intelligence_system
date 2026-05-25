@@ -9,6 +9,7 @@ import {
   postJson,
   readResponseJson
 } from "../lib/dashboard.js";
+import { useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { friendlyObsidianMessage, postObsidianJson, useObsidianCapability } from "../lib/obsidianCapability.js";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
 import { InlineLoader, LoadingPanel } from "./Loading.jsx";
@@ -734,6 +735,7 @@ function ReaderDetail({
 }
 
 export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, targetPaperKey }) {
+  const cache = useApiCacheClient();
   const [items, setItems] = useState([]);
   const [stats, setStats] = useState({});
   const [queueStatus, setQueueStatus] = useState({});
@@ -758,6 +760,11 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
   const [savingChatModel, setSavingChatModel] = useState(false);
   const activePaperIdRef = useRef(null);
   const detailRequestRef = useRef(0);
+  const readerListQuery = useCachedApi(["reader", "papers"], () => api("/api/reader/papers"), { staleTime: 60000 });
+  const paperReportsSummaryQuery = useCachedApi(["paper-reports", "summary"], () => api("/api/paper-reports/summary"), { staleTime: 15000 });
+  const jobStatusQuery = useCachedApi(["jobs", "status"], () => api("/api/jobs/status"), { staleTime: 5000 });
+  const settingsQuery = useCachedApi(["settings"], () => api("/api/settings"), { staleTime: Infinity });
+  const projectsQuery = useCachedApi(["projects"], () => api("/api/projects"), { staleTime: 60000 });
   const handleCapabilityError = useCallback((error) => setStatusMessage(error.message), [setStatusMessage]);
   const obsidianCapability = useObsidianCapability({ settings: readerSettings, onError: handleCapabilityError });
 
@@ -794,25 +801,30 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
       activePaperIdRef.current = numericPaperId;
       setActivePaperId(numericPaperId);
     }
-    const data = await api(`/api/reader/papers/${paperId}`);
+    const data = await cache.get(
+      ["reader", "paper", String(numericPaperId)],
+      () => api(`/api/reader/papers/${paperId}`),
+      { force: options.force === true, staleTimeMs: 60000 }
+    );
     if (requestId !== detailRequestRef.current) return null;
     if (!setActive && activePaperIdRef.current !== numericPaperId) return null;
     setDetail(data);
     return data;
-  }, []);
+  }, [cache]);
 
   const refresh = useCallback(async () => {
-    const [data, statusData] = await Promise.all([
-      api("/api/reader/papers"),
-      api("/api/jobs/status")
+    const [data, statusData, summaryData] = await Promise.all([
+      readerListQuery.refresh({ force: true }),
+      jobStatusQuery.refresh({ force: true }),
+      paperReportsSummaryQuery.refresh({ force: true })
     ]);
     const nextItems = data.items || [];
     setItems(nextItems);
-    setStats(data.stats || {});
+    setStats(data.stats || summaryData.stats || {});
     setQueueStatus(statusData.scheduler?.paper_report_queue || {});
     const routePaperId = Number(targetPaperId || 0);
     if (routePaperId) {
-      await loadPaper(routePaperId);
+      await loadPaper(routePaperId, { force: true });
       return;
     }
     const currentActiveId = activePaperIdRef.current;
@@ -829,35 +841,62 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
       setDetail(null);
       setActivePaperId(null);
     }
-  }, [loadPaper, onSelectPaper, targetPaperId]);
-
-  const loadReaderSettings = useCallback(async () => {
-    const data = await api("/api/settings");
-    setReaderSettings(data.settings || {});
-  }, []);
-
-  const loadProjects = useCallback(async () => {
-    const data = await api("/api/projects");
-    setProjects(data.items || []);
-  }, []);
+  }, [
+    jobStatusQuery.refresh,
+    loadPaper,
+    onSelectPaper,
+    paperReportsSummaryQuery.refresh,
+    readerListQuery.refresh,
+    targetPaperId
+  ]);
 
   useEffect(() => {
-    let cancelled = false;
-    Promise.all([
-      refresh().catch((error) => setStatusMessage(error.message)),
-      loadReaderSettings().catch((error) => setStatusMessage(error.message)),
-      loadProjects().catch((error) => setStatusMessage(error.message))
-    ]).finally(() => {
-      if (!cancelled) setLoading(false);
-    });
-    const timer = setInterval(() => {
-      refresh().catch((error) => setStatusMessage(error.message));
-    }, 3000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [loadProjects, loadReaderSettings, refresh, setStatusMessage]);
+    if (!readerListQuery.hasData) return;
+    const data = readerListQuery.data || {};
+    const nextItems = data.items || [];
+    setItems(nextItems);
+    if (data.stats) setStats(data.stats);
+    const routePaperId = Number(targetPaperId || 0);
+    const currentActiveId = activePaperIdRef.current;
+    const activeStillExists = currentActiveId && nextItems.some((item) => item.paper_id === currentActiveId);
+    const nextId = routePaperId || (activeStillExists ? currentActiveId : nextItems[0]?.paper_id);
+    if (nextId) {
+      if (!routePaperId) onSelectPaper?.(nextId, { replace: true });
+      loadPaper(nextId, { setActive: !activeStillExists }).catch((error) => setStatusMessage(error.message));
+      return;
+    }
+    detailRequestRef.current += 1;
+    activePaperIdRef.current = null;
+    setDetail(null);
+    setActivePaperId(null);
+  }, [loadPaper, onSelectPaper, readerListQuery.data, readerListQuery.hasData, setStatusMessage, targetPaperId]);
+
+  useEffect(() => {
+    if (paperReportsSummaryQuery.data?.stats) setStats(paperReportsSummaryQuery.data.stats);
+  }, [paperReportsSummaryQuery.data]);
+
+  useEffect(() => {
+    if (jobStatusQuery.data?.scheduler) {
+      setQueueStatus(jobStatusQuery.data.scheduler.paper_report_queue || {});
+    }
+  }, [jobStatusQuery.data]);
+
+  useEffect(() => {
+    if (settingsQuery.data?.settings) setReaderSettings(settingsQuery.data.settings);
+  }, [settingsQuery.data]);
+
+  useEffect(() => {
+    if (projectsQuery.data?.items) setProjects(projectsQuery.data.items);
+  }, [projectsQuery.data]);
+
+  useEffect(() => {
+    const error = readerListQuery.error || paperReportsSummaryQuery.error || jobStatusQuery.error || settingsQuery.error || projectsQuery.error;
+    if (error) setStatusMessage(error.message);
+  }, [jobStatusQuery.error, paperReportsSummaryQuery.error, projectsQuery.error, readerListQuery.error, setStatusMessage, settingsQuery.error]);
+
+  useEffect(() => {
+    setLoading(!readerListQuery.hasData || !paperReportsSummaryQuery.hasData || !jobStatusQuery.hasData || !settingsQuery.hasData || !projectsQuery.hasData);
+  }, [jobStatusQuery.hasData, paperReportsSummaryQuery.hasData, projectsQuery.hasData, readerListQuery.hasData, settingsQuery.hasData]);
 
   useEffect(() => {
     const numericPaperId = Number(targetPaperId || 0);
@@ -875,6 +914,9 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
     const numericPaperId = Number(paperId);
     try {
       const data = await postJson(`/api/papers/${paperId}/report`, { force });
+      cache.setCache(["reader", "paper", String(numericPaperId)], data);
+      cache.markStale(["reader", "papers"]);
+      cache.markStale(["paper-reports", "summary"]);
       if (activePaperIdRef.current === numericPaperId) setDetail(data);
       setStatusMessage(data.paper_report?.status === "done" ? "全文报告已生成" : reportStatusLabel(data.paper_report?.status));
       await refresh();
@@ -890,6 +932,9 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
     const numericPaperId = Number(paperId);
     try {
       const data = await postJson(`/api/reader/papers/${paperId}/cancel`, {});
+      cache.setCache(["reader", "paper", String(numericPaperId)], data);
+      cache.markStale(["reader", "papers"]);
+      cache.markStale(["paper-reports", "summary"]);
       if (activePaperIdRef.current === numericPaperId) setDetail(data);
       setStatusMessage("报告排队已取消");
       await refresh();
@@ -905,6 +950,9 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
     const numericPaperId = Number(paperId);
     try {
       const data = await postJson(`/api/reader/papers/${paperId}/retry`, {});
+      cache.setCache(["reader", "paper", String(numericPaperId)], data);
+      cache.markStale(["reader", "papers"]);
+      cache.markStale(["paper-reports", "summary"]);
       if (activePaperIdRef.current === numericPaperId) setDetail(data);
       setStatusMessage("报告已重新加入队列");
       await refresh();
@@ -920,6 +968,9 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
     setDeletingReportId(numericPaperId);
     try {
       await api(`/api/reader/papers/${paperId}/report`, { method: "DELETE" });
+      cache.markStale(["reader", "papers"]);
+      cache.markStale(["paper-reports", "summary"]);
+      cache.markStale(["reader", "paper", String(numericPaperId)]);
       setStatusMessage("已从报告队列删除");
       await refresh();
     } catch (error) {
@@ -941,6 +992,10 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
         relation: "reading",
         note: "manual_from_report_queue"
       });
+      cache.markStale(["reader", "papers"]);
+      cache.markStale(["reader", "paper", String(numericPaperId)]);
+      cache.markStale(["project", String(numericProjectId)]);
+      cache.markStale(["projects"]);
       setStatusMessage(`已关联到项目${project?.name ? `：${project.name}` : ""}`);
       await refresh();
     } catch (error) {
@@ -1003,7 +1058,10 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
         },
         onDone(data) {
           completed = true;
-          if (data.detail && activePaperIdRef.current === paperId) setDetail(data.detail);
+          if (data.detail) {
+            cache.setCache(["reader", "paper", String(paperId)], data.detail);
+            if (activePaperIdRef.current === paperId) setDetail(data.detail);
+          }
         }
       });
       if (!completed && activePaperIdRef.current === paperId) {
@@ -1032,6 +1090,7 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
         reader_chat_provider_id: providerId,
         reader_chat_model: model
       });
+      cache.setCache(["settings"], data);
       setReaderSettings(data.settings || {
         ...(readerSettings || {}),
         reader_chat_provider_id: providerId,
@@ -1058,6 +1117,7 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
     setDeletingMessageId(messageId);
     try {
       const data = await api(`/api/reader/papers/${paperId}/messages/${messageId}`, { method: "DELETE" });
+      cache.setCache(["reader", "paper", String(paperId)], data);
       if (activePaperIdRef.current === paperId) setDetail(data);
       setStatusMessage("消息已删除");
     } catch (error) {
@@ -1089,6 +1149,8 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
     setImportBusy(true);
     try {
       const data = await postJson("/api/reader/papers/urls", { urls });
+      cache.markStale(["reader", "papers"]);
+      cache.markStale(["paper-reports", "summary"]);
       setUrls("");
       setImportOpen(false);
       setStatusMessage(`URL 导入完成：${data.imported?.length || 0} 篇，失败 ${data.errors?.length || 0} 篇`);
@@ -1119,6 +1181,8 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
         });
       }
       const data = await postJson("/api/reader/papers/upload", { files });
+      cache.markStale(["reader", "papers"]);
+      cache.markStale(["paper-reports", "summary"]);
       setSelectedFiles([]);
       setImportOpen(false);
       event.currentTarget.reset();

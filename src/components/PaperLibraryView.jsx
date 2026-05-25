@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { LoadingPanel } from "./Loading.jsx";
+import { useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { api, fmtDate, postJson, snippet } from "../lib/dashboard.js";
 
 const STATUSES = [
@@ -38,8 +39,7 @@ function reportStatusLabel(status) {
 }
 
 export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPaperId, setStatusMessage }) {
-  const [items, setItems] = useState([]);
-  const [detail, setDetail] = useState(null);
+  const cache = useApiCacheClient();
   const [activeId, setActiveId] = useState(null);
   const [status, setStatus] = useState("");
   const [sourceType, setSourceType] = useState("");
@@ -48,12 +48,7 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
   const [dateTo, setDateTo] = useState("");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
-  const [total, setTotal] = useState(0);
   const [busy, setBusy] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const activeIdRef = useRef(null);
-  const listRequestRef = useRef(0);
-  const detailRequestRef = useRef(0);
 
   const queryString = useMemo(() => {
     const offset = (page - 1) * pageSize;
@@ -66,65 +61,68 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
     return params.toString();
   }, [dateFrom, dateTo, page, pageSize, query, sourceType, status]);
 
-  const loadDetail = useCallback(async (id) => {
-    const numericId = Number(id);
-    const requestId = detailRequestRef.current + 1;
-    detailRequestRef.current = requestId;
-    activeIdRef.current = numericId;
-    setActiveId(numericId);
-    const data = await api(`/api/library/${id}`);
-    if (requestId !== detailRequestRef.current) return;
-    setDetail(data);
-  }, []);
-
-  const load = useCallback(async () => {
-    const requestId = listRequestRef.current + 1;
-    listRequestRef.current = requestId;
-    const data = await api(`/api/library?${queryString}`);
-    if (requestId !== listRequestRef.current) return;
-    const next = data.items || [];
-    setItems(next);
-    setTotal(Number(data.total || 0));
-    const routePaperId = Number(selectedPaperId || 0);
-    const selectedId = routePaperId || activeIdRef.current;
-    const nextId = selectedId && (routePaperId || next.some((item) => Number(item.id) === Number(selectedId))) ? selectedId : next[0]?.id;
-    if (nextId) {
-      if (!routePaperId) onSelectPaper?.(nextId, { replace: true });
-      const detailRequestId = detailRequestRef.current + 1;
-      detailRequestRef.current = detailRequestId;
-      const detailData = await api(`/api/library/${nextId}`);
-      if (requestId !== listRequestRef.current || detailRequestId !== detailRequestRef.current) return;
-      activeIdRef.current = Number(nextId);
-      setActiveId(Number(nextId));
-      setDetail(detailData);
-      return;
-    }
-    detailRequestRef.current += 1;
-    activeIdRef.current = null;
-    setActiveId(null);
-    setDetail(null);
-  }, [onSelectPaper, queryString, selectedPaperId]);
+  const listQuery = useCachedApi(
+    ["library", "list", queryString],
+    () => api(`/api/library?${queryString}`),
+    { staleTime: 60000 }
+  );
+  const listData = listQuery.data || { items: [], total: 0 };
+  const items = listData.items || [];
+  const total = Number(listData.total || 0);
+  const detailQuery = useCachedApi(
+    ["library", "detail", String(activeId || "")],
+    () => api(`/api/library/${activeId}`),
+    { enabled: Boolean(activeId), staleTime: 60000 }
+  );
+  const detail = detailQuery.data || null;
+  const loading = !listQuery.hasData;
+  const detailLoading = Boolean(activeId) && !detailQuery.hasData;
 
   useEffect(() => {
-    let cancelled = false;
-    load()
-      .catch((error) => setStatusMessage(error.message))
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [load, setStatusMessage]);
+    if (!listQuery.hasData) return;
+    const routePaperId = Number(selectedPaperId || 0);
+    const currentId = Number(activeId || 0);
+    const currentInList = currentId && items.some((item) => Number(item.id) === currentId);
+    const nextId = routePaperId || (currentInList ? currentId : items[0]?.id);
+    if (!nextId) {
+      setActiveId(null);
+      return;
+    }
+    setActiveId(Number(nextId));
+    if (!routePaperId) onSelectPaper?.(nextId, { replace: true });
+  }, [activeId, items, listQuery.hasData, onSelectPaper, selectedPaperId]);
+
+  useEffect(() => {
+    const error = listQuery.error || detailQuery.error;
+    if (error) setStatusMessage(error.message);
+  }, [detailQuery.error, listQuery.error, setStatusMessage]);
 
   async function updateStatus(nextStatus) {
     if (!detail?.paper?.id) return;
     setBusy(true);
     try {
       const data = await postJson(`/api/library/${detail.paper.id}/status`, { status: nextStatus });
-      setDetail(data);
+      cache.setCache(["library", "detail", String(detail.paper.id)], data);
+      listQuery.patch((current) => {
+        const paper = data.paper || {};
+        const currentItems = current?.items || [];
+        const nextItems = currentItems
+          .map((item) => Number(item.id) === Number(paper.id) ? {
+            ...item,
+            library_status: paper.library_status,
+            status: paper.status || item.status,
+            updated_at: paper.updated_at || item.updated_at
+          } : item)
+          .filter((item) => !status || item.library_status === status);
+        const removed = currentItems.length - nextItems.length;
+        return {
+          ...(current || {}),
+          items: nextItems,
+          total: Math.max(0, Number(current?.total || nextItems.length) - removed)
+        };
+      });
+      cache.markStale(["health", "summary"]);
       setStatusMessage(`论文状态已更新为 ${statusLabel(nextStatus)}`);
-      await load();
     } catch (error) {
       setStatusMessage(error.message);
     } finally {
@@ -146,6 +144,13 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
     setPage(1);
   }
 
+  async function refresh() {
+    await Promise.all([
+      listQuery.refresh({ force: true }),
+      activeId ? detailQuery.refresh({ force: true }) : Promise.resolve()
+    ]);
+  }
+
   return (
     <section className="view library-view">
       <section className="library-list-panel">
@@ -154,7 +159,7 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
             <h1>论文仓库</h1>
             <p>{loading ? "正在读取论文..." : `${total} 篇论文 · 第 ${currentPage} / ${pageCount} 页`}</p>
           </div>
-          <button onClick={() => load().catch((error) => setStatusMessage(error.message))} type="button">刷新</button>
+          <button onClick={() => refresh().catch((error) => setStatusMessage(error.message))} type="button">刷新</button>
         </header>
         <div className="library-toolbar">
           <label className="library-filter-control">
@@ -201,7 +206,7 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
                     onSelectPaper(item.id);
                     return;
                   }
-                  loadDetail(item.id).catch((error) => setStatusMessage(error.message));
+                  setActiveId(Number(item.id));
                 }}
                 type="button"
               >
@@ -224,7 +229,7 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
       </section>
 
       <section className="detail-panel library-detail-panel">
-        {loading ? (
+        {detailLoading ? (
           <LoadingPanel description="正在打开首篇论文的摘要、资产和正文片段。" rows={7} title="读取论文详情" />
         ) : paper ? (
           <div className="detail-card">

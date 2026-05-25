@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { InlineLoader } from "./Loading.jsx";
+import { useCachedApi } from "../lib/apiCache.jsx";
 import { api, chooseLocalPath, postJson } from "../lib/dashboard.js";
 
 const PROJECT_STATUSES = [
@@ -49,23 +50,18 @@ export function OnboardingGate({ notify = () => {}, setStatusMessage = () => {} 
     keywords: "",
     raw_context: ""
   });
+  const settingsQuery = useCachedApi(["settings"], () => api("/api/settings"), { refetchOnStale: false, staleTime: Infinity });
+  const projectsQuery = useCachedApi(["projects"], () => api("/api/projects"), { refetchOnStale: false, staleTime: 60000 });
 
   useEffect(() => {
-    let active = true;
-    Promise.all([
-      api("/api/settings"),
-      api("/api/projects")
-    ]).then(([settingsData, projectsData]) => {
-      if (!active) return;
-      setVisible(shouldShowOnboarding(settingsData.settings || {}, projectsData.items || []));
-    }).catch((error) => {
-      if (!active) return;
+    const error = settingsQuery.error || projectsQuery.error;
+    if (error) {
       setStatusMessage(error.message);
-    });
-    return () => {
-      active = false;
-    };
-  }, [setStatusMessage]);
+      return;
+    }
+    if (!settingsQuery.hasData || !projectsQuery.hasData) return;
+    setVisible(shouldShowOnboarding(settingsQuery.data?.settings || {}, projectsQuery.data?.items || []));
+  }, [projectsQuery.data, projectsQuery.error, projectsQuery.hasData, settingsQuery.data, settingsQuery.error, settingsQuery.hasData, setStatusMessage]);
 
   const completeOnboarding = useCallback(async (source, extraSettings = {}) => {
     await postJson("/api/settings", {

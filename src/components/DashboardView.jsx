@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect } from "react";
 import { Link } from "react-router-dom";
 
 import { DailyRunProgressCard } from "./DailyRunProgressCard.jsx";
 import { LoadingPanel } from "./Loading.jsx";
 import { PanelTitle } from "./PanelTitle.jsx";
 import { api, fmtDate } from "../lib/dashboard.js";
+import { useCachedApi } from "../lib/apiCache.jsx";
 
 function Metric({ label, value, hint }) {
   return (
@@ -25,41 +26,32 @@ function paperPath(paperId) {
 }
 
 export function DashboardView({ setStatusMessage }) {
-  const [health, setHealth] = useState(null);
-  const [jobStatus, setJobStatus] = useState(null);
-  const [reminders, setReminders] = useState([]);
-  const [artifacts, setArtifacts] = useState([]);
-  const [papers, setPapers] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  const load = useCallback(async () => {
-    const [healthData, statusData, reminderData, artifactData, paperData] = await Promise.all([
-      api("/api/health"),
-      api("/api/jobs/status"),
-      api("/api/reminders?limit=5"),
-      api("/api/artifacts?limit=8"),
-      api("/api/library?status=saved&limit=8")
-    ]);
-    setHealth(healthData);
-    setJobStatus(statusData);
-    setReminders(reminderData.items || []);
-    setArtifacts(artifactData.items || []);
-    setPapers(paperData.items || []);
-  }, []);
+  const healthQuery = useCachedApi(["health", "summary"], () => api("/api/health/summary"), { staleTime: 60000 });
+  const jobStatusQuery = useCachedApi(["jobs", "status"], () => api("/api/jobs/status"), { staleTime: 5000 });
+  const remindersQuery = useCachedApi(["reminders", 5], () => api("/api/reminders?limit=5"), { staleTime: 30000 });
+  const artifactsQuery = useCachedApi(["artifacts", "list", "limit=8"], () => api("/api/artifacts?limit=8"), { staleTime: 60000 });
+  const papersQuery = useCachedApi(["library", "list", "status=saved&limit=8"], () => api("/api/library?status=saved&limit=8"), { staleTime: 60000 });
+  const queries = [healthQuery, jobStatusQuery, remindersQuery, artifactsQuery, papersQuery];
 
   useEffect(() => {
-    let cancelled = false;
-    load()
-      .catch((error) => setStatusMessage(error.message))
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    const timer = setInterval(() => load().catch((error) => setStatusMessage(error.message)), 8000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [load, setStatusMessage]);
+    const error = queries.find((query) => query.error)?.error;
+    if (error) setStatusMessage(error.message);
+  }, [healthQuery.error, jobStatusQuery.error, remindersQuery.error, artifactsQuery.error, papersQuery.error, setStatusMessage]);
+
+  const loading = queries.some((query) => !query.hasData);
+  const health = healthQuery.data || null;
+  const jobStatus = jobStatusQuery.data || null;
+  const reminders = remindersQuery.data?.items || [];
+  const artifacts = artifactsQuery.data?.items || [];
+  const papers = papersQuery.data?.items || [];
+
+  async function refresh() {
+    try {
+      await Promise.all(queries.map((query) => query.refresh({ force: true })));
+    } catch (error) {
+      setStatusMessage(error.message);
+    }
+  }
 
   const counts = health?.counts || {};
   const currentJob = jobStatus?.scheduler?.current_job;
@@ -94,7 +86,7 @@ export function DashboardView({ setStatusMessage }) {
           <h1>首页</h1>
           <p>今日状态、待处理事项和最近更新。</p>
         </div>
-        <button onClick={() => load().catch((error) => setStatusMessage(error.message))} type="button">刷新</button>
+        <button onClick={refresh} type="button">刷新</button>
       </header>
 
       <div className="dashboard-grid">
