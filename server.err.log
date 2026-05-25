@@ -1,5 +1,0 @@
-Error: Another job is already running: run-daily
-    at runManagedJob (file:///D:/coding/research_intelligence_system/server.js:364:17)
-    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
-    at async routeApi (file:///D:/coding/research_intelligence_system/server.js:945:18)
-    at async Server.<anonymous> (file:///D:/coding/research_intelligence_system/server.js:1169:7)
