@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import sqlite3
+from .db_types import DbConnection, DbRow
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlparse
 import re
@@ -38,7 +38,7 @@ VALID_READER_ROLES = {"user", "assistant"}
 PDF_LINK_PATTERN = re.compile(r"""href=["']([^"']+?\.pdf(?:\?[^"']*)?)["']""", re.IGNORECASE)
 
 
-def _reader_message_payload(row: sqlite3.Row) -> dict[str, object]:
+def _reader_message_payload(row: DbRow) -> dict[str, object]:
     return {
         "id": int(row["id"]),
         "paper_id": int(row["paper_id"]),
@@ -51,7 +51,7 @@ def _reader_message_payload(row: sqlite3.Row) -> dict[str, object]:
     }
 
 
-def _report_seed_messages(conn: sqlite3.Connection, paper_id: int) -> list[dict[str, object]]:
+def _report_seed_messages(conn: DbConnection, paper_id: int) -> list[dict[str, object]]:
     report = paper_report_payload(conn, paper_id)
     if not report:
         return []
@@ -89,7 +89,7 @@ def _report_seed_messages(conn: sqlite3.Connection, paper_id: int) -> list[dict[
     return messages
 
 
-def _report_seed_message(conn: sqlite3.Connection, paper_id: int, message_id: int) -> dict[str, object] | None:
+def _report_seed_message(conn: DbConnection, paper_id: int, message_id: int) -> dict[str, object] | None:
     for message in _report_seed_messages(conn, paper_id):
         if int(message["id"]) == int(message_id):
             return dict(message)
@@ -120,7 +120,7 @@ def _reader_report_prompt(settings: Settings) -> str:
     return clean_unicode(str(settings.paper_reader_default_prompt or "")).strip() or PAPER_READER_DEFAULT_PROMPT
 
 
-def paper_reader_messages(conn: sqlite3.Connection, paper_id: int) -> list[dict[str, object]]:
+def paper_reader_messages(conn: DbConnection, paper_id: int) -> list[dict[str, object]]:
     rows = conn.execute(
         """
         SELECT id, paper_id, role, content, source, model_provider_id, model, created_at
@@ -133,7 +133,7 @@ def paper_reader_messages(conn: sqlite3.Connection, paper_id: int) -> list[dict[
     return [_reader_message_payload(row) for row in rows]
 
 
-def paper_reader_display_messages(conn: sqlite3.Connection, paper_id: int) -> list[dict[str, object]]:
+def paper_reader_display_messages(conn: DbConnection, paper_id: int) -> list[dict[str, object]]:
     messages = paper_reader_messages(conn, paper_id)
     return _report_seed_messages(conn, paper_id) + messages
 
@@ -200,7 +200,7 @@ def _discover_pdf_url(url: str) -> str:
 
 
 def _insert_imported_paper(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     *,
     arxiv_id: str,
     title: str,
@@ -281,7 +281,7 @@ def _insert_imported_paper(
 
 
 def _finalize_imported_pdf(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     paper_id: int,
     pdf_path: Path,
     text_path: Path,
@@ -291,12 +291,12 @@ def _finalize_imported_pdf(
     replace_arxiv_chunks_for_paper(conn, paper, text)
 
 
-def _queue_imported_report(conn: sqlite3.Connection, settings: Settings, paper_id: int) -> None:
+def _queue_imported_report(conn: DbConnection, settings: Settings, paper_id: int) -> None:
     queue_paper_report(conn, paper_id, prompt=_reader_report_prompt(settings))
 
 
 def import_reader_pdf(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     payload: dict[str, object],
 ) -> dict[str, object]:
@@ -365,7 +365,7 @@ def import_reader_pdf(
 
 
 def import_reader_pdfs(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     payload: dict[str, object],
 ) -> dict[str, object]:
@@ -399,7 +399,7 @@ def import_reader_pdfs(
 
 
 def import_reader_urls(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     payload: dict[str, object],
 ) -> dict[str, object]:
@@ -520,7 +520,7 @@ def _build_chat_messages(
     return messages
 
 
-def paper_reader_detail(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
+def paper_reader_detail(conn: DbConnection, paper_id: int) -> dict[str, object]:
     from .api import paper_detail
 
     detail = paper_detail(conn, paper_id)
@@ -529,7 +529,7 @@ def paper_reader_detail(conn: sqlite3.Connection, paper_id: int) -> dict[str, ob
 
 
 def paper_reader_chat(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     paper_id: int,
     payload: dict[str, object],
@@ -589,7 +589,7 @@ def paper_reader_chat(
 
 
 def paper_reader_chat_stream(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     paper_id: int,
     payload: dict[str, object],
@@ -667,7 +667,7 @@ def paper_reader_chat_stream(
     )
 
 
-def delete_reader_message(conn: sqlite3.Connection, paper_id: int, message_id: int) -> dict[str, object]:
+def delete_reader_message(conn: DbConnection, paper_id: int, message_id: int) -> dict[str, object]:
     cursor = conn.execute(
         "DELETE FROM paper_reader_messages WHERE id = ? AND paper_id = ?",
         (int(message_id), int(paper_id)),
@@ -680,21 +680,21 @@ def delete_reader_message(conn: sqlite3.Connection, paper_id: int, message_id: i
     return detail
 
 
-def cancel_reader_report(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
+def cancel_reader_report(conn: DbConnection, paper_id: int) -> dict[str, object]:
     cancel_paper_report_from_queue(conn, paper_id)
     detail = paper_reader_detail(conn, paper_id)
     detail["ok"] = True
     return detail
 
 
-def retry_reader_report(conn: sqlite3.Connection, settings: Settings, paper_id: int) -> dict[str, object]:
+def retry_reader_report(conn: DbConnection, settings: Settings, paper_id: int) -> dict[str, object]:
     queue_paper_report(conn, paper_id, force=True, prompt=_reader_report_prompt(settings))
     detail = paper_reader_detail(conn, paper_id)
     detail["ok"] = True
     return detail
 
 
-def _paper_payload(paper: sqlite3.Row) -> dict[str, object]:
+def _paper_payload(paper: DbRow) -> dict[str, object]:
     return {
         "id": int(paper["id"]),
         "title": paper["title"],
@@ -705,7 +705,7 @@ def _paper_payload(paper: sqlite3.Row) -> dict[str, object]:
     }
 
 
-def _build_note_messages(paper: sqlite3.Row, initial_analysis: str, follow_up_messages: list[dict[str, object]]) -> list[dict[str, str]]:
+def _build_note_messages(paper: DbRow, initial_analysis: str, follow_up_messages: list[dict[str, object]]) -> list[dict[str, str]]:
     paper_data = _paper_payload(paper)
     title = paper_data.get("title") or paper_data.get("original_filename") or paper_data.get("original_url") or f"Paper {paper_data.get('id', '')}".strip()
     metadata_lines = [
@@ -810,7 +810,7 @@ def _normalize_tag(value: str) -> str:
     return f"Concept/{tag}"
 
 
-def _smart_save_frontmatter(paper: sqlite3.Row, generated: dict[str, object], existing: dict[str, object]) -> dict[str, object]:
+def _smart_save_frontmatter(paper: DbRow, generated: dict[str, object], existing: dict[str, object]) -> dict[str, object]:
     updated = dict(existing)
     tags = ["Paper/普通"]
     for tag in _normalize_list(generated.get("tags")):
@@ -829,9 +829,9 @@ def _smart_save_frontmatter(paper: sqlite3.Row, generated: dict[str, object], ex
 
 
 def _generate_smart_save_note(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
-    paper: sqlite3.Row,
+    paper: DbRow,
     paper_id: int,
 ) -> dict[str, object]:
     report = paper_report_payload(conn, paper_id)
@@ -862,7 +862,7 @@ def _generate_smart_save_note(
     }
 
 
-def _build_question_messages(paper: sqlite3.Row, selected_text: str, anchor_message: dict[str, object]) -> list[dict[str, str]]:
+def _build_question_messages(paper: DbRow, selected_text: str, anchor_message: dict[str, object]) -> list[dict[str, str]]:
     title = paper["title"] or f"Paper {paper['id']}"
     context_text = clean_unicode(str(anchor_message.get("context_text") or anchor_message.get("contextText") or anchor_message.get("content") or "")).strip()
     user_message = (
@@ -904,7 +904,7 @@ def _build_question_messages(paper: sqlite3.Row, selected_text: str, anchor_mess
 
 
 def generate_reader_followup_questions(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     paper_id: int,
     payload: dict[str, object],
@@ -963,7 +963,7 @@ def generate_reader_followup_questions(
 
 
 def save_reader_note_to_obsidian(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     paper_id: int,
 ) -> dict[str, object]:

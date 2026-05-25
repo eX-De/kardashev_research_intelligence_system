@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-import sqlite3
+from .db_types import DbConnection, DbRow
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +36,7 @@ def _scope_clause(scope_type: str, scope_id: int | None) -> tuple[str, tuple[obj
     return "scope_type = ? AND scope_id = ?", (scope_type, scope_id)
 
 
-def _artifact_payload(row: sqlite3.Row) -> dict[str, object]:
+def _artifact_payload(row: DbRow) -> dict[str, object]:
     return {
         "id": int(row["id"]),
         "scope_type": row["scope_type"],
@@ -55,13 +55,13 @@ def _artifact_payload(row: sqlite3.Row) -> dict[str, object]:
     }
 
 
-def get_artifact(conn: sqlite3.Connection, artifact_id: int) -> dict[str, object] | None:
+def get_artifact(conn: DbConnection, artifact_id: int) -> dict[str, object] | None:
     row = conn.execute("SELECT * FROM artifacts WHERE id = ?", (int(artifact_id),)).fetchone()
     return _artifact_payload(row) if row else None
 
 
 def create_artifact(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     *,
     scope_type: str,
     artifact_type: str,
@@ -108,7 +108,7 @@ def create_artifact(
 
 
 def update_artifact(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     artifact_id: int,
     *,
     title: str | None = None,
@@ -157,7 +157,7 @@ def update_artifact(
 
 
 def upsert_artifact(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     *,
     scope_type: str,
     artifact_type: str,
@@ -232,7 +232,7 @@ def upsert_artifact(
 
 
 def list_artifacts(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     *,
     scope_type: str | None = None,
     scope_id: int | None = None,
@@ -273,43 +273,37 @@ def content_hash(markdown: str, content_json: object | None = None) -> str:
     return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()
 
 
-def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
-    if getattr(conn, "dialect", "") == "postgres":
-        row = conn.execute(
-            """
-            SELECT table_name AS name
-            FROM information_schema.tables
-            WHERE table_schema = current_schema()
-              AND table_name = ?
-            """,
-            (table,),
-        ).fetchone()
-        return bool(row)
+def _table_exists(conn: DbConnection, table: str) -> bool:
     row = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        """
+        SELECT table_name AS name
+        FROM information_schema.tables
+        WHERE table_schema = current_schema()
+          AND table_name = ?
+        """,
         (table,),
     ).fetchone()
     return bool(row)
 
 
-def _count_table(conn: sqlite3.Connection, table: str) -> int:
+def _count_table(conn: DbConnection, table: str) -> int:
     if not _table_exists(conn, table):
         return 0
     return int(conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()["count"])
 
 
-def _row_value(row: sqlite3.Row, key: str, default: object = "") -> object:
+def _row_value(row: DbRow, key: str, default: object = "") -> object:
     return row[key] if key in row.keys() and row[key] is not None else default
 
 
-def _legacy_library_paper_id(conn: sqlite3.Connection, legacy_arxiv_paper_id: int) -> int | None:
+def _legacy_library_paper_id(conn: DbConnection, legacy_arxiv_paper_id: int) -> int | None:
     from .papers import paper_id_for_arxiv_paper_id
 
     paper_id = paper_id_for_arxiv_paper_id(conn, int(legacy_arxiv_paper_id))
     return int(paper_id) if paper_id is not None else None
 
 
-def _migrate_legacy_paper_reading_reports(conn: sqlite3.Connection) -> int:
+def _migrate_legacy_paper_reading_reports(conn: DbConnection) -> int:
     rows = conn.execute("SELECT * FROM paper_reading_reports ORDER BY paper_id").fetchall()
     for row in rows:
         legacy_paper_id = int(row["paper_id"])
@@ -375,7 +369,7 @@ def _migrate_legacy_paper_reading_reports(conn: sqlite3.Connection) -> int:
     )
 
 
-def _migrate_legacy_project_artifacts(conn: sqlite3.Connection) -> int:
+def _migrate_legacy_project_artifacts(conn: DbConnection) -> int:
     rows = conn.execute("SELECT * FROM project_artifacts ORDER BY id").fetchall()
     for row in rows:
         source = from_json(str(_row_value(row, "source_json", "{}")), {})
@@ -411,7 +405,7 @@ def _migrate_legacy_project_artifacts(conn: sqlite3.Connection) -> int:
 
 
 def migrate_legacy_artifact_tables(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     *,
     drop_legacy: bool = False,
 ) -> dict[str, int]:
@@ -435,7 +429,7 @@ def migrate_legacy_artifact_tables(
     return stats
 
 
-def generate_project_index_artifact(conn: sqlite3.Connection, project_id: int) -> dict[str, object]:
+def generate_project_index_artifact(conn: DbConnection, project_id: int) -> dict[str, object]:
     project = conn.execute(
         """
         SELECT id, name, status, summary, goals, keywords_json, updated_at
@@ -530,7 +524,7 @@ def _vault(settings: Settings) -> Path:
 
 
 def _default_obsidian_relative_path(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     artifact: dict[str, object],
 ) -> str:
     artifact_type = str(artifact["artifact_type"])
@@ -582,7 +576,7 @@ def _default_obsidian_relative_path(
 
 
 def _remote_obsidian_relative_path(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     artifact: dict[str, object],
 ) -> str:
@@ -632,7 +626,7 @@ def _artifact_markdown(artifact: dict[str, object]) -> str:
 
 
 def export_artifact_to_obsidian(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     artifact_id: int,
     *,

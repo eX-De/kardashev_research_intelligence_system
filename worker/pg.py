@@ -23,12 +23,6 @@ IDENTITY_TABLES = {
     "artifacts",
 }
 
-REPLACE_KEYS = {
-    "arxiv_chunk_embeddings": ("arxiv_chunk_id",),
-    "arxiv_paper_embeddings": ("paper_id", "model"),
-    "chunk_embeddings": ("chunk_id",),
-}
-
 TABLE_ORDER = [
     "knowledge_documents",
     "obsidian_notes",
@@ -164,59 +158,7 @@ def connect_postgres(database_url: str) -> PgConnection:
 
 
 def translate_sql(sql: str) -> str:
-    translated = sql.strip()
-    if translated.upper() == "BEGIN IMMEDIATE":
-        return "BEGIN"
-    translated = _translate_insert_or_replace(translated)
-    translated = _translate_insert_or_ignore(translated)
-    translated = _translate_group_concat(translated)
-    return _replace_qmark_placeholders(translated)
-
-
-def _translate_insert_or_ignore(sql: str) -> str:
-    if not re.match(r"(?is)^\s*INSERT\s+OR\s+IGNORE\s+INTO\b", sql):
-        return sql
-    stripped = sql.rstrip().rstrip(";")
-    stripped = re.sub(r"(?is)^\s*INSERT\s+OR\s+IGNORE\s+INTO\b", "INSERT INTO", stripped, count=1)
-    if re.search(r"(?is)\bON\s+CONFLICT\b", stripped):
-        return stripped
-    return f"{stripped} ON CONFLICT DO NOTHING"
-
-
-def _translate_insert_or_replace(sql: str) -> str:
-    match = re.match(
-        r"(?is)^\s*INSERT\s+OR\s+REPLACE\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*)\s*\((.*?)\)\s*VALUES\s*\((.*?)\)\s*;?\s*$",
-        sql,
-    )
-    if not match:
-        return sql
-    table = match.group(1)
-    columns = [column.strip() for column in match.group(2).split(",")]
-    keys = REPLACE_KEYS.get(table)
-    if not keys:
-        return sql
-    updates = [column for column in columns if column not in keys]
-    set_clause = ", ".join(f"{column} = excluded.{column}" for column in updates)
-    conflict = ", ".join(keys)
-    return (
-        f"INSERT INTO {table}({', '.join(columns)}) VALUES ({match.group(3)}) "
-        f"ON CONFLICT({conflict}) DO UPDATE SET {set_clause}"
-    )
-
-
-def _translate_group_concat(sql: str) -> str:
-    sql = re.sub(
-        r"group_concat\s*\(\s*DISTINCT\s+([^)]+?)\s*\)",
-        r"string_agg(DISTINCT \1, ',')",
-        sql,
-        flags=re.IGNORECASE,
-    )
-    return re.sub(
-        r"group_concat\s*\(\s*([^)]+?)\s*\)",
-        r"string_agg(\1, ',')",
-        sql,
-        flags=re.IGNORECASE,
-    )
+    return _replace_qmark_placeholders(sql.strip())
 
 
 def _replace_qmark_placeholders(sql: str) -> str:

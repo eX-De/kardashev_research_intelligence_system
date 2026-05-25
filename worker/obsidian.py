@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-import sqlite3
+from .db_types import DbConnection, DbRow
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -420,7 +420,7 @@ def _project_name_from_center_note(note: ParsedNote) -> str:
 
 
 def _sync_project_from_note(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     note: ParsedNote,
     note_id: int,
     settings: Settings,
@@ -494,7 +494,7 @@ def _sync_project_from_note(
     return True
 
 
-def _sync_project_folder_memberships(conn: sqlite3.Connection) -> int:
+def _sync_project_folder_memberships(conn: DbConnection) -> int:
     projects = conn.execute(
         """
         SELECT id, obsidian_note_id, obsidian_folder
@@ -558,7 +558,7 @@ def _sync_project_folder_memberships(conn: sqlite3.Connection) -> int:
 
 
 def _mirror_note_to_knowledge(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     note: ParsedNote,
     note_id: int,
@@ -585,7 +585,7 @@ def _mirror_note_to_knowledge(
     )
 
 
-def sync_obsidian(conn: sqlite3.Connection, settings: Settings) -> dict[str, object]:
+def sync_obsidian(conn: DbConnection, settings: Settings) -> dict[str, object]:
     remote_stats: dict[str, int] = {}
     if obsidian_remote_enabled(settings):
         if not obsidian_remote_configured(settings):
@@ -628,7 +628,7 @@ def sync_obsidian(conn: sqlite3.Connection, settings: Settings) -> dict[str, obj
                 pass
 
 
-def _sync_obsidian_unlocked(conn: sqlite3.Connection, settings: Settings) -> dict[str, int]:
+def _sync_obsidian_unlocked(conn: DbConnection, settings: Settings) -> dict[str, int]:
     notes = discover_notes(settings)
     indexed = 0
     skipped = 0

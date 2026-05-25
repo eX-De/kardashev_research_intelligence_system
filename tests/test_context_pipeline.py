@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import sqlite3
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from helpers import connect_test_db
 from worker.config import Settings
-from worker.db import from_json, init_db
+from worker.db import from_json
 from worker.knowledge import replace_document_chunks, save_manual_project_context
 from worker.obsidian import OBSIDIAN_NOT_CONFIGURED, sync_obsidian
 from worker.search import hybrid_search, rank_project_papers
@@ -14,7 +14,6 @@ from worker.search import hybrid_search, rank_project_papers
 
 def test_settings() -> Settings:
     return Settings(
-        db_path=Path(":memory:"),
         obsidian_vault_path=None,
         obsidian_include_dirs=[],
         obsidian_include_tags=[],
@@ -39,7 +38,6 @@ def test_settings() -> Settings:
         rag_prefilter_top_k=20,
         rag_prefilter_min_keep=30,
         rag_prefilter_max_keep=50,
-        vector_index_backend="sqlite",
         llm_providers=[],
         llm_chat_provider_id="",
         llm_chat_model="",
@@ -63,7 +61,7 @@ class DummyCursor:
 class RecordingPostgresConnection:
     dialect = "postgres"
 
-    def __init__(self, conn: sqlite3.Connection | None = None):
+    def __init__(self, conn=None):
         self.conn = conn
         self.statements: list[tuple[str, tuple[object, ...]]] = []
 
@@ -87,9 +85,7 @@ class RecordingPostgresConnection:
 
 class ContextPipelineTests(unittest.TestCase):
     def test_sync_obsidian_without_vault_returns_structured_skip(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        init_db(conn)
+        conn = connect_test_db()
 
         result = sync_obsidian(conn, test_settings())
 
@@ -100,9 +96,7 @@ class ContextPipelineTests(unittest.TestCase):
         self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM obsidian_notes").fetchone()["count"], 0)
 
     def test_manual_project_context_without_obsidian_is_retrievable_and_rankable(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        init_db(conn)
+        conn = connect_test_db()
         settings = test_settings()
         conn.execute(
             """
@@ -191,9 +185,7 @@ class ContextPipelineTests(unittest.TestCase):
         self.assertEqual(evidence["project_context"]["document_id"], int(document["id"]))
 
     def test_postgres_document_chunk_refresh_uses_advisory_locks_and_split_deletes(self) -> None:
-        base = sqlite3.connect(":memory:")
-        base.row_factory = sqlite3.Row
-        init_db(base)
+        base = connect_test_db()
         base.execute(
             """
             INSERT INTO obsidian_notes(path, title, frontmatter_json, tags_json, sha256, mtime, indexed_at)

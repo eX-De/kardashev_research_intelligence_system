@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
+from .db_types import DbConnection, DbRow
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -56,7 +56,7 @@ def _report_source_key(paper_id: int) -> str:
     return f"paper_report:{int(paper_id)}"
 
 
-def _paper_report_artifact_row(conn: sqlite3.Connection, paper_id: int) -> sqlite3.Row | None:
+def _paper_report_artifact_row(conn: DbConnection, paper_id: int) -> DbRow | None:
     library_paper_id = paper_id_for_arxiv_paper_id(conn, int(paper_id))
     if library_paper_id is None:
         return None
@@ -81,9 +81,9 @@ def _paper_report_artifact_row(conn: sqlite3.Connection, paper_id: int) -> sqlit
 
 
 def _paper_report_state(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     paper_id: int,
-    row: sqlite3.Row | None = None,
+    row: DbRow | None = None,
 ) -> dict[str, Any] | None:
     paper = conn.execute("SELECT title, arxiv_id, link FROM arxiv_papers WHERE id = ?", (int(paper_id),)).fetchone()
     if not paper:
@@ -125,7 +125,7 @@ def _paper_report_state(
 
 
 def _save_paper_report_state(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     state: dict[str, Any],
     *,
     commit: bool = True,
@@ -171,19 +171,30 @@ def _save_paper_report_state(
 
 
 def _report_rows_for_queue(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     paper_ids: list[int] | tuple[int, ...] | set[int] | None = None,
+    *,
+    status: str | None = None,
+    for_update: bool = False,
 ) -> list[dict[str, Any]]:
+    params: list[Any] = [PAPER_REPORT_ARTIFACT_TYPE]
+    status_clause = ""
+    if status is not None:
+        status_clause = "AND status = ?"
+        params.append(status)
+    lock_clause = "FOR UPDATE SKIP LOCKED" if for_update else ""
     rows = conn.execute(
-        """
+        f"""
         SELECT *
         FROM artifacts
         WHERE scope_type = 'paper'
           AND artifact_type = ?
           AND status != 'removed'
+          {status_clause}
         ORDER BY updated_at DESC, id DESC
+        {lock_clause}
         """,
-        (PAPER_REPORT_ARTIFACT_TYPE,),
+        params,
     ).fetchall()
     selected = None if paper_ids is None else {int(paper_id) for paper_id in paper_ids}
     result: list[dict[str, Any]] = []
@@ -209,7 +220,7 @@ def _report_rows_for_queue(
     return result
 
 
-def _legacy_paper_id_for_library_paper(conn: sqlite3.Connection, library_paper_id: int) -> int | None:
+def _legacy_paper_id_for_library_paper(conn: DbConnection, library_paper_id: int) -> int | None:
     row = conn.execute(
         """
         SELECT ap.id
@@ -225,7 +236,7 @@ def _legacy_paper_id_for_library_paper(conn: sqlite3.Connection, library_paper_i
 
 
 def _source_projects_for_recommended_papers(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     paper_ids: list[int] | tuple[int, ...] | set[int] | None = None,
 ) -> dict[int, list[int]]:
     paper_clause, paper_params = _paper_filter("r", paper_ids)
@@ -248,7 +259,7 @@ def _source_projects_for_recommended_papers(
 
 
 def ensure_paper_reports_for_recommendations(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     paper_ids: list[int] | tuple[int, ...] | set[int] | None = None,
 ) -> dict[str, int]:
     projects_by_paper = _source_projects_for_recommended_papers(conn, paper_ids)
@@ -292,7 +303,7 @@ def ensure_paper_reports_for_recommendations(
     }
 
 
-def sync_paper_report_for_recommendation_state(conn: sqlite3.Connection, paper_id: int) -> dict[str, int]:
+def sync_paper_report_for_recommendation_state(conn: DbConnection, paper_id: int) -> dict[str, int]:
     project_ids = _source_projects_for_recommended_papers(conn, [paper_id]).get(int(paper_id), [])
     state = _paper_report_state(conn, paper_id)
     if not state or not state.get("artifact_id"):
@@ -325,7 +336,7 @@ def _settings_report_prompt(settings: Settings) -> str:
 
 
 def queue_paper_report(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     paper_id: int,
     *,
     force: bool = False,
@@ -387,7 +398,7 @@ def queue_paper_report(
     return {"paper_reports_queued": 0}
 
 
-def paper_report_payload(conn: sqlite3.Connection, paper_id: int) -> dict[str, object] | None:
+def paper_report_payload(conn: DbConnection, paper_id: int) -> dict[str, object] | None:
     state = _paper_report_state(conn, paper_id)
     if not state or not state.get("artifact_id"):
         return None
@@ -411,7 +422,7 @@ def paper_report_payload(conn: sqlite3.Connection, paper_id: int) -> dict[str, o
     }
 
 
-def remove_paper_report_from_queue(conn: sqlite3.Connection, paper_id: int) -> dict[str, int]:
+def remove_paper_report_from_queue(conn: DbConnection, paper_id: int) -> dict[str, int]:
     state = _paper_report_state(conn, paper_id)
     if not state or not state.get("artifact_id"):
         return {"paper_reports_removed": 0}
@@ -429,7 +440,7 @@ def remove_paper_report_from_queue(conn: sqlite3.Connection, paper_id: int) -> d
     return {"artifact_id": artifact_id, "paper_reports_removed": 1}
 
 
-def cancel_paper_report_from_queue(conn: sqlite3.Connection, paper_id: int) -> dict[str, int]:
+def cancel_paper_report_from_queue(conn: DbConnection, paper_id: int) -> dict[str, int]:
     state = _paper_report_state(conn, paper_id)
     if not state or not state.get("artifact_id"):
         raise RuntimeError("Report queue item was not found")
@@ -447,7 +458,7 @@ def cancel_paper_report_from_queue(conn: sqlite3.Connection, paper_id: int) -> d
     return {"paper_reports_cancelled": 0}
 
 
-def _read_existing_text(paper: sqlite3.Row) -> str:
+def _read_existing_text(paper: DbRow) -> str:
     path_text = str(paper["text_path"] or "").strip()
     if not path_text:
         return ""
@@ -457,7 +468,7 @@ def _read_existing_text(paper: sqlite3.Row) -> str:
     return clean_unicode(path.read_text(encoding="utf-8", errors="ignore")).strip()
 
 
-def _ensure_full_text(conn: sqlite3.Connection, settings: Settings, paper_id: int) -> str:
+def _ensure_full_text(conn: DbConnection, settings: Settings, paper_id: int) -> str:
     paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
     if not paper:
         raise RuntimeError(f"Paper not found: {paper_id}")
@@ -532,7 +543,7 @@ def _parse_report_generation_response(raw_text: str, fallback_title: str) -> tup
     return title or fallback_title, markdown
 
 
-def mirror_paper_report_artifact(conn: sqlite3.Connection, paper_id: int) -> dict[str, object] | None:
+def mirror_paper_report_artifact(conn: DbConnection, paper_id: int) -> dict[str, object] | None:
     state = _paper_report_state(conn, paper_id)
     if not state or state.get("status") != "done":
         return None
@@ -657,12 +668,12 @@ def _iter_chat_text_chunks(
 
 
 def _claim_queued_report(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     paper_ids: list[int] | tuple[int, ...] | set[int] | None,
 ) -> int | None:
-    if getattr(conn, "dialect", "") == "postgres":
+    try:
         conn.execute("BEGIN")
-        queued = [row for row in _report_rows_for_queue(conn, paper_ids) if row.get("status") == "queued"]
+        queued = _report_rows_for_queue(conn, paper_ids, status="queued", for_update=True)
         if not queued:
             conn.commit()
             return None
@@ -673,40 +684,24 @@ def _claim_queued_report(
         _save_paper_report_state(conn, state, commit=False)
         conn.commit()
         return int(state["paper_id"])
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-    except sqlite3.OperationalError as exc:
-        if "within a transaction" in str(exc).lower():
-            conn.commit()
-            conn.execute("BEGIN IMMEDIATE")
-        else:
-            raise
-    queued = [row for row in _report_rows_for_queue(conn, paper_ids) if row.get("status") == "queued"]
-    if not queued:
-        conn.commit()
-        return None
-    state = queued[0]
-    state["status"] = "processing"
-    state["error_message"] = ""
-    state["started_at"] = utc_now()
-    _save_paper_report_state(conn, state, commit=False)
-    conn.commit()
-    return int(state["paper_id"])
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def _queued_rows(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     paper_ids: list[int] | tuple[int, ...] | set[int] | None,
     limit: int | None,
-) -> list[sqlite3.Row]:
-    rows = [row for row in _report_rows_for_queue(conn, paper_ids) if row.get("status") == "queued"]
+) -> list[DbRow]:
+    rows = _report_rows_for_queue(conn, paper_ids, status="queued")
     if limit:
         rows = rows[: int(limit)]
     return rows  # type: ignore[return-value]
 
 
 def process_paper_report_queue(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     paper_ids: list[int] | tuple[int, ...] | set[int] | None = None,
     limit: int | None = None,
@@ -800,7 +795,7 @@ def process_paper_report_queue(
 
 
 def ensure_report_ready_for_paper(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     paper_id: int,
 ) -> dict[str, object]:

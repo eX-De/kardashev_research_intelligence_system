@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import sqlite3
+from .db_types import DbConnection, DbRow
 import time
 import urllib.error
 import urllib.parse
@@ -126,7 +126,7 @@ def _is_recent(paper: ArxivPaper, lookback_days: int) -> bool:
     return published >= cutoff
 
 
-def fetch_arxiv(conn: sqlite3.Connection, settings: Settings) -> dict[str, int | str]:
+def fetch_arxiv(conn: DbConnection, settings: Settings) -> dict[str, int | str]:
     if not settings.arxiv_categories:
         raise RuntimeError("ARXIV_CATEGORIES is empty")
 
@@ -180,11 +180,12 @@ def fetch_arxiv(conn: sqlite3.Connection, settings: Settings) -> dict[str, int |
                 continue
             cur = conn.execute(
                 """
-                INSERT OR IGNORE INTO arxiv_papers(
+                INSERT INTO arxiv_papers(
                   arxiv_id, title, authors_json, summary, categories_json,
                   published_at, updated_at, link, pdf_link, fetched_batch_id, created_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(arxiv_id) DO NOTHING
                 """,
                 (
                     paper.arxiv_id,

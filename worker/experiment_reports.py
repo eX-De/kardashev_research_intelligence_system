@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import sqlite3
+from .db_types import DbConnection, DbRow
 from typing import Any
 
 from .artifacts import (
@@ -65,7 +65,7 @@ def _source_agent(payload: dict[str, object]) -> str:
     return value
 
 
-def _project_row(conn: sqlite3.Connection, project_id: int) -> sqlite3.Row:
+def _project_row(conn: DbConnection, project_id: int) -> DbRow:
     row = conn.execute(
         """
         SELECT id, name, obsidian_project_path, obsidian_folder, obsidian_output_dir
@@ -88,7 +88,7 @@ def _export_status(status: str, **values: object) -> dict[str, object]:
 
 
 def create_experiment_report(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     payload: dict[str, object] | None,
 ) -> dict[str, object]:

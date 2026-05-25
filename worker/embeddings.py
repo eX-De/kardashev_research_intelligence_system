@@ -6,7 +6,7 @@ import math
 import urllib.error
 import urllib.request
 from typing import Callable, Iterable
-import sqlite3
+from .db_types import DbConnection, DbRow
 
 from .config import Settings
 from .db import from_json, to_json, utc_now
@@ -78,7 +78,7 @@ def _embedding_concurrency(settings: Settings, item_count: int | None = None) ->
 
 
 def ensure_arxiv_chunk_embedding(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     arxiv_chunk_id: int,
     text: str,
@@ -102,8 +102,12 @@ def ensure_arxiv_chunk_embedding(
         return None
     conn.execute(
         """
-        INSERT OR REPLACE INTO arxiv_chunk_embeddings(arxiv_chunk_id, model, embedding_json, created_at)
+        INSERT INTO arxiv_chunk_embeddings(arxiv_chunk_id, model, embedding_json, created_at)
         VALUES (?, ?, ?, ?)
+        ON CONFLICT(arxiv_chunk_id) DO UPDATE SET
+            model = excluded.model,
+            embedding_json = excluded.embedding_json,
+            created_at = excluded.created_at
         """,
         (arxiv_chunk_id, settings.llm_embedding_model, to_json(embedding), utc_now()),
     )
@@ -112,7 +116,7 @@ def ensure_arxiv_chunk_embedding(
 
 
 def ensure_missing_arxiv_chunk_embeddings(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     limit: int | None = None,
     paper_ids: list[int] | tuple[int, ...] | set[int] | None = None,
@@ -158,15 +162,19 @@ def ensure_missing_arxiv_chunk_embeddings(
             }
         )
 
-    def store_embedding(row: sqlite3.Row, embedding: list[float] | None) -> None:
+    def store_embedding(row: DbRow, embedding: list[float] | None) -> None:
         nonlocal created, skipped
         if embedding is None:
             skipped += 1
             return
         conn.execute(
             """
-            INSERT OR REPLACE INTO arxiv_chunk_embeddings(arxiv_chunk_id, model, embedding_json, created_at)
+            INSERT INTO arxiv_chunk_embeddings(arxiv_chunk_id, model, embedding_json, created_at)
             VALUES (?, ?, ?, ?)
+            ON CONFLICT(arxiv_chunk_id) DO UPDATE SET
+                model = excluded.model,
+                embedding_json = excluded.embedding_json,
+                created_at = excluded.created_at
             """,
             (int(row["id"]), settings.llm_embedding_model, to_json(embedding), utc_now()),
         )
@@ -194,9 +202,9 @@ def ensure_missing_arxiv_chunk_embeddings(
 
 
 def ensure_arxiv_paper_embedding(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
-    paper: sqlite3.Row,
+    paper: DbRow,
 ) -> list[float] | None:
     if not settings.llm_embedding_model:
         return None
@@ -218,8 +226,11 @@ def ensure_arxiv_paper_embedding(
         return None
     conn.execute(
         """
-        INSERT OR REPLACE INTO arxiv_paper_embeddings(paper_id, model, embedding_json, created_at)
+        INSERT INTO arxiv_paper_embeddings(paper_id, model, embedding_json, created_at)
         VALUES (?, ?, ?, ?)
+        ON CONFLICT(paper_id, model) DO UPDATE SET
+            embedding_json = excluded.embedding_json,
+            created_at = excluded.created_at
         """,
         (int(paper["id"]), settings.llm_embedding_model, to_json(embedding), utc_now()),
     )
@@ -228,9 +239,9 @@ def ensure_arxiv_paper_embedding(
 
 
 def ensure_arxiv_paper_embeddings(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
-    papers: list[sqlite3.Row],
+    papers: list[DbRow],
 ) -> dict[int, list[float] | None]:
     if not settings.llm_embedding_model:
         return {int(paper["id"]): None for paper in papers}
@@ -262,18 +273,21 @@ def ensure_arxiv_paper_embeddings(
     ]
     concurrency = _embedding_concurrency(settings, len(missing))
 
-    def paper_text(paper: sqlite3.Row) -> str:
+    def paper_text(paper: DbRow) -> str:
         return f"{paper['title']}\n\n{paper['summary']}"
 
-    def store_embedding(paper: sqlite3.Row, embedding: list[float] | None) -> None:
+    def store_embedding(paper: DbRow, embedding: list[float] | None) -> None:
         paper_id = int(paper["id"])
         embeddings[paper_id] = embedding
         if embedding is None:
             return
         conn.execute(
             """
-            INSERT OR REPLACE INTO arxiv_paper_embeddings(paper_id, model, embedding_json, created_at)
+            INSERT INTO arxiv_paper_embeddings(paper_id, model, embedding_json, created_at)
             VALUES (?, ?, ?, ?)
+            ON CONFLICT(paper_id, model) DO UPDATE SET
+                embedding_json = excluded.embedding_json,
+                created_at = excluded.created_at
             """,
             (paper_id, settings.llm_embedding_model, to_json(embedding), utc_now()),
         )
@@ -297,7 +311,7 @@ def ensure_arxiv_paper_embeddings(
 
 
 def ensure_missing_note_chunk_embeddings(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     limit: int | None = None,
 ) -> dict[str, int]:
@@ -320,15 +334,19 @@ def ensure_missing_note_chunk_embeddings(
     skipped = 0
     concurrency = _embedding_concurrency(settings, len(rows))
 
-    def store_embedding(row: sqlite3.Row, embedding: list[float] | None) -> None:
+    def store_embedding(row: DbRow, embedding: list[float] | None) -> None:
         nonlocal created, skipped
         if embedding is None:
             skipped += 1
             return
         conn.execute(
             """
-            INSERT OR REPLACE INTO chunk_embeddings(chunk_id, model, embedding_json, created_at)
+            INSERT INTO chunk_embeddings(chunk_id, model, embedding_json, created_at)
             VALUES (?, ?, ?, ?)
+            ON CONFLICT(chunk_id) DO UPDATE SET
+                model = excluded.model,
+                embedding_json = excluded.embedding_json,
+                created_at = excluded.created_at
             """,
             (int(row["id"]), settings.llm_embedding_model, to_json(embedding), utc_now()),
         )

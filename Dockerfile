@@ -20,7 +20,6 @@ ENV NODE_ENV=production \
     PYTHONUTF8=1 \
     PATH="/opt/venv/bin:${PATH}" \
     PYTHON_BIN=/opt/venv/bin/python \
-    APP_DB_PATH=/data/research_intelligence.sqlite \
     ARXIV_PDF_DIR=/data/arxiv_pdfs \
     ARXIV_TEXT_DIR=/data/arxiv_text
 

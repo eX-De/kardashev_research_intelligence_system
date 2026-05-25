@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-import sqlite3
+from .db_types import DbConnection, DbRow
 import time
 import urllib.error
 import urllib.request
@@ -25,7 +25,7 @@ def safe_arxiv_filename(arxiv_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", arxiv_id).strip("_")
 
 
-def pdf_url(row: sqlite3.Row) -> str:
+def pdf_url(row: DbRow) -> str:
     if row["pdf_link"]:
         return str(row["pdf_link"])
     return f"https://arxiv.org/pdf/{row['arxiv_id']}"
@@ -137,8 +137,8 @@ def chunk_text(
 
 
 def replace_arxiv_chunks_for_paper(
-    conn: sqlite3.Connection,
-    paper: sqlite3.Row,
+    conn: DbConnection,
+    paper: DbRow,
     text: str | None = None,
 ) -> int:
     conn.execute("DELETE FROM arxiv_text_chunks WHERE paper_id = ?", (int(paper["id"]),))
@@ -198,7 +198,7 @@ def replace_arxiv_chunks_for_paper(
 
 
 def ensure_arxiv_chunks(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     limit: int | None = None,
     paper_ids: list[int] | tuple[int, ...] | set[int] | None = None,
 ) -> dict[str, int]:
@@ -232,7 +232,7 @@ def ensure_arxiv_chunks(
 
 
 def cache_arxiv_full_texts(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     limit: int | None = None,
     paper_ids: list[int] | tuple[int, ...] | set[int] | None = None,
@@ -382,7 +382,7 @@ def cache_arxiv_full_texts(
     }
 
 
-def paper_full_text_excerpt(row: sqlite3.Row, max_chars: int = 12000) -> str:
+def paper_full_text_excerpt(row: DbRow, max_chars: int = 12000) -> str:
     text_path = row["text_path"] if "text_path" in row.keys() else ""
     if not text_path:
         return ""

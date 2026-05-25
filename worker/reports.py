@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-import sqlite3
+from .db_types import DbConnection, DbRow
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -87,10 +87,10 @@ def _daily_report_relative_path(report_date: str) -> str:
 
 
 def _project_match_rows(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     paper_ids: list[int] | None,
     limit: int,
-) -> list[sqlite3.Row]:
+) -> list[DbRow]:
     where, params = _paper_filter(
         paper_ids,
         "p",
@@ -154,10 +154,10 @@ def _project_match_rows(
 
 
 def _global_match_rows(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     paper_ids: list[int] | None,
     limit: int,
-) -> list[sqlite3.Row]:
+) -> list[DbRow]:
     return []
 
 
@@ -208,7 +208,7 @@ def _normalize_llm_markdown(value: object, report_date: str) -> str:
     return clean_unicode(body.rstrip() + "\n")
 
 
-def _project_payload(row: sqlite3.Row) -> dict[str, object]:
+def _project_payload(row: DbRow) -> dict[str, object]:
     return {
         "project": row["project_name"],
         "project_status": row["project_status"],
@@ -232,7 +232,7 @@ def _project_payload(row: sqlite3.Row) -> dict[str, object]:
     }
 
 
-def _global_payload(row: sqlite3.Row) -> dict[str, object]:
+def _global_payload(row: DbRow) -> dict[str, object]:
     return {
         "arxiv_id": row["arxiv_id"],
         "title": row["paper_title"],
@@ -247,8 +247,8 @@ def _report_source_payload(
     report_date: str,
     rel_path: str,
     stats: dict[str, Any],
-    project_rows: list[sqlite3.Row],
-    global_rows: list[sqlite3.Row],
+    project_rows: list[DbRow],
+    global_rows: list[DbRow],
 ) -> dict[str, object]:
     project_paper_ids = {int(row["paper_id"]) for row in project_rows}
     global_payload = [
@@ -321,8 +321,8 @@ def _llm_daily_report_markdown(
     report_date: str,
     rel_path: str,
     stats: dict[str, Any],
-    project_rows: list[sqlite3.Row],
-    global_rows: list[sqlite3.Row],
+    project_rows: list[DbRow],
+    global_rows: list[DbRow],
 ) -> str:
     provider = settings.chat_provider()
     if not provider or not provider.api_key or not provider.base_url or not settings.llm_chat_model:
@@ -343,7 +343,7 @@ def _llm_daily_report_markdown(
 
 
 def generate_daily_report(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     stats: dict[str, Any] | None = None,
     paper_ids: list[int] | None = None,

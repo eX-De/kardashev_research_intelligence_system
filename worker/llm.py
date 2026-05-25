@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
+from .db_types import DbConnection, DbRow
 import urllib.error
 import urllib.request
 from typing import Any
@@ -69,7 +69,7 @@ def _suggested_action(value: object) -> str:
     return action if action in PROJECT_JUDGMENT_ACTIONS else "ignore"
 
 
-def judgment_passes_report_filter(row_or_mapping: sqlite3.Row | dict[str, object]) -> bool:
+def judgment_passes_report_filter(row_or_mapping: DbRow | dict[str, object]) -> bool:
     relation = _relation_type(row_or_mapping["relation_type"])
     action = _suggested_action(row_or_mapping["suggested_action"])
     return (
@@ -136,7 +136,7 @@ def _paper_filter_clause(paper_ids: list[int] | None) -> tuple[str, list[Any]]:
     return f"AND ppm.paper_id IN ({placeholders})", [*paper_ids]
 
 
-def _judgment_payload(row: sqlite3.Row) -> dict[str, object]:
+def _judgment_payload(row: DbRow) -> dict[str, object]:
     evidence = from_json(row["evidence_json"], {})
     return {
         "project": {
@@ -231,10 +231,10 @@ def _normalize_judgment(response: dict[str, object], fallback_quality: float) ->
 
 
 def _candidate_rows(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     paper_ids: list[int] | None,
     per_project_limit: int,
-) -> list[sqlite3.Row]:
+) -> list[DbRow]:
     paper_filter, paper_params = _paper_filter_clause(paper_ids)
     rows = conn.execute(
         f"""
@@ -280,7 +280,7 @@ def _candidate_rows(
         """,
         (PROJECT_JUDGMENT_CANDIDATE_QUALITY_THRESHOLD, *paper_params),
     ).fetchall()
-    kept: list[sqlite3.Row] = []
+    kept: list[DbRow] = []
     per_project_counts: dict[int, int] = {}
     for row in rows:
         project_id = int(row["project_id"])
@@ -293,7 +293,7 @@ def _candidate_rows(
 
 
 def generate_missing_project_judgments(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     paper_ids: list[int] | None = None,
     per_project_limit: int = PROJECT_JUDGMENT_PER_PROJECT_LIMIT,

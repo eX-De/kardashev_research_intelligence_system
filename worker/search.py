@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-import sqlite3
+from .db_types import DbConnection, DbRow
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -72,9 +72,9 @@ def _chunk_id_set(chunk_ids: set[int] | list[int] | tuple[int, ...] | None) -> s
 
 
 def _chunks(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     chunk_ids: set[int] | list[int] | tuple[int, ...] | None = None,
-) -> list[sqlite3.Row]:
+) -> list[DbRow]:
     rows = conn.execute(
         """
         SELECT
@@ -101,7 +101,7 @@ def _chunks(
 
 
 def keyword_search(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     query: str,
     chunk_ids: set[int] | list[int] | tuple[int, ...] | None = None,
 ) -> list[SearchHit]:
@@ -120,7 +120,7 @@ def keyword_search(
 
 
 def front_page_search(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     query: str,
     chunk_ids: set[int] | list[int] | tuple[int, ...] | None = None,
 ) -> list[SearchHit]:
@@ -142,7 +142,7 @@ def front_page_search(
 
 
 def embedding_search(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     query: str,
     chunk_ids: set[int] | list[int] | tuple[int, ...] | None = None,
@@ -154,7 +154,7 @@ def embedding_search(
 
 
 def embedding_search_with_vector(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     query_embedding: list[float],
     chunk_ids: set[int] | list[int] | tuple[int, ...] | None = None,
 ) -> list[SearchHit]:
@@ -203,12 +203,12 @@ def _fuse_search_hits(searcher_hits: list[list[SearchHit]], top_k: int) -> list[
     ]
 
 
-def hybrid_search(conn: sqlite3.Connection, settings: Settings, query: str, top_k: int) -> list[dict[str, object]]:
+def hybrid_search(conn: DbConnection, settings: Settings, query: str, top_k: int) -> list[dict[str, object]]:
     return hybrid_search_with_embedding(conn, settings, query, top_k, None)
 
 
 def hybrid_search_with_embedding(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     query: str,
     top_k: int,
@@ -260,7 +260,7 @@ def _cached_front_page_search(cache: ProjectMatchCache, query: str) -> list[Sear
 
 
 def _project_embedding_search_with_vector(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     query_embedding: list[float] | None,
     chunk_ids: set[int] | frozenset[int],
     top_k: int,
@@ -283,7 +283,7 @@ def _project_embedding_search_with_vector(
 
 
 def _hybrid_search_project_cache(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     query: str,
     top_k: int,
@@ -307,7 +307,7 @@ def _hybrid_search_project_cache(
     return _fuse_search_hits(searcher_hits, top_k)
 
 
-def _project_chunk_ids(conn: sqlite3.Connection, project_id: int) -> set[int]:
+def _project_chunk_ids(conn: DbConnection, project_id: int) -> set[int]:
     rows = conn.execute(
         """
         SELECT c.id
@@ -325,7 +325,7 @@ def _project_chunk_ids(conn: sqlite3.Connection, project_id: int) -> set[int]:
     return {int(row["id"]) for row in rows}
 
 
-def _project_chunks_by_id(conn: sqlite3.Connection, project_id: int) -> dict[int, sqlite3.Row]:
+def _project_chunks_by_id(conn: DbConnection, project_id: int) -> dict[int, DbRow]:
     rows = conn.execute(
         """
         SELECT
@@ -387,7 +387,7 @@ def _retrieval_quality_score(details: list[dict[str, object]]) -> float:
     return max(0.0, min(1.0, score))
 
 
-def _generic_project_chunk_penalty(chunk: sqlite3.Row | None) -> float:
+def _generic_project_chunk_penalty(chunk: DbRow | None) -> float:
     if not chunk:
         return 0.0
     heading = str(chunk["heading"] or "").strip().lower()
@@ -423,7 +423,7 @@ def _project_match_evidence(hit: dict[str, object]) -> dict[str, object]:
     }
 
 
-def _project_context_evidence(chunk: sqlite3.Row | None) -> dict[str, object]:
+def _project_context_evidence(chunk: DbRow | None) -> dict[str, object]:
     if not chunk:
         return {}
     return {
@@ -439,10 +439,10 @@ def _project_context_evidence(chunk: sqlite3.Row | None) -> dict[str, object]:
 
 
 def prefilter_papers(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
-    papers: list[sqlite3.Row],
-) -> tuple[list[sqlite3.Row], dict[str, int]]:
+    papers: list[DbRow],
+) -> tuple[list[DbRow], dict[str, int]]:
     if not settings.rag_prefilter_enabled or "embedding_search" not in settings.rag_searchers:
         max_keep = max(0, settings.rag_prefilter_max_keep)
         selected = papers[:max_keep] if max_keep else papers
@@ -454,7 +454,7 @@ def prefilter_papers(
             "prefilter_capped": 1 if max_keep and len(papers) > max_keep else 0,
         }
 
-    scored: list[tuple[sqlite3.Row, float, list[dict[str, object]]]] = []
+    scored: list[tuple[DbRow, float, list[dict[str, object]]]] = []
     fallback = False
     paper_embeddings = ensure_arxiv_paper_embeddings(conn, settings, papers)
     for paper in papers:
@@ -485,7 +485,7 @@ def prefilter_papers(
         }
 
     scored.sort(key=lambda item: item[1], reverse=True)
-    selected: list[sqlite3.Row] = []
+    selected: list[DbRow] = []
     now = utc_now()
     min_keep = max(0, settings.rag_prefilter_min_keep)
     max_keep = max(0, settings.rag_prefilter_max_keep)
@@ -529,7 +529,7 @@ def prefilter_papers(
     }
 
 
-def unmatched_papers(conn: sqlite3.Connection, limit: int | None = None) -> list[sqlite3.Row]:
+def unmatched_papers(conn: DbConnection, limit: int | None = None) -> list[DbRow]:
     sql = """
         SELECT p.*
         FROM arxiv_papers p
@@ -545,7 +545,7 @@ def unmatched_papers(conn: sqlite3.Connection, limit: int | None = None) -> list
     return conn.execute(sql, params).fetchall()
 
 
-def recent_papers(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
+def recent_papers(conn: DbConnection, limit: int) -> list[DbRow]:
     return conn.execute(
         """
         SELECT p.*
@@ -558,16 +558,16 @@ def recent_papers(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
 
 
 def prefilter_recent_papers(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
-) -> tuple[list[sqlite3.Row], dict[str, int]]:
+) -> tuple[list[DbRow], dict[str, int]]:
     return prefilter_papers(conn, settings, recent_papers(conn, settings.arxiv_max_results))
 
 
 def rank_unmatched_papers(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
-    papers: list[sqlite3.Row] | None = None,
+    papers: list[DbRow] | None = None,
     prefilter_result: dict[str, int] | None = None,
 ) -> dict[str, int]:
     if papers is None:
@@ -687,9 +687,9 @@ def rank_unmatched_papers(
 
 
 def rank_project_papers(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
-    papers: list[sqlite3.Row] | None = None,
+    papers: list[DbRow] | None = None,
 ) -> dict[str, int]:
     if papers is None:
         papers, _ = prefilter_recent_papers(conn, settings)

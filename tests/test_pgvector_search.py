@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlite3
 import unittest
 
 from worker.pgvector_search import ensure_pgvector_indexes, pgvector_embedding_search
@@ -65,10 +64,7 @@ class FakePostgresConnection:
 
 
 class PgvectorSearchTests(unittest.TestCase):
-    def test_search_returns_empty_for_non_postgres_or_empty_scope(self) -> None:
-        sqlite_conn = sqlite3.connect(":memory:")
-        self.assertEqual(pgvector_embedding_search(sqlite_conn, [0.1, 0.2], [1], 5), [])
-
+    def test_search_returns_empty_for_empty_scope(self) -> None:
         conn = FakePostgresConnection()
         self.assertEqual(pgvector_embedding_search(conn, [0.1, 0.2], [], 5), [])
         self.assertEqual(conn.statements, [])
@@ -133,12 +129,6 @@ class PgvectorSearchTests(unittest.TestCase):
         self.assertTrue(any("jsonb_array_length" in sql for sql in statements))
         self.assertTrue(any("TYPE vector(3)" in sql for sql in statements))
         self.assertTrue(any("USING ivfflat" in sql for sql in statements))
-
-    def test_ensure_pgvector_indexes_returns_unsupported_for_non_postgres(self) -> None:
-        result = ensure_pgvector_indexes(sqlite3.connect(":memory:"), dimensions=3)
-
-        self.assertEqual(result["supported"], False)
-        self.assertEqual(result["reason"], "non_postgres")
 
 
 if __name__ == "__main__":

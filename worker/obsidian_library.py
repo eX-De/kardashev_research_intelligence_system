@@ -1,7 +1,7 @@
 import json
 import re
 import shutil
-import sqlite3
+from .db_types import DbConnection, DbRow
 from pathlib import Path
 from typing import Any
 
@@ -178,7 +178,7 @@ def _relative_attachment_link(repo_rel: str, attachment_rel: str) -> str:
         return attachment.as_posix()
 
 
-def _paper_note_path(vault: Path, settings: Settings, paper: sqlite3.Row) -> tuple[Path, str]:
+def _paper_note_path(vault: Path, settings: Settings, paper: DbRow) -> tuple[Path, str]:
     repo_rel = _clean_rel(settings.obsidian_paper_repository_dir)
     if not repo_rel:
         raise RuntimeError("Obsidian paper repository dir is not configured")
@@ -202,7 +202,7 @@ def _paper_note_path(vault: Path, settings: Settings, paper: sqlite3.Row) -> tup
     return path, path.relative_to(vault).as_posix()
 
 
-def _copy_attachment(vault: Path, settings: Settings, paper: sqlite3.Row) -> str:
+def _copy_attachment(vault: Path, settings: Settings, paper: DbRow) -> str:
     source_text = str(paper["pdf_path"] or "").strip()
     if not source_text:
         return ""
@@ -225,7 +225,7 @@ def _copy_attachment(vault: Path, settings: Settings, paper: sqlite3.Row) -> str
     return target.relative_to(vault).as_posix()
 
 
-def _project_link(row: sqlite3.Row) -> str:
+def _project_link(row: DbRow) -> str:
     path = _clean_rel(row["obsidian_project_path"])
     if not path:
         folder = _clean_rel(row["obsidian_folder"] or row["obsidian_output_dir"])
@@ -236,7 +236,7 @@ def _project_link(row: sqlite3.Row) -> str:
     return clean_unicode(str(row["project_name"]))
 
 
-def _project_block(rows: list[sqlite3.Row]) -> str:
+def _project_block(rows: list[DbRow]) -> str:
     lines = [PROJECTS_START]
     for row in rows:
         reason = clean_unicode(str(row["reason"] or "")).strip()
@@ -253,9 +253,9 @@ def _reading_report_block(markdown: str) -> str:
 
 
 def _paper_body(
-    paper: sqlite3.Row,
+    paper: DbRow,
     existing_body: str,
-    rows: list[sqlite3.Row],
+    rows: list[DbRow],
     report_markdown: str = "",
 ) -> str:
     body = existing_body.strip()
@@ -280,8 +280,8 @@ def _paper_body(
 
 def _update_frontmatter(
     frontmatter: dict[str, object],
-    paper: sqlite3.Row,
-    rows: list[sqlite3.Row],
+    paper: DbRow,
+    rows: list[DbRow],
     attachment_rel: str,
     repo_rel: str,
 ) -> dict[str, object]:
@@ -318,7 +318,7 @@ def _update_frontmatter(
     return updated
 
 
-def _accepted_rows_for_paper(conn: sqlite3.Connection, paper_id: int) -> list[sqlite3.Row]:
+def _accepted_rows_for_paper(conn: DbConnection, paper_id: int) -> list[DbRow]:
     return conn.execute(
         """
         SELECT
@@ -339,7 +339,7 @@ def _accepted_rows_for_paper(conn: sqlite3.Connection, paper_id: int) -> list[sq
     ).fetchall()
 
 
-def _reading_report_for_paper(conn: sqlite3.Connection, paper_id: int) -> str:
+def _reading_report_for_paper(conn: DbConnection, paper_id: int) -> str:
     scope_ids: list[int] = []
     library_paper_id = paper_id_for_arxiv_paper_id(conn, paper_id)
     if library_paper_id is not None:
@@ -365,7 +365,7 @@ def _reading_report_for_paper(conn: sqlite3.Connection, paper_id: int) -> str:
 
 
 def export_system_artifact_to_obsidian(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     artifact_id: int,
     *,
@@ -374,7 +374,7 @@ def export_system_artifact_to_obsidian(
     return export_artifact_to_obsidian(conn, settings, artifact_id, relative_path=relative_path)
 
 
-def _accepted_rows_for_project(conn: sqlite3.Connection, project_id: int) -> list[sqlite3.Row]:
+def _accepted_rows_for_project(conn: DbConnection, project_id: int) -> list[DbRow]:
     return conn.execute(
         """
         SELECT
@@ -396,7 +396,7 @@ def _accepted_rows_for_project(conn: sqlite3.Connection, project_id: int) -> lis
     ).fetchall()
 
 
-def _project_paper_list_path(vault: Path, settings: Settings, project_id: int, conn: sqlite3.Connection) -> tuple[Path, str]:
+def _project_paper_list_path(vault: Path, settings: Settings, project_id: int, conn: DbConnection) -> tuple[Path, str]:
     project = conn.execute(
         """
         SELECT name, obsidian_project_path, obsidian_folder, obsidian_output_dir
@@ -427,7 +427,7 @@ def _md_cell(value: object) -> str:
     return clean_unicode(str(value or "")).replace("|", "\\|").replace("\n", " ").strip()
 
 
-def _project_papers_block(rows: list[sqlite3.Row]) -> str:
+def _project_papers_block(rows: list[DbRow]) -> str:
     lines = [
         PAPERS_START,
         "| 重要性 | 关系 | 论文 | 推荐理由 |",
@@ -446,7 +446,7 @@ def _project_papers_block(rows: list[sqlite3.Row]) -> str:
 
 
 def _sync_project_paper_list(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     vault: Path,
     project_id: int,
@@ -463,7 +463,7 @@ def _sync_project_paper_list(
 
 
 def sync_accepted_paper_to_obsidian(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     paper_id: int,
 ) -> dict[str, object]:

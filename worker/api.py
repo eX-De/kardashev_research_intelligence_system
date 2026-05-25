@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-import sqlite3
+from .db_types import DbConnection, DbRow
 from pathlib import Path
 
 from .db import clean_unicode, database_target, from_json, to_json, utc_now
@@ -91,25 +91,11 @@ def _automation_payload(value: object) -> dict[str, bool]:
     }
 
 
-def _row_value(row: sqlite3.Row, key: str, default: object = "") -> object:
+def _row_value(row: DbRow, key: str, default: object = "") -> object:
     if key not in row.keys():
         return default
     value = row[key]
     return default if value is None else clean_unicode(value)
-
-
-def _group_concat_values(value: object) -> list[str]:
-    return [item for item in str(value or "").split(",") if item]
-
-
-def _group_concat_ints(value: object) -> list[int]:
-    ids: list[int] = []
-    for item in _group_concat_values(value):
-        try:
-            ids.append(int(item))
-        except ValueError:
-            continue
-    return ids
 
 
 def _dedupe_list(values: list[object]) -> list[object]:
@@ -124,7 +110,7 @@ def _dedupe_list(values: list[object]) -> list[object]:
     return result
 
 
-def _project_names_for_ids(conn: sqlite3.Connection, project_ids: list[int]) -> list[str]:
+def _project_names_for_ids(conn: DbConnection, project_ids: list[int]) -> list[str]:
     ids = []
     for project_id in project_ids:
         try:
@@ -144,7 +130,7 @@ def _project_names_for_ids(conn: sqlite3.Connection, project_ids: list[int]) -> 
     return [names_by_id[project_id] for project_id in ids if names_by_id.get(project_id)]
 
 
-def _project_context_payload(conn: sqlite3.Connection, project_id: int) -> list[dict[str, object]]:
+def _project_context_payload(conn: DbConnection, project_id: int) -> list[dict[str, object]]:
     rows = conn.execute(
         """
         SELECT
@@ -185,7 +171,7 @@ def _project_context_payload(conn: sqlite3.Connection, project_id: int) -> list[
     ]
 
 
-def _project_row(row: sqlite3.Row) -> dict[str, object]:
+def _project_row(row: DbRow) -> dict[str, object]:
     automation = {
         **DEFAULT_PROJECT_AUTOMATION,
         **from_json(str(_row_value(row, "automation_json", "{}")), {}),
@@ -215,7 +201,7 @@ def _project_row(row: sqlite3.Row) -> dict[str, object]:
     }
 
 
-def projects(conn: sqlite3.Connection) -> dict[str, object]:
+def projects(conn: DbConnection) -> dict[str, object]:
     rows = conn.execute(
         """
         SELECT
@@ -248,7 +234,7 @@ def projects(conn: sqlite3.Connection) -> dict[str, object]:
     return {"items": [_project_row(row) for row in rows]}
 
 
-def project_detail(conn: sqlite3.Connection, project_id: int) -> dict[str, object]:
+def project_detail(conn: DbConnection, project_id: int) -> dict[str, object]:
     row = conn.execute(
         """
         SELECT
@@ -520,7 +506,7 @@ def _sync_project_status_to_obsidian(
 
 
 def save_project(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     payload: dict[str, object],
     settings: Settings | None = None,
 ) -> dict[str, object]:
@@ -731,7 +717,7 @@ def _project_markdown(detail: dict[str, object]) -> str:
 
 
 def export_project_to_obsidian(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     project_id: int,
 ) -> dict[str, object]:
@@ -755,7 +741,7 @@ def _relation(value: object, allowed: set[str], default: str) -> str:
     return relation
 
 
-def link_project_paper(conn: sqlite3.Connection, project_id: int, payload: dict[str, object]) -> dict[str, object]:
+def link_project_paper(conn: DbConnection, project_id: int, payload: dict[str, object]) -> dict[str, object]:
     paper_id = int(payload.get("paper_id") or 0)
     if not paper_id:
         raise RuntimeError("paper_id is required")
@@ -783,7 +769,7 @@ def link_project_paper(conn: sqlite3.Connection, project_id: int, payload: dict[
     return project_detail(conn, project_id)
 
 
-def unlink_project_paper(conn: sqlite3.Connection, project_id: int, paper_id: int) -> dict[str, object]:
+def unlink_project_paper(conn: DbConnection, project_id: int, paper_id: int) -> dict[str, object]:
     conn.execute(
         "DELETE FROM project_papers WHERE project_id = ? AND paper_id = ?",
         (project_id, paper_id),
@@ -792,7 +778,7 @@ def unlink_project_paper(conn: sqlite3.Connection, project_id: int, paper_id: in
     return project_detail(conn, project_id)
 
 
-def link_project_note(conn: sqlite3.Connection, project_id: int, payload: dict[str, object]) -> dict[str, object]:
+def link_project_note(conn: DbConnection, project_id: int, payload: dict[str, object]) -> dict[str, object]:
     note_id = int(payload.get("note_id") or 0)
     if not note_id:
         raise RuntimeError("note_id is required")
@@ -814,7 +800,7 @@ def link_project_note(conn: sqlite3.Connection, project_id: int, payload: dict[s
     return project_detail(conn, project_id)
 
 
-def unlink_project_note(conn: sqlite3.Connection, project_id: int, note_id: int) -> dict[str, object]:
+def unlink_project_note(conn: DbConnection, project_id: int, note_id: int) -> dict[str, object]:
     conn.execute(
         "DELETE FROM project_notes WHERE project_id = ? AND note_id = ?",
         (project_id, note_id),
@@ -823,7 +809,7 @@ def unlink_project_note(conn: sqlite3.Connection, project_id: int, note_id: int)
     return project_detail(conn, project_id)
 
 
-def inbox(conn: sqlite3.Connection) -> dict[str, object]:
+def inbox(conn: DbConnection) -> dict[str, object]:
     sync_project_paper_recommendations(conn)
     ensure_paper_reports_for_recommendations(conn)
     rows = conn.execute(
@@ -929,7 +915,7 @@ def inbox(conn: sqlite3.Connection) -> dict[str, object]:
     return {"items": items}
 
 
-def _paper_report_stats(conn: sqlite3.Connection) -> dict[str, object]:
+def _paper_report_stats(conn: DbConnection) -> dict[str, object]:
     stats = {"queued": 0, "processing": 0, "done": 0, "failed": 0, "total": 0}
     for row in conn.execute(
         """
@@ -955,7 +941,7 @@ def _paper_report_stats(conn: sqlite3.Connection) -> dict[str, object]:
     return stats
 
 
-def _paper_report_legacy_paper_id(conn: sqlite3.Connection, row: sqlite3.Row) -> int:
+def _paper_report_legacy_paper_id(conn: DbConnection, row: DbRow) -> int:
     content = from_json(row["content_json"], {}) if "content_json" in row.keys() else {}
     source = from_json(row["source_json"], {}) if "source_json" in row.keys() else {}
     if not isinstance(content, dict):
@@ -979,7 +965,7 @@ def _paper_report_legacy_paper_id(conn: sqlite3.Connection, row: sqlite3.Row) ->
     return int(source_row["id"]) if source_row else 0
 
 
-def paper_reports_summary(conn: sqlite3.Connection) -> dict[str, object]:
+def paper_reports_summary(conn: DbConnection) -> dict[str, object]:
     latest_rows = conn.execute(
         """
         SELECT id, scope_id, status, content_json, source_json, updated_at
@@ -1011,7 +997,7 @@ def paper_reports_summary(conn: sqlite3.Connection) -> dict[str, object]:
     }
 
 
-def paper_reports_queue(conn: sqlite3.Connection, limit: int = 300) -> dict[str, object]:
+def paper_reports_queue(conn: DbConnection, limit: int = 300) -> dict[str, object]:
     stats = _paper_report_stats(conn)
     row_limit = max(1, min(int(limit or 300), 1000))
     rows = conn.execute(
@@ -1095,7 +1081,7 @@ def paper_reports_queue(conn: sqlite3.Connection, limit: int = 300) -> dict[str,
     }
 
 
-def _project_artifact_payload(artifact: sqlite3.Row) -> dict[str, object]:
+def _project_artifact_payload(artifact: DbRow) -> dict[str, object]:
     content = from_json(artifact["content_json"], {})
     source = from_json(artifact["source_json"], {})
     obsidian_export = content.get("obsidian_export") if isinstance(content, dict) else None
@@ -1117,12 +1103,12 @@ def _project_artifact_payload(artifact: sqlite3.Row) -> dict[str, object]:
     }
 
 
-def remove_paper_report(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
+def remove_paper_report(conn: DbConnection, paper_id: int) -> dict[str, object]:
     result = remove_paper_report_from_queue(conn, paper_id)
     return {"ok": True, "paper_id": paper_id, **result}
 
 
-def paper_detail(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
+def paper_detail(conn: DbConnection, paper_id: int) -> dict[str, object]:
     sync_project_paper_recommendations(conn, [paper_id])
     ensure_paper_reports_for_recommendations(conn, [paper_id])
     paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
@@ -1336,7 +1322,7 @@ def paper_detail(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
     }
 
 
-def save_feedback(conn: sqlite3.Connection, paper_id: int, status: str, note: str = "") -> dict[str, object]:
+def save_feedback(conn: DbConnection, paper_id: int, status: str, note: str = "") -> dict[str, object]:
     if status not in VALID_FEEDBACK:
         raise RuntimeError(f"Invalid feedback status: {status}")
     if not conn.execute("SELECT id FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone():
@@ -1363,7 +1349,7 @@ def save_feedback(conn: sqlite3.Connection, paper_id: int, status: str, note: st
 
 
 def update_paper_recommendation(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     paper_id: int,
     payload: dict[str, object],
@@ -1414,7 +1400,7 @@ def update_paper_recommendation(
 
 
 def generate_paper_reading_report(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     paper_id: int,
     payload: dict[str, object] | None = None,
@@ -1434,7 +1420,7 @@ def generate_paper_reading_report(
 
 
 def paper_library(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     *,
     library_status: str | None = None,
     source_type: str | None = None,
@@ -1458,7 +1444,7 @@ def paper_library(
     )
 
 
-def library_paper_detail(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
+def library_paper_detail(conn: DbConnection, paper_id: int) -> dict[str, object]:
     detail = paper_library_detail(conn, paper_id)
     legacy_paper_id = detail.get("legacy_arxiv_paper_id")
     detail["paper_report"] = paper_report_payload(conn, int(legacy_paper_id)) if legacy_paper_id else None
@@ -1466,7 +1452,7 @@ def library_paper_detail(conn: sqlite3.Connection, paper_id: int) -> dict[str, o
 
 
 def update_library_paper_status(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     paper_id: int,
     payload: dict[str, object],
 ) -> dict[str, object]:
@@ -1489,7 +1475,7 @@ def update_library_paper_status(
 
 
 def artifacts_index(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     *,
     scope_type: str | None = None,
     scope_id: int | None = None,
@@ -1507,7 +1493,7 @@ def artifacts_index(
     )
 
 
-def artifact_detail(conn: sqlite3.Connection, artifact_id: int) -> dict[str, object]:
+def artifact_detail(conn: DbConnection, artifact_id: int) -> dict[str, object]:
     artifact = get_artifact(conn, artifact_id)
     if not artifact:
         raise RuntimeError(f"Artifact not found: {artifact_id}")
@@ -1515,7 +1501,7 @@ def artifact_detail(conn: sqlite3.Connection, artifact_id: int) -> dict[str, obj
 
 
 def export_artifact(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     artifact_id: int,
     payload: dict[str, object] | None = None,
@@ -1538,7 +1524,7 @@ def export_artifact(
 
 
 def receive_experiment_report(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     payload: dict[str, object] | None = None,
 ) -> dict[str, object]:
@@ -1546,7 +1532,7 @@ def receive_experiment_report(
 
 
 def generate_project_index(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     project_id: int,
     payload: dict[str, object] | None = None,
@@ -1569,7 +1555,7 @@ def generate_project_index(
     return detail
 
 
-def job_history(conn: sqlite3.Connection, limit: int = 20) -> dict[str, object]:
+def job_history(conn: DbConnection, limit: int = 20) -> dict[str, object]:
     rows = conn.execute(
         """
         SELECT id, job_type, status, started_at, finished_at, message, pid, heartbeat_at, meta_json
@@ -1597,30 +1583,22 @@ def job_history(conn: sqlite3.Connection, limit: int = 20) -> dict[str, object]:
     }
 
 
-def _table_count(conn: sqlite3.Connection, table: str) -> int:
-    if getattr(conn, "dialect", "") == "postgres":
-        exists = conn.execute(
-            """
-            SELECT table_name AS name
-            FROM information_schema.tables
-            WHERE table_schema = current_schema()
-              AND table_name = ?
-            """,
-            (table,),
-        ).fetchone()
-        if not exists:
-            return 0
-    else:
-        exists = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
-            (table,),
-        ).fetchone()
-        if not exists:
-            return 0
+def _table_count(conn: DbConnection, table: str) -> int:
+    exists = conn.execute(
+        """
+        SELECT table_name AS name
+        FROM information_schema.tables
+        WHERE table_schema = current_schema()
+          AND table_name = ?
+        """,
+        (table,),
+    ).fetchone()
+    if not exists:
+        return 0
     return int(conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()["count"])
 
 
-def job_summary(conn: sqlite3.Connection) -> dict[str, object]:
+def job_summary(conn: DbConnection) -> dict[str, object]:
     latest_job = conn.execute(
         """
         SELECT id, job_type, status, started_at, finished_at, message, heartbeat_at
@@ -1648,7 +1626,7 @@ def job_summary(conn: sqlite3.Connection) -> dict[str, object]:
     }
 
 
-def health_summary(conn: sqlite3.Connection, settings: Settings) -> dict[str, object]:
+def health_summary(conn: DbConnection, settings: Settings) -> dict[str, object]:
     remote = obsidian_remote_status(settings)
     remote_enabled = obsidian_remote_enabled(settings)
     vault = settings.obsidian_vault_path
@@ -1666,7 +1644,7 @@ def health_summary(conn: sqlite3.Connection, settings: Settings) -> dict[str, ob
         if vault
         else "not_configured"
     )
-    database = database_target(conn, settings.db_path)
+    database = database_target()
     return {
         "database": {
             "ok": True,
@@ -1702,27 +1680,19 @@ def health_summary(conn: sqlite3.Connection, settings: Settings) -> dict[str, ob
     }
 
 
-def health(conn: sqlite3.Connection, settings: Settings) -> dict[str, object]:
+def health(conn: DbConnection, settings: Settings) -> dict[str, object]:
     def count(table: str) -> int:
-        if getattr(conn, "dialect", "") == "postgres":
-            exists = conn.execute(
-                """
-                SELECT table_name AS name
-                FROM information_schema.tables
-                WHERE table_schema = current_schema()
-                  AND table_name = ?
-                """,
-                (table,),
-            ).fetchone()
-            if not exists:
-                return 0
-        else:
-            exists = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
-                (table,),
-            ).fetchone()
-            if not exists:
-                return 0
+        exists = conn.execute(
+            """
+            SELECT table_name AS name
+            FROM information_schema.tables
+            WHERE table_schema = current_schema()
+              AND table_name = ?
+            """,
+            (table,),
+        ).fetchone()
+        if not exists:
+            return 0
         return int(conn.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()["count"])
 
     latest_job = conn.execute(
@@ -1750,7 +1720,7 @@ def health(conn: sqlite3.Connection, settings: Settings) -> dict[str, object]:
         if vault
         else "not_configured"
     )
-    database = database_target(conn, settings.db_path)
+    database = database_target()
     return {
         "database": {
             "ok": True,

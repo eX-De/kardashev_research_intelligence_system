@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-import sqlite3
+from .db_types import DbConnection, DbRow
 from typing import Any
 
 from .db import clean_unicode, from_json, to_json, utc_now
@@ -96,7 +96,7 @@ def _source_type(value: str) -> str:
     return source_type
 
 
-def _paper_payload(row: sqlite3.Row) -> dict[str, object]:
+def _paper_payload(row: DbRow) -> dict[str, object]:
     return {
         "id": int(row["id"]),
         "canonical_key": row["canonical_key"],
@@ -121,7 +121,7 @@ def _paper_payload(row: sqlite3.Row) -> dict[str, object]:
 
 
 def upsert_paper(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     *,
     source_type: str,
     source_identifier: str = "",
@@ -265,7 +265,7 @@ def upsert_paper(
 
 
 def upsert_paper_source(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     paper_id: int,
     *,
     source_type: str,
@@ -322,7 +322,7 @@ def upsert_paper_source(
 
 
 def upsert_paper_asset(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     paper_id: int,
     *,
     asset_type: str,
@@ -391,7 +391,7 @@ def upsert_paper_asset(
 
 
 def upsert_paper_from_arxiv(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     paper: Any,
     *,
     fetched_batch_id: str = "",
@@ -440,7 +440,7 @@ def upsert_paper_from_arxiv(
 
 
 def upsert_imported_paper(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     *,
     source_type: str,
     source_identifier: str,
@@ -488,7 +488,7 @@ def upsert_imported_paper(
 
 
 def upsert_manual_paper(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     *,
     title: str,
     authors: list[str] | tuple[str, ...] | str | None = None,
@@ -513,7 +513,7 @@ def upsert_manual_paper(
     )
 
 
-def _sync_assets_from_arxiv_row(conn: sqlite3.Connection, paper_id: int, row: Any) -> tuple[int | None, int | None]:
+def _sync_assets_from_arxiv_row(conn: DbConnection, paper_id: int, row: Any) -> tuple[int | None, int | None]:
     pdf_asset_id = None
     text_asset_id = None
     pdf_path = _text(_row_value(row, "pdf_path"))
@@ -544,7 +544,7 @@ def _sync_assets_from_arxiv_row(conn: sqlite3.Connection, paper_id: int, row: An
 
 
 def replace_paper_chunks(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     paper_id: int,
     chunks: list[dict[str, Any]],
     *,
@@ -580,8 +580,8 @@ def replace_paper_chunks(
 
 
 def replace_paper_chunks_for_arxiv_paper(
-    conn: sqlite3.Connection,
-    arxiv_paper: sqlite3.Row,
+    conn: DbConnection,
+    arxiv_paper: DbRow,
     chunks: list[dict[str, Any]],
 ) -> int:
     paper_id = upsert_paper_from_arxiv(conn, arxiv_paper)
@@ -590,8 +590,8 @@ def replace_paper_chunks_for_arxiv_paper(
 
 
 def mirror_arxiv_paper(
-    conn: sqlite3.Connection,
-    arxiv_paper: sqlite3.Row,
+    conn: DbConnection,
+    arxiv_paper: DbRow,
     *,
     library_status: str = "candidate",
 ) -> int:
@@ -611,7 +611,7 @@ def mirror_arxiv_paper(
 
 
 def mirror_arxiv_papers(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     paper_ids: list[int] | tuple[int, ...] | set[int] | None = None,
     *,
     limit: int | None = None,
@@ -635,7 +635,7 @@ def mirror_arxiv_papers(
     return {"papers_mirrored": len(rows)}
 
 
-def paper_id_for_arxiv_id(conn: sqlite3.Connection, arxiv_id: str) -> int | None:
+def paper_id_for_arxiv_id(conn: DbConnection, arxiv_id: str) -> int | None:
     arxiv_id = _text(arxiv_id)
     if not arxiv_id:
         return None
@@ -659,7 +659,7 @@ def paper_id_for_arxiv_id(conn: sqlite3.Connection, arxiv_id: str) -> int | None
     return int(row["id"]) if row else None
 
 
-def paper_id_for_arxiv_paper_id(conn: sqlite3.Connection, arxiv_paper_id: int) -> int | None:
+def paper_id_for_arxiv_paper_id(conn: DbConnection, arxiv_paper_id: int) -> int | None:
     row = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (int(arxiv_paper_id),)).fetchone()
     if not row:
         return None
@@ -670,7 +670,7 @@ def paper_id_for_arxiv_paper_id(conn: sqlite3.Connection, arxiv_paper_id: int) -
 
 
 def set_library_status(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     paper_id: int,
     status: str,
     *,
@@ -708,45 +708,45 @@ def set_library_status(
     return {"ok": True, "paper_id": int(paper_id), "library_status": status, "reading_state": reading_state}
 
 
-def set_arxiv_paper_library_status(conn: sqlite3.Connection, arxiv_paper_id: int, status: str) -> dict[str, object]:
+def set_arxiv_paper_library_status(conn: DbConnection, arxiv_paper_id: int, status: str) -> dict[str, object]:
     paper_id = paper_id_for_arxiv_paper_id(conn, int(arxiv_paper_id))
     if paper_id is None:
         raise RuntimeError(f"arXiv paper not found: {arxiv_paper_id}")
     return set_library_status(conn, paper_id, status)
 
 
-def mark_paper_candidate(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
+def mark_paper_candidate(conn: DbConnection, paper_id: int) -> dict[str, object]:
     return set_library_status(conn, paper_id, "candidate")
 
 
-def mark_paper_saved(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
+def mark_paper_saved(conn: DbConnection, paper_id: int) -> dict[str, object]:
     return set_library_status(conn, paper_id, "saved")
 
 
-def mark_paper_reading(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
+def mark_paper_reading(conn: DbConnection, paper_id: int) -> dict[str, object]:
     return set_library_status(conn, paper_id, "reading")
 
 
-def mark_paper_read(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
+def mark_paper_read(conn: DbConnection, paper_id: int) -> dict[str, object]:
     return set_library_status(conn, paper_id, "read")
 
 
-def mark_paper_archived(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
+def mark_paper_archived(conn: DbConnection, paper_id: int) -> dict[str, object]:
     return set_library_status(conn, paper_id, "archived")
 
 
-def mark_paper_discarded(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
+def mark_paper_discarded(conn: DbConnection, paper_id: int) -> dict[str, object]:
     return set_library_status(conn, paper_id, "discarded")
 
 
-def mark_arxiv_paper_archived(conn: sqlite3.Connection, arxiv_paper_id: int) -> dict[str, object] | None:
+def mark_arxiv_paper_archived(conn: DbConnection, arxiv_paper_id: int) -> dict[str, object] | None:
     paper_id = paper_id_for_arxiv_paper_id(conn, int(arxiv_paper_id))
     if paper_id is None:
         return None
     return mark_paper_archived(conn, paper_id)
 
 
-def arxiv_paper_has_protected_library_status(conn: sqlite3.Connection, arxiv_paper_id: int) -> bool:
+def arxiv_paper_has_protected_library_status(conn: DbConnection, arxiv_paper_id: int) -> bool:
     row = conn.execute(
         """
         SELECT p.library_status
@@ -762,7 +762,7 @@ def arxiv_paper_has_protected_library_status(conn: sqlite3.Connection, arxiv_pap
 
 
 def list_paper_library(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     *,
     library_status: str | None = None,
     source_type: str | None = None,
@@ -865,7 +865,7 @@ def list_paper_library(
     return {"items": items, "total": int(total or 0), "limit": row_limit, "offset": row_offset}
 
 
-def paper_library_detail(conn: sqlite3.Connection, paper_id: int) -> dict[str, object]:
+def paper_library_detail(conn: DbConnection, paper_id: int) -> dict[str, object]:
     row = conn.execute("SELECT * FROM papers WHERE id = ?", (int(paper_id),)).fetchone()
     if not row:
         raise RuntimeError(f"Paper not found: {paper_id}")

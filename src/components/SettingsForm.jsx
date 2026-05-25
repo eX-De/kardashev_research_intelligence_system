@@ -354,7 +354,6 @@ export function SettingsForm({ settings, providers, onSettingChange, onProviderC
         <NumberField label="RAG 阈值" name="rag_score_threshold" min="0" max="1" step="0.01" value={settings.rag_score_threshold} onChange={onSettingChange} />
         <NumberField label="证据 Top K" name="rag_top_k" min="1" step="1" value={settings.rag_top_k} onChange={onSettingChange} />
         <TextField label="RAG searchers" name="rag_searchers" placeholder="embedding_search,keyword_search,front_page_search" value={settings.rag_searchers} onChange={onSettingChange} />
-        <TextField label="向量索引 backend" name="vector_index_backend" placeholder="sqlite" value={settings.vector_index_backend} onChange={onSettingChange} />
         <CheckboxField label="启用摘要 embedding 粗筛" name="rag_prefilter_enabled" checked={settings.rag_prefilter_enabled} onChange={onSettingChange} />
         <NumberField label="粗筛阈值" name="rag_prefilter_threshold" min="0" max="1" step="0.01" value={settings.rag_prefilter_threshold} onChange={onSettingChange} />
         <NumberField label="粗筛 Top K" name="rag_prefilter_top_k" min="1" step="1" value={settings.rag_prefilter_top_k} onChange={onSettingChange} />

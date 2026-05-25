@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-import sqlite3
+from .db_types import DbConnection, DbRow
 from typing import Callable, Iterable
 
 from .config import Settings
@@ -69,7 +69,7 @@ def _split_block(heading: str, text: str, max_chars: int) -> list[dict[str, str]
 
 
 def upsert_knowledge_document(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     *,
     source_type: str,
@@ -174,7 +174,7 @@ def upsert_knowledge_document(
 
 
 def replace_document_chunks(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     *,
     document_id: int,
@@ -231,8 +231,12 @@ def replace_document_chunks(
         if embedding is not None:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO chunk_embeddings(chunk_id, model, embedding_json, created_at)
+                INSERT INTO chunk_embeddings(chunk_id, model, embedding_json, created_at)
                 VALUES (?, ?, ?, ?)
+                ON CONFLICT(chunk_id) DO UPDATE SET
+                    model = excluded.model,
+                    embedding_json = excluded.embedding_json,
+                    created_at = excluded.created_at
                 """,
                 (int(cur.lastrowid), settings.llm_embedding_model, to_json(embedding), now),
             )
@@ -241,7 +245,7 @@ def replace_document_chunks(
 
 
 def link_project_context_document(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     project_id: int,
     document_id: int,
     *,
@@ -267,7 +271,7 @@ def link_project_context_document(
 
 
 def save_project_context_document(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     project_id: int,
     *,
@@ -306,7 +310,7 @@ def save_project_context_document(
 
 
 def save_manual_project_context(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     project_id: int,
     raw_context: str,
@@ -340,7 +344,7 @@ def save_manual_project_context(
     )
 
 
-def sync_project_context_documents_from_project_notes(conn: sqlite3.Connection, *, commit: bool = True) -> int:
+def sync_project_context_documents_from_project_notes(conn: DbConnection, *, commit: bool = True) -> int:
     rows = conn.execute(
         """
         SELECT pn.project_id, pn.relation, kd.id AS document_id
@@ -366,7 +370,7 @@ def sync_project_context_documents_from_project_notes(conn: sqlite3.Connection, 
     return synced
 
 
-def _document_chunk_count(conn: sqlite3.Connection, document_id: int) -> int:
+def _document_chunk_count(conn: DbConnection, document_id: int) -> int:
     row = conn.execute(
         "SELECT COUNT(*) AS count FROM research_chunks WHERE document_id = ?",
         (document_id,),
@@ -374,7 +378,7 @@ def _document_chunk_count(conn: sqlite3.Connection, document_id: int) -> int:
     return int(row["count"] or 0)
 
 
-def _legacy_note_chunk_count_without_document(conn: sqlite3.Connection, note_id: int) -> int:
+def _legacy_note_chunk_count_without_document(conn: DbConnection, note_id: int) -> int:
     row = conn.execute(
         """
         SELECT COUNT(*) AS count

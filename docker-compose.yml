@@ -38,7 +38,6 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-research_intelligence}
       POSTGRES_USER: ${POSTGRES_USER:-research_app}
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
-      APP_DB_PATH: /data/research_intelligence.sqlite
       PANEL_PASSWORD_FILE: /run/secrets/panel_password
       PANEL_SESSION_TTL_SECONDS: ${PANEL_SESSION_TTL_SECONDS:-604800}
       PANEL_SESSION_SECRET_FILE: /run/secrets/panel_session_secret
@@ -46,7 +45,6 @@ services:
       KRIS_AGENT_TOKEN_FILE: /run/secrets/kris_agent_token
       ARXIV_PDF_DIR: /data/arxiv_pdfs
       ARXIV_TEXT_DIR: /data/arxiv_text
-      VECTOR_INDEX_BACKEND: ${VECTOR_INDEX_BACKEND:-sqlite}
       # Set OBSIDIAN_VAULT_PATH to /vault if you mount a vault below.
       # OBSIDIAN_VAULT_PATH: /vault
     secrets:

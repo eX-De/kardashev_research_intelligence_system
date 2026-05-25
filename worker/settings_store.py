@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import sqlite3
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -66,7 +65,6 @@ STRING_FIELDS = {
     "obsidian_project_paper_list_name",
     "arxiv_pdf_dir",
     "arxiv_text_dir",
-    "vector_index_backend",
     "llm_chat_provider_id",
     "llm_chat_model",
     "llm_embedding_provider_id",
@@ -115,7 +113,7 @@ def _bool(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 
-def _stored(conn: sqlite3.Connection) -> dict[str, Any]:
+def _stored(conn: Any) -> dict[str, Any]:
     rows = conn.execute("SELECT key, value_json FROM app_settings").fetchall()
     return {row["key"]: from_json(row["value_json"], None) for row in rows}
 
@@ -210,7 +208,6 @@ def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, An
         "rag_prefilter_top_k": settings.rag_prefilter_top_k,
         "rag_prefilter_min_keep": settings.rag_prefilter_min_keep,
         "rag_prefilter_max_keep": settings.rag_prefilter_max_keep,
-        "vector_index_backend": settings.vector_index_backend,
         "llm_providers": [_provider_to_payload(provider) for provider in settings.llm_providers],
         "llm_chat_provider_id": settings.llm_chat_provider_id,
         "llm_chat_model": settings.llm_chat_model,
@@ -276,7 +273,7 @@ def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, An
     }
 
 
-def apply_stored_settings(conn: sqlite3.Connection, settings: Settings) -> Settings:
+def apply_stored_settings(conn: Any, settings: Settings) -> Settings:
     stored = _stored(conn)
     updates: dict[str, Any] = {}
 
@@ -318,11 +315,11 @@ def apply_stored_settings(conn: sqlite3.Connection, settings: Settings) -> Setti
     return replace(settings, **updates)
 
 
-def get_app_settings(conn: sqlite3.Connection, settings: Settings) -> dict[str, Any]:
+def get_app_settings(conn: Any, settings: Settings) -> dict[str, Any]:
     return {"settings": _setting_payload(settings, _stored(conn))}
 
 
-def save_app_settings(conn: sqlite3.Connection, payload: dict[str, Any]) -> dict[str, Any]:
+def save_app_settings(conn: Any, payload: dict[str, Any]) -> dict[str, Any]:
     now = utc_now()
     current_settings = _stored(conn)
     existing_providers = {
@@ -379,5 +376,5 @@ def save_app_settings(conn: sqlite3.Connection, payload: dict[str, Any]) -> dict
     return {"ok": True}
 
 
-def scheduler_settings(conn: sqlite3.Connection, settings: Settings) -> dict[str, Any]:
+def scheduler_settings(conn: Any, settings: Settings) -> dict[str, Any]:
     return get_app_settings(conn, settings)["settings"]

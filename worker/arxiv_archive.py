@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import sqlite3
+from .db_types import DbConnection, DbRow
 from typing import Any
 
 from .config import Settings
@@ -14,7 +14,7 @@ def _paper_ids_clause(paper_ids: list[int]) -> tuple[str, list[Any]]:
 
 
 def archive_zero_match_papers(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     settings: Settings,
     paper_ids: list[int] | tuple[int, ...] | set[int],
     *,

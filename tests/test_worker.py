@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlite3
 import base64
 import json
 import threading
@@ -10,8 +9,10 @@ import urllib.error
 from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
+from helpers import connect_test_db
 from worker.config import LLMProvider, Settings
 from worker.api import (
     export_project_to_obsidian,
@@ -78,7 +79,6 @@ from worker.settings_store import apply_stored_settings, get_app_settings, save_
 
 def test_settings() -> Settings:
     return Settings(
-        db_path=Path(":memory:"),
         obsidian_vault_path=None,
         obsidian_include_dirs=[],
         obsidian_include_tags=[],
@@ -103,7 +103,6 @@ def test_settings() -> Settings:
         rag_prefilter_top_k=20,
         rag_prefilter_min_keep=30,
         rag_prefilter_max_keep=50,
-        vector_index_backend="sqlite",
         llm_providers=[],
         llm_chat_provider_id="",
         llm_chat_model="",
@@ -155,7 +154,7 @@ def chat_settings(settings: Settings) -> Settings:
 
 
 def seed_paper_report_artifact(
-    conn: sqlite3.Connection,
+    conn: Any,
     paper_id: int,
     *,
     status: str = "queued",
@@ -208,25 +207,14 @@ def seed_paper_report_artifact(
 
 
 class WorkerTests(unittest.TestCase):
-    def test_init_db_skips_schema_script_when_schema_is_current(self) -> None:
-        class TrackingConnection(sqlite3.Connection):
-            executescript_calls = 0
-
-            def executescript(self, sql: str):
-                self.executescript_calls += 1
-                return super().executescript(sql)
-
-        conn = sqlite3.connect(":memory:", factory=TrackingConnection)
-        conn.row_factory = sqlite3.Row
+    def test_init_db_is_idempotent_for_postgres_test_database(self) -> None:
+        conn = connect_test_db()
+        self.assertEqual(conn.dialect, "postgres")
         init_db(conn)
-        self.assertEqual(conn.executescript_calls, 1)
-
-        init_db(conn)
-        self.assertEqual(conn.executescript_calls, 1)
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM job_runs").fetchone()["count"], 0)
 
     def test_mark_stale_legacy_job_runs_preserves_resume_meta(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -249,8 +237,7 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(row["finished_at"])
 
     def test_delete_run_record_removes_snapshot_only(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -340,8 +327,7 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(count, 1)
 
     def test_delete_run_record_dry_run_does_not_delete(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -368,8 +354,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM daily_run_meta").fetchone()["count"], 1)
 
     def test_delete_run_record_refuses_running_without_force(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -391,8 +376,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM job_runs").fetchone()["count"], 0)
 
     def test_latest_resumable_daily_run_ignores_failures_before_completion(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -413,8 +397,7 @@ class WorkerTests(unittest.TestCase):
         self.assertIsNone(_latest_resumable_daily_run(conn))
 
     def test_latest_resumable_daily_run_uses_persisted_snapshot(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -499,8 +482,7 @@ class WorkerTests(unittest.TestCase):
                 sleep.assert_called_once_with(30)
 
     def test_resume_prefilter_reconstructs_selected_papers(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         now = "2026-05-08T00:00:00Z"
         for arxiv_id, title in (("2605.00001", "Passed"), ("2605.00002", "Skipped")):
@@ -552,8 +534,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(stats["prefilter_skipped"], 1)
 
     def test_fetch_arxiv_stops_when_page_reaches_lookback_cutoff(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         now = datetime.now(timezone.utc).replace(microsecond=0)
         recent = now.isoformat().replace("+00:00", "Z")
@@ -592,8 +573,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(arxiv_ids, ["2605.00001"])
 
     def test_fetch_arxiv_skips_tombstoned_papers(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         conn.execute(
@@ -677,8 +657,7 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(target.exists())
 
     def test_daily_papers_only_use_current_batch(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
 
         def insert_paper(arxiv_id: str, batch_id: str, text_status: str, text_path: str = "") -> int:
@@ -770,8 +749,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(result["daily_candidate_papers"], 1)
 
     def test_retry_daily_papers_collect_historical_gaps(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
 
         def insert_paper(arxiv_id: str, text_status: str, text_path: str = "") -> int:
@@ -833,8 +811,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(result["daily_retry_papers"], 2)
 
     def test_retry_daily_does_not_pull_papers_for_inactive_project_match_gaps(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -918,8 +895,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(result["daily_retry_papers"], 0)
 
     def test_snapshot_daily_papers_persists_selection(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -968,8 +944,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual({row["source"] for row in rows}, {"new_arxiv"})
 
     def test_daily_prefilter_does_not_bypass_historical_retry_papers(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -1000,7 +975,7 @@ class WorkerTests(unittest.TestCase):
                 "rag_prefilter_threshold": 0.99,
             }
         )
-        selected: list[sqlite3.Row] = []
+        selected: list[Any] = []
 
         result = _prefilter_daily_papers(conn, settings, "current", selected)
 
@@ -1010,8 +985,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(result["prefilter_passed"], 0)
 
     def test_archive_zero_match_papers_soft_archives_without_deleting_source_data(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         root = Path.cwd() / ".test-tmp" / "zero-match-archive"
         root.mkdir(parents=True, exist_ok=True)
@@ -1086,8 +1060,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(tombstone["reason"], "no_match")
 
     def test_archive_zero_match_papers_keeps_failed_text_for_retry(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -1113,8 +1086,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM arxiv_paper_tombstones").fetchone()["count"], 0)
 
     def test_prefilter_daily_papers_soft_archives_rejected_candidates(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         for index, arxiv_id in enumerate(("2605.00006", "2605.00007")):
             conn.execute(
@@ -1143,7 +1115,7 @@ class WorkerTests(unittest.TestCase):
                 "rag_prefilter_max_keep": 1,
             }
         )
-        selected: list[sqlite3.Row] = []
+        selected: list[Any] = []
 
         result = _prefilter_daily_papers(conn, settings, "current", selected)
 
@@ -1154,8 +1126,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(conn.execute("SELECT library_status FROM papers").fetchone()["library_status"], "archived")
 
     def test_archive_keeps_pending_recommendation_even_with_weak_judgment(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         root = Path.cwd() / ".test-tmp" / "judgment-archive"
         root.mkdir(parents=True, exist_ok=True)
@@ -1235,8 +1206,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM arxiv_paper_tombstones").fetchone()["count"], 0)
 
     def test_archive_keeps_passing_project_judgment(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -1298,8 +1268,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM arxiv_papers").fetchone()["count"], 1)
 
     def test_archived_paper_does_not_reenter_pending_recommendations(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -1352,8 +1321,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM project_paper_recommendations").fetchone()["count"], 0)
 
     def test_project_judgment_creates_pending_recommendation_without_importance(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -1408,8 +1376,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(recommendation["relation_type"], "direct")
 
     def test_paper_report_queue_uses_paper_reader_prompt_and_full_text(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         text_dir = Path.cwd() / ".test-tmp" / "paper-report-text"
         text_dir.mkdir(parents=True, exist_ok=True)
@@ -1505,8 +1472,7 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(messages[1]["content"].endswith(PAPER_READER_DEFAULT_PROMPT))
 
     def test_paper_reader_chat_uses_original_prompt_and_persists_messages(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         text_dir = Path.cwd() / ".test-tmp" / "paper-reader-chat"
         text_dir.mkdir(parents=True, exist_ok=True)
@@ -1595,8 +1561,7 @@ class WorkerTests(unittest.TestCase):
             import fitz
         except ImportError:
             self.skipTest("PyMuPDF not installed")
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         source_dir = Path.cwd() / ".test-tmp" / "reader-import-source"
         source_dir.mkdir(parents=True, exist_ok=True)
@@ -1630,8 +1595,7 @@ class WorkerTests(unittest.TestCase):
         )
 
     def test_import_reader_url_downloads_direct_pdf_and_queues_report(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
 
         def fake_download(_: str, destination: Path) -> None:
@@ -1660,8 +1624,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(paper["pdf_link"], "https://example.test/paper.pdf")
 
     def test_import_reader_pdfs_batches_uploads(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
 
         def fake_extract(_: Path, text_path: Path) -> int:
@@ -1696,8 +1659,7 @@ class WorkerTests(unittest.TestCase):
         )
 
     def test_reader_save_without_obsidian_vault_raises_structured_error(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -1720,8 +1682,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(caught.exception.reason, OBSIDIAN_NOT_CONFIGURED)
 
     def test_reader_save_writes_report_and_chat_to_obsidian(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         vault = Path.cwd() / ".test-tmp" / "reader-save-vault"
         vault.mkdir(parents=True, exist_ok=True)
@@ -1836,8 +1797,7 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue((vault / result["attachment_path"]).exists())
 
     def test_reader_followup_questions_use_selected_text_prompt(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -1920,8 +1880,7 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("<message_context_window>", messages[1]["content"])
 
     def test_reader_message_delete_cancel_and_retry_report(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -1959,8 +1918,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(retried["paper_report"]["status"], "queued")
 
     def test_paper_reader_chat_stream_emits_chunks_and_persists_answer(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         text_dir = Path.cwd() / ".test-tmp" / "paper-reader-stream"
         text_dir.mkdir(parents=True, exist_ok=True)
@@ -2018,8 +1976,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(messages[1]["model"], "reader-stream-model")
 
     def test_paper_reports_queue_api_lists_statuses(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -2085,8 +2042,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(detail["linked_projects"][0]["project_name"], "Manual Queue Project")
 
     def test_paper_reports_queue_does_not_create_tasks_from_recommendations(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -2141,8 +2097,7 @@ class WorkerTests(unittest.TestCase):
         )
 
     def test_remove_paper_report_hides_single_queue_item_without_requeueing(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -2204,8 +2159,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(queue["items"], [])
 
     def test_discard_recommendation_removes_report_queue_entry(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -2276,8 +2230,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(queue["items"], [])
 
     def test_discard_recommendation_preserves_reader_import_report(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -2346,8 +2299,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(state, "discarded")
 
     def test_reminder_registry_includes_paper_report_queue_events(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -2376,8 +2328,7 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("paper_report_queue_backlog", item_types)
 
     def test_reminders_hide_superseded_failure_and_sort_by_latest_event(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -2421,8 +2372,7 @@ class WorkerTests(unittest.TestCase):
         self.assertNotIn("job_failed", item_types)
 
     def test_accept_recommendation_without_obsidian_vault_skips_sync_only(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -2473,8 +2423,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(conn.execute("SELECT state FROM project_paper_recommendations").fetchone()["state"], "accepted")
 
     def test_accept_recommendation_writes_paper_library_and_project_list(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         vault = Path.cwd() / ".test-tmp" / "recommendation-vault"
         project_folder = vault / "人工智能" / "个人研究" / "深度引导"
@@ -2610,8 +2559,7 @@ class WorkerTests(unittest.TestCase):
         self.assertNotIn("\udcaa", payload)
 
     def test_hybrid_search_keyword_and_front_page(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -2633,8 +2581,7 @@ class WorkerTests(unittest.TestCase):
         self.assertGreater(hits[0]["score"], 0)
 
     def test_llm_provider_settings_mask_and_preserve_key(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         save_app_settings(
             conn,
@@ -2679,8 +2626,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(applied.chat_provider().api_key, "secret")
 
     def test_run_daily_startup_mode_is_mutually_exclusive_with_scheduler(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         save_app_settings(conn, {"run_daily_on_startup_enabled": True})
         payload = get_app_settings(conn, test_settings())["settings"]
@@ -2693,8 +2639,7 @@ class WorkerTests(unittest.TestCase):
         self.assertFalse(payload["run_daily_on_startup_enabled"])
 
     def test_worker_concurrency_settings_are_configurable(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
 
         save_app_settings(conn, {"paper_report_queue_concurrency": 3, "embedding_concurrency": 4})
@@ -2706,8 +2651,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(applied.embedding_concurrency, 4)
 
     def test_stored_path_settings_remain_paths(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         save_app_settings(
             conn,
@@ -2725,8 +2669,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(applied.obsidian_project_center_tags, ["project/foo"])
 
     def test_obsidian_project_center_tags_discover_projects_and_sync_status(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         vault = Path.cwd() / ".test-tmp" / "project-discovery-vault"
         project_note = vault / "Research" / "Agentic RAG" / "Home.md"
@@ -2785,8 +2728,7 @@ class WorkerTests(unittest.TestCase):
         self.assertNotIn("Status/进行中", text)
 
     def test_sync_obsidian_backfills_missing_chunk_embeddings_for_skipped_notes(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         vault = Path.cwd() / ".test-tmp" / "embedding-backfill-vault"
         note = vault / "Research" / "Stable.md"
@@ -2817,8 +2759,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM chunk_embeddings").fetchone()["count"], 1)
 
     def test_obsidian_include_dirs_accept_backslashes(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         vault = Path.cwd() / ".test-tmp" / "backslash-include-vault"
         project_note = vault / "人工智能" / "个人研究" / "持续学习" / "中心页.md"
@@ -2844,8 +2785,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(project["obsidian_project_path"], "人工智能/个人研究/持续学习/中心页.md")
 
     def test_project_center_links_papers_and_notes(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         vault = Path.cwd() / ".test-tmp" / "project-vault"
         created = save_project(
@@ -2963,8 +2903,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(safe_arxiv_filename("hep-th/9901001"), "hep-th_9901001")
 
     def test_rank_uses_arxiv_text_chunks(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -3008,8 +2947,7 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("arxiv_text", match["evidence_json"])
 
     def test_generate_project_judgments_normalizes_label_confidence(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -3124,8 +3062,7 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("JSON 字段名保持英文", prompt)
 
     def test_run_daily_project_pipeline_skips_paused_and_archived_projects(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         project_ids: list[int] = []
         obsidian_chunk_ids: list[int] = []
@@ -3286,8 +3223,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM arxiv_papers").fetchone()["count"], 1)
 
     def test_project_rank_uses_project_folder_chunks(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -3421,8 +3357,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(artifact_count, 0)
 
     def test_daily_report_filters_by_project_judgment_and_writes_project_paragraphs(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -3576,8 +3511,7 @@ class WorkerTests(unittest.TestCase):
         self.assertNotIn("Ignored Generic Paper", report_text)
 
     def test_daily_report_uses_llm_generated_markdown_when_available(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         vault = Path.cwd() / ".test-tmp" / "report-llm-vault"
         vault.mkdir(parents=True, exist_ok=True)
@@ -3617,8 +3551,7 @@ class WorkerTests(unittest.TestCase):
         self.assertNotIn("暂无项目级候选论文。", report_text)
 
     def test_arxiv_chunk_embedding_cache_is_reused(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -3658,8 +3591,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(embedding, [0.1, 0.2])
 
     def test_missing_arxiv_chunk_embeddings_use_configured_concurrency(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -3708,8 +3640,7 @@ class WorkerTests(unittest.TestCase):
         )
 
     def test_arxiv_paper_embeddings_use_configured_concurrency(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         for index in range(6):
             conn.execute(
@@ -3758,8 +3689,7 @@ class WorkerTests(unittest.TestCase):
         )
 
     def test_missing_note_chunk_embeddings_use_configured_concurrency(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         conn.execute(
             """
@@ -3803,8 +3733,7 @@ class WorkerTests(unittest.TestCase):
         )
 
     def test_text_cache_can_be_limited_to_prefiltered_papers(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         root = Path.cwd() / ".test-tmp" / "filtered-cache"
         root.mkdir(parents=True, exist_ok=True)
@@ -3845,8 +3774,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(chunked_paper_ids, {int(paper_ids[0])})
 
     def test_text_cache_removes_nul_bytes_before_chunking(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         root = Path.cwd() / ".test-tmp" / "nul-cache"
         root.mkdir(parents=True, exist_ok=True)
@@ -3886,8 +3814,7 @@ class WorkerTests(unittest.TestCase):
     def test_prefilter_skips_below_threshold_but_keeps_minimum(self) -> None:
         from worker.search import prefilter_papers
 
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         for index in range(2):
             conn.execute(
@@ -3935,8 +3862,7 @@ class WorkerTests(unittest.TestCase):
     def test_prefilter_caps_selected_papers_with_max_keep(self) -> None:
         from worker.search import prefilter_papers
 
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
+        conn = connect_test_db()
         init_db(conn)
         for index in range(3):
             conn.execute(

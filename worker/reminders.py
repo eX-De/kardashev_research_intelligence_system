@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import sqlite3
+from .db_types import DbConnection, DbRow
 from collections.abc import Callable
 from typing import Any
 
@@ -89,7 +89,7 @@ def _reminder_sort_key(item: dict[str, Any]) -> tuple[int, str, int]:
     )
 
 
-def _activity_rows(conn: sqlite3.Connection, limit: int = 20) -> list[dict[str, Any]]:
+def _activity_rows(conn: DbConnection, limit: int = 20) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
         SELECT id, job_type, status, started_at, finished_at, message, meta_json
@@ -113,7 +113,7 @@ def _activity_rows(conn: sqlite3.Connection, limit: int = 20) -> list[dict[str, 
     ]
 
 
-def _paper_report_stats(conn: sqlite3.Connection) -> dict[str, int]:
+def _paper_report_stats(conn: DbConnection) -> dict[str, int]:
     stats = {"queued": 0, "processing": 0, "done": 0, "failed": 0, "total": 0}
     for row in conn.execute(
         """
@@ -435,7 +435,7 @@ def _paper_report_completed(context: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def reminders(conn: sqlite3.Connection, limit: int = 5) -> dict[str, Any]:
+def reminders(conn: DbConnection, limit: int = 5) -> dict[str, Any]:
     context: dict[str, Any] = {
         "activities": _activity_rows(conn, 20),
         "paper_report_stats": _paper_report_stats(conn),

@@ -1,14 +1,16 @@
-import sqlite3
 import unittest
 from unittest.mock import patch
 
+from helpers import connect_test_db
 from worker.cli import _run_daily_step, _with_deadlock_retry
-from worker.db import from_json, init_db, job_run
+from worker.db import from_json, job_run
 from worker.paper_reports import paper_report_payload, process_paper_report_queue, queue_paper_report
 
 
 class AbortSimConnection:
-    def __init__(self, conn: sqlite3.Connection):
+    dialect = "postgres"
+
+    def __init__(self, conn):
         self.conn = conn
         self.aborted = False
         self.events: list[str] = []
@@ -44,11 +46,8 @@ class AbortSimConnection:
         self.conn.close()
 
 
-def _base_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    init_db(conn)
-    return conn
+def _base_conn():
+    return connect_test_db()
 
 
 class TransactionRecoveryTests(unittest.TestCase):
@@ -78,7 +77,7 @@ class TransactionRecoveryTests(unittest.TestCase):
         conn = AbortSimConnection(base)
         holder: dict[str, int] = {}
 
-        with self.assertRaises(sqlite3.OperationalError):
+        with self.assertRaises(Exception):
             with job_run(conn, "test-job") as job_id:
                 holder["job_id"] = job_id
                 conn.execute("SELECT * FROM missing_table")
@@ -98,7 +97,7 @@ class TransactionRecoveryTests(unittest.TestCase):
         conn = AbortSimConnection(base)
         steps = [{"key": "sync_context_sources", "label": "同步上下文来源", "status": "pending"}]
 
-        with self.assertRaises(sqlite3.OperationalError):
+        with self.assertRaises(Exception):
             _run_daily_step(conn, job_id, steps, 0, {}, lambda: conn.execute("SELECT * FROM missing_table"))
 
         row = base.execute(

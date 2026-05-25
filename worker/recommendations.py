@@ -1,4 +1,4 @@
-import sqlite3
+from .db_types import DbConnection, DbRow
 from typing import Any
 
 from .db import utc_now
@@ -28,7 +28,7 @@ def _paper_filter(
 
 
 def sync_project_paper_recommendations(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     paper_ids: list[int] | tuple[int, ...] | set[int] | None = None,
 ) -> dict[str, int]:
     paper_clause, paper_params = _paper_filter("j", paper_ids)
@@ -125,7 +125,7 @@ def sync_project_paper_recommendations(
 
 
 def accept_recommendations_for_paper(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     paper_id: int,
     project_ids: list[int],
     importance: str,
@@ -196,7 +196,7 @@ def accept_recommendations_for_paper(
 
 
 def discard_recommendations_for_paper(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     paper_id: int,
     project_ids: list[int] | None = None,
 ) -> None:
@@ -231,13 +231,13 @@ def discard_recommendations_for_paper(
 
 
 def project_recommendation_paper_rows(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     project_id: int,
     *,
     states: list[str] | tuple[str, ...] | set[str] = ("pending", "accepted"),
     exclude_linked: bool = True,
     limit: int = 80,
-) -> list[sqlite3.Row]:
+) -> list[DbRow]:
     selected_states = [str(state) for state in states if str(state) in VALID_RECOMMENDATION_STATES]
     if not selected_states:
         return []

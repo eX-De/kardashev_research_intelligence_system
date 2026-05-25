@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import sqlite3
 import unittest
 
-from worker.db import init_db
+from helpers import connect_test_db
 from worker.project_match_cache import ProjectChunkRecord, load_project_match_cache
 
 
@@ -12,9 +11,7 @@ NOW = "2026-05-19T00:00:00Z"
 
 class ProjectMatchCacheTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.conn = sqlite3.connect(":memory:")
-        self.conn.row_factory = sqlite3.Row
-        init_db(self.conn)
+        self.conn = connect_test_db()
 
     def test_loads_project_document_and_note_chunks_with_metadata(self) -> None:
         project_id = self._insert_project()

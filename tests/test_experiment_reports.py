@@ -1,19 +1,17 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
+from helpers import connect_test_db
 from worker.config import Settings
-from worker.db import init_db
 from worker.experiment_reports import create_experiment_report
 
 
 def test_settings(*, vault: Path | None = None) -> Settings:
     return Settings(
-        db_path=Path(":memory:"),
         obsidian_vault_path=vault,
         obsidian_include_dirs=[],
         obsidian_include_tags=[],
@@ -38,7 +36,6 @@ def test_settings(*, vault: Path | None = None) -> Settings:
         rag_prefilter_top_k=20,
         rag_prefilter_min_keep=30,
         rag_prefilter_max_keep=50,
-        vector_index_backend="sqlite",
         llm_providers=[],
         llm_chat_provider_id="",
         llm_chat_model="",
@@ -48,7 +45,7 @@ def test_settings(*, vault: Path | None = None) -> Settings:
     )
 
 
-def insert_project(conn: sqlite3.Connection, *, output_dir: str = "") -> int:
+def insert_project(conn, *, output_dir: str = "") -> int:
     conn.execute(
         """
         INSERT INTO research_projects(name, status, obsidian_output_dir, created_at, updated_at)
@@ -88,9 +85,7 @@ def payload(project_id: int, *, key: str = "report-1", title: str = "First run")
 
 class ExperimentReportTests(unittest.TestCase):
     def test_experiment_report_creates_artifact_and_project_context_document(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        init_db(conn)
+        conn = connect_test_db()
         project_id = insert_project(conn)
 
         result = create_experiment_report(conn, test_settings(), payload(project_id))
@@ -115,9 +110,7 @@ class ExperimentReportTests(unittest.TestCase):
         self.assertEqual(chunk["source"], "experiment_report")
 
     def test_experiment_report_idempotency_updates_existing_artifact_and_document(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        init_db(conn)
+        conn = connect_test_db()
         project_id = insert_project(conn)
 
         create_experiment_report(conn, test_settings(), payload(project_id, key="same-key", title="Initial"))
@@ -136,9 +129,7 @@ class ExperimentReportTests(unittest.TestCase):
     def test_experiment_report_exports_to_obsidian_when_vault_exists(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             vault = Path(tmp)
-            conn = sqlite3.connect(":memory:")
-            conn.row_factory = sqlite3.Row
-            init_db(conn)
+            conn = connect_test_db()
             project_id = insert_project(conn, output_dir="Projects/Experiment Project")
 
             result = create_experiment_report(conn, test_settings(vault=vault), payload(project_id, key="export-key"))

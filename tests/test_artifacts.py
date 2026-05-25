@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from helpers import connect_test_db
 from worker.config import LLMProvider, Settings
 from worker.api import export_artifact
 from worker.artifacts import upsert_artifact
-from worker.db import init_db
 from worker.obsidian import OBSIDIAN_NOT_CONFIGURED, ObsidianNotConfiguredError
 from worker.paper_reports import process_paper_report_queue, queue_paper_report
 from worker.papers import paper_id_for_arxiv_paper_id, upsert_manual_paper
@@ -18,7 +17,6 @@ from worker.reports import generate_daily_report
 
 def settings(*, vault: Path | None = None) -> Settings:
     return Settings(
-        db_path=Path(":memory:"),
         obsidian_vault_path=vault,
         obsidian_include_dirs=[],
         obsidian_include_tags=[],
@@ -43,7 +41,6 @@ def settings(*, vault: Path | None = None) -> Settings:
         rag_prefilter_top_k=20,
         rag_prefilter_min_keep=30,
         rag_prefilter_max_keep=50,
-        vector_index_backend="sqlite",
         llm_providers=[
             LLMProvider(
                 id="test-chat",
@@ -64,9 +61,7 @@ def settings(*, vault: Path | None = None) -> Settings:
 
 class ArtifactTests(unittest.TestCase):
     def test_artifact_export_without_obsidian_vault_raises_structured_error(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        init_db(conn)
+        conn = connect_test_db()
         artifact = upsert_artifact(
             conn,
             scope_type="system",
@@ -83,9 +78,7 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(caught.exception.to_payload()["code"], OBSIDIAN_NOT_CONFIGURED)
 
     def test_daily_report_creates_artifact_without_obsidian_vault(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        init_db(conn)
+        conn = connect_test_db()
 
         with patch(
             "worker.reports.call_chat_json",
@@ -109,9 +102,7 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(source["source_key"][:13], "daily_report:")
 
     def test_generated_paper_report_is_mirrored_to_artifact(self) -> None:
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        init_db(conn)
+        conn = connect_test_db()
         upsert_manual_paper(conn, title="Existing Library Paper", abstract="Keeps paper ids from matching legacy ids.")
         text_dir = Path.cwd() / ".test-tmp" / "artifact-paper-report"
         text_dir.mkdir(parents=True, exist_ok=True)

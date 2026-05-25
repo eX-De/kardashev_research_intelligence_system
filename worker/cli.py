@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import sqlite3
+from .db_types import DbConnection, DbRow
 import sys
 import time
 import traceback
@@ -100,7 +100,7 @@ def _read_json_stdin(context: str) -> dict[str, object]:
 
 def _with_db(handler: Callable, cleanup_stale: bool = True):
     settings = load_settings()
-    conn = connect(settings.db_path)
+    conn = connect()
     init_db(conn)
     if cleanup_stale:
         mark_stale_job_runs(conn)
@@ -449,7 +449,7 @@ def _reset_in_progress_daily_papers(conn, job_id: int) -> int:
     return int(result.rowcount or 0)
 
 
-def _latest_prefilter_rows(conn, paper_ids: list[int]) -> dict[int, sqlite3.Row]:
+def _latest_prefilter_rows(conn, paper_ids: list[int]) -> dict[int, DbRow]:
     if not paper_ids:
         return {}
     placeholders = ", ".join("?" for _ in paper_ids)
@@ -462,7 +462,7 @@ def _latest_prefilter_rows(conn, paper_ids: list[int]) -> dict[int, sqlite3.Row]
         """,
         paper_ids,
     ).fetchall()
-    latest: dict[int, sqlite3.Row] = {}
+    latest: dict[int, DbRow] = {}
     for row in rows:
         paper_id = int(row["paper_id"])
         if paper_id not in latest:
@@ -512,7 +512,7 @@ def _snapshot_stats(conn, job_id: int) -> dict[str, int]:
     }
 
 
-def _selected_snapshot_papers(conn, job_id: int) -> list[sqlite3.Row]:
+def _selected_snapshot_papers(conn, job_id: int) -> list[DbRow]:
     return conn.execute(
         """
         SELECT p.*
@@ -977,15 +977,15 @@ def _prefilter_daily_papers(conn, settings, batch_id: str, selected_papers: list
     return {**candidate_result, **result}
 
 
-def _retry_papers_for_run(conn, settings) -> tuple[list[sqlite3.Row], dict[int, dict[str, str]], dict[str, int]]:
+def _retry_papers_for_run(conn, settings) -> tuple[list[DbRow], dict[int, dict[str, str]], dict[str, int]]:
     selection_limit = max(1, int(getattr(settings, "retry_daily_max_results", 100) or 100))
     candidate_limit = max(selection_limit, selection_limit * 3)
-    papers: list[sqlite3.Row] = []
+    papers: list[DbRow] = []
     info: dict[int, dict[str, str]] = {}
     seen: set[int] = set()
     counts: dict[str, int] = {}
 
-    def add_rows(rows: list[sqlite3.Row], source: str, reason: str) -> None:
+    def add_rows(rows: list[DbRow], source: str, reason: str) -> None:
         for row in rows:
             if len(papers) >= candidate_limit:
                 return
@@ -1175,11 +1175,11 @@ def _snapshot_daily_papers(
     conn,
     settings,
     job_id: int,
-    papers: list[sqlite3.Row],
+    papers: list[DbRow],
     source_info: dict[int, dict[str, str]] | None = None,
     *,
     selected_limit: int | None = None,
-) -> tuple[list[sqlite3.Row], dict[str, int]]:
+) -> tuple[list[DbRow], dict[str, int]]:
     effective_settings = settings
     if selected_limit is not None:
         capped_limit = max(1, int(selected_limit))
@@ -1302,7 +1302,7 @@ def _daily_step_status_map(conn, job_id: int) -> dict[str, str]:
     }
 
 
-def sync_context_sources(conn: sqlite3.Connection, settings) -> dict[str, Any]:
+def sync_context_sources(conn: DbConnection, settings) -> dict[str, Any]:
     obsidian_enabled = bool(settings.obsidian_vault_path) or obsidian_remote_enabled(settings)
     result = {
         "context_sources_synced": 0,
@@ -1333,9 +1333,9 @@ def sync_context_sources(conn: sqlite3.Connection, settings) -> dict[str, Any]:
 
 def cmd_init_db(_: argparse.Namespace) -> None:
     settings = load_settings()
-    conn = connect(settings.db_path)
+    conn = connect()
     init_db(conn)
-    database = database_target(conn, settings.db_path)
+    database = database_target()
     conn.close()
     _print_json({"ok": True, "message": f"Initialized {database['target']}", "database": database})
 
@@ -1502,7 +1502,7 @@ def cmd_run_daily(args: argparse.Namespace) -> None:
                         arxiv_batch_id=arxiv_batch_id,
                     )
 
-                    selected_holder: list[sqlite3.Row] = []
+                    selected_holder: list[DbRow] = []
 
                     def build_new_snapshot() -> dict[str, int]:
                         papers, source_stats = _daily_papers_for_run(conn, settings, arxiv_batch_id)
@@ -1522,7 +1522,7 @@ def cmd_run_daily(args: argparse.Namespace) -> None:
                 else:
                     _mark_daily_step_skipped(conn, job_id, steps, 1, accumulated, "retry-daily does not fetch arXiv")
 
-                    selected_holder: list[sqlite3.Row] = []
+                    selected_holder: list[DbRow] = []
 
                     def build_retry_snapshot() -> dict[str, int]:
                         papers, source_info, retry_stats = _retry_papers_for_run(conn, settings)
@@ -1790,7 +1790,7 @@ def _print_json_event(event: str, data: dict[str, object]) -> None:
 def cmd_api_reader_chat_stream(args: argparse.Namespace) -> None:
     payload = _read_json_stdin("paper reader streaming chat")
     settings = load_settings()
-    conn = connect(settings.db_path)
+    conn = connect()
     init_db(conn)
     mark_stale_job_runs(conn)
     settings = apply_stored_settings(conn, settings)
@@ -1951,7 +1951,7 @@ DAILY_RUN_SNAPSHOT_TABLES = ("daily_run_papers", "daily_run_steps", "daily_run_m
 
 
 def _delete_run_record(
-    conn: sqlite3.Connection,
+    conn: DbConnection,
     job_id: int,
     *,
     force: bool = False,

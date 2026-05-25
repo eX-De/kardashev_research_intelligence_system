@@ -43,7 +43,6 @@ class LLMProvider:
 
 @dataclass(frozen=True)
 class Settings:
-    db_path: Path
     obsidian_vault_path: Path | None
     obsidian_include_dirs: list[str]
     obsidian_include_tags: list[str]
@@ -68,7 +67,6 @@ class Settings:
     rag_prefilter_top_k: int
     rag_prefilter_min_keep: int
     rag_prefilter_max_keep: int
-    vector_index_backend: str
     llm_providers: list[LLMProvider]
     llm_chat_provider_id: str
     llm_chat_model: str
@@ -152,7 +150,6 @@ def load_settings() -> Settings:
     vault = env_value("OBSIDIAN_VAULT_PATH", "").strip()
     providers = _providers_from_env()
     return Settings(
-        db_path=Path(env_value("APP_DB_PATH", "./data/research_intelligence.sqlite")),
         obsidian_vault_path=Path(vault).expanduser() if vault else None,
         obsidian_include_dirs=_csv("OBSIDIAN_INCLUDE_DIRS", "Research,Papers"),
         obsidian_include_tags=_tags("OBSIDIAN_INCLUDE_TAGS", "research,paper,direction"),
@@ -189,7 +186,6 @@ def load_settings() -> Settings:
         rag_prefilter_top_k=int(env_value("RAG_PREFILTER_TOP_K", "20")),
         rag_prefilter_min_keep=int(env_value("RAG_PREFILTER_MIN_KEEP", "30")),
         rag_prefilter_max_keep=int(env_value("RAG_PREFILTER_MAX_KEEP", "50")),
-        vector_index_backend=env_value("VECTOR_INDEX_BACKEND", "sqlite"),
         llm_providers=providers,
         llm_chat_provider_id=env_value("LLM_CHAT_PROVIDER_ID", ""),
         llm_chat_model=env_value("LLM_CHAT_MODEL", ""),

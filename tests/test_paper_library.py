@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import sqlite3
-import tempfile
 import unittest
 from pathlib import Path
 
+from helpers import connect_test_db
 from worker.arxiv_archive import archive_zero_match_papers
 from worker.api import library_paper_detail as api_library_paper_detail
 from worker.arxiv_text import replace_arxiv_chunks_for_paper
 from worker.config import Settings
-from worker.db import init_db
 from worker.paper_reports import queue_paper_report
 from worker.papers import (
     list_paper_library,
@@ -22,7 +20,6 @@ from worker.papers import (
 
 def test_settings() -> Settings:
     return Settings(
-        db_path=Path(":memory:"),
         obsidian_vault_path=None,
         obsidian_include_dirs=[],
         obsidian_include_tags=[],
@@ -47,7 +44,6 @@ def test_settings() -> Settings:
         rag_prefilter_top_k=20,
         rag_prefilter_min_keep=30,
         rag_prefilter_max_keep=50,
-        vector_index_backend="sqlite",
         llm_providers=[],
         llm_chat_provider_id="",
         llm_chat_model="",
@@ -57,14 +53,11 @@ def test_settings() -> Settings:
     )
 
 
-def _conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    init_db(conn)
-    return conn
+def _conn():
+    return connect_test_db()
 
 
-def _insert_arxiv_paper(conn: sqlite3.Connection, arxiv_id: str = "2605.10001") -> int:
+def _insert_arxiv_paper(conn, arxiv_id: str = "2605.10001") -> int:
     conn.execute(
         """
         INSERT INTO arxiv_papers(
@@ -110,17 +103,13 @@ class PaperLibraryTests(unittest.TestCase):
         self.assertEqual(listed["items"][0]["id"], long_term_id)
 
     def test_library_list_does_not_create_library_papers_from_arxiv_cache(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "library.sqlite"
-            conn = sqlite3.connect(db_path)
-            conn.row_factory = sqlite3.Row
-            init_db(conn)
-            _insert_arxiv_paper(conn, "2605.19999")
-            conn.commit()
+        conn = connect_test_db()
+        _insert_arxiv_paper(conn, "2605.19999")
+        conn.commit()
 
-            listed = list_paper_library(conn, limit=1)
-            paper_count = conn.execute("SELECT COUNT(*) AS count FROM papers").fetchone()["count"]
-            conn.close()
+        listed = list_paper_library(conn, limit=1)
+        paper_count = conn.execute("SELECT COUNT(*) AS count FROM papers").fetchone()["count"]
+        conn.close()
 
         self.assertEqual(listed["total"], 0)
         self.assertEqual(listed["items"], [])
