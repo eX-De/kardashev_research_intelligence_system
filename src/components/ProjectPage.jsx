@@ -361,7 +361,7 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
       }
       cache.markStale(["projects"]);
       cache.markStale(["health"]);
-      cache.markStale(["reminders"]);
+      cache.markStale(["notifications"]);
     }
     if (updateForm && data?.project) {
       setForm(projectToForm(data.project));

@@ -50,7 +50,7 @@ from .recommendations import (
     project_recommendation_paper_rows,
     sync_project_paper_recommendations,
 )
-from .reminders import reminders
+from .notifications import notifications
 
 
 VALID_FEEDBACK = {"relevant", "not_relevant", "read_later", "read", "favorite"}

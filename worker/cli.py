@@ -33,7 +33,7 @@ from .api import (
     project_detail,
     projects,
     receive_experiment_report,
-    reminders,
+    notifications,
     save_feedback,
     save_project,
     update_library_paper_status,
@@ -2039,8 +2039,8 @@ def cmd_delete_run(args: argparse.Namespace) -> None:
     _print_json(result)
 
 
-def cmd_api_reminders(args: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: reminders(conn, int(args.limit)))
+def cmd_api_notifications(args: argparse.Namespace) -> None:
+    result = _with_db(lambda conn, settings: notifications(conn, int(args.limit)))
     _print_json(result)
 
 
@@ -2258,9 +2258,9 @@ def build_parser() -> argparse.ArgumentParser:
     api_jobs_cleanup = sub.add_parser("api-jobs-cleanup")
     api_jobs_cleanup.set_defaults(func=cmd_api_jobs_cleanup)
 
-    api_reminders = sub.add_parser("api-reminders")
-    api_reminders.add_argument("--limit", default="5")
-    api_reminders.set_defaults(func=cmd_api_reminders)
+    api_notifications = sub.add_parser("api-notifications")
+    api_notifications.add_argument("--limit", default="5")
+    api_notifications.set_defaults(func=cmd_api_notifications)
 
     return parser
 

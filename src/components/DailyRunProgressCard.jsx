@@ -14,7 +14,7 @@ export function DailyRunProgressCard({ item }) {
   const startedAt = item?.source?.started_at || item?.created_at;
 
   return (
-    <article className="reminder info daily-progress-card">
+    <article className="notification info daily-progress-card">
       <div className="daily-progress-head">
         <strong>{item?.title || "每日流程运行中"}</strong>
         <span>{completed}/{total}</span>

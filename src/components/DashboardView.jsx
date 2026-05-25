@@ -28,20 +28,20 @@ function paperPath(paperId) {
 export function DashboardView({ setStatusMessage }) {
   const healthQuery = useCachedApi(["health", "summary"], () => api("/api/health/summary"), { staleTime: 60000 });
   const jobStatusQuery = useCachedApi(["jobs", "status"], () => api("/api/jobs/status"), { staleTime: 5000 });
-  const remindersQuery = useCachedApi(["reminders", 5], () => api("/api/reminders?limit=5"), { staleTime: 30000 });
+  const notificationsQuery = useCachedApi(["notifications", 5], () => api("/api/notifications?limit=5"), { staleTime: 30000 });
   const artifactsQuery = useCachedApi(["artifacts", "list", "limit=8"], () => api("/api/artifacts?limit=8"), { staleTime: 60000 });
   const papersQuery = useCachedApi(["library", "list", "status=saved&limit=8"], () => api("/api/library?status=saved&limit=8"), { staleTime: 60000 });
-  const queries = [healthQuery, jobStatusQuery, remindersQuery, artifactsQuery, papersQuery];
+  const queries = [healthQuery, jobStatusQuery, notificationsQuery, artifactsQuery, papersQuery];
 
   useEffect(() => {
     const error = queries.find((query) => query.error)?.error;
     if (error) setStatusMessage(error.message);
-  }, [healthQuery.error, jobStatusQuery.error, remindersQuery.error, artifactsQuery.error, papersQuery.error, setStatusMessage]);
+  }, [healthQuery.error, jobStatusQuery.error, notificationsQuery.error, artifactsQuery.error, papersQuery.error, setStatusMessage]);
 
   const loading = queries.some((query) => !query.hasData);
   const health = healthQuery.data || null;
   const jobStatus = jobStatusQuery.data || null;
-  const reminders = remindersQuery.data?.items || [];
+  const notifications = notificationsQuery.data?.items || [];
   const artifacts = artifactsQuery.data?.items || [];
   const papers = papersQuery.data?.items || [];
 
@@ -56,8 +56,8 @@ export function DashboardView({ setStatusMessage }) {
   const counts = health?.counts || {};
   const currentJob = jobStatus?.scheduler?.current_job;
   const latestJob = health?.latest_job;
-  const dailyRunReminder = reminders.find((item) => item.progress);
-  const actionReminders = reminders.filter((item) => item.id !== dailyRunReminder?.id);
+  const dailyRunNotification = notifications.find((item) => item.progress);
+  const listNotifications = notifications.filter((item) => item.id !== dailyRunNotification?.id);
   const recentUpdates = [
     ...artifacts.map((artifact) => ({
       id: `artifact-${artifact.id}`,
@@ -84,7 +84,7 @@ export function DashboardView({ setStatusMessage }) {
       <header className="project-dashboard-header">
         <div>
           <h1>首页</h1>
-          <p>今日状态、待处理事项和最近更新。</p>
+          <p>今日状态、通知和最近更新。</p>
         </div>
         <button onClick={refresh} type="button">刷新</button>
       </header>
@@ -96,8 +96,8 @@ export function DashboardView({ setStatusMessage }) {
             <LoadingPanel compact rows={5} title="读取今日状态" />
           ) : (
             <>
-              {dailyRunReminder ? (
-                <DailyRunProgressCard item={dailyRunReminder} />
+              {dailyRunNotification ? (
+                <DailyRunProgressCard item={dailyRunNotification} />
               ) : (
                 <div className={`current-run-card ${currentJob ? "running" : latestJob?.status === "failed" ? "bad" : "idle"}`}>
                   <span>{currentJob ? "运行中" : "当前状态"}</span>
@@ -116,18 +116,18 @@ export function DashboardView({ setStatusMessage }) {
         </section>
 
         <section className="panel">
-          <PanelTitle title="待处理事项" subtitle="只显示需要关注的运行、异常和决策提醒。" />
+          <PanelTitle title="通知" subtitle="只显示需要关注的运行、异常和决策通知。" />
           {loading ? (
-            <LoadingPanel compact rows={4} title="读取提醒" />
+            <LoadingPanel compact rows={4} title="读取通知" />
           ) : (
             <div className="compact-list">
-              {actionReminders.map((item) => (
+              {listNotifications.map((item) => (
                 <article className={`compact-item ${item.severity || ""}`} key={item.id}>
                   <strong>{item.title}</strong>
                   <p>{item.detail}{item.created_at ? ` · ${fmtDate(item.created_at)}` : ""}</p>
                 </article>
               ))}
-              {!actionReminders.length ? <p className="muted">暂无待处理事项。</p> : null}
+              {!listNotifications.length ? <p className="muted">暂无通知。</p> : null}
             </div>
           )}
         </section>

@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from .db_types import DbConnection, DbRow
+from .db_types import DbConnection
 from collections.abc import Callable
 from typing import Any
 
 from .db import from_json
 
 
-ReminderBuilder = Callable[[dict[str, Any]], list[dict[str, Any]]]
-REGISTERED_REMINDER_EVENTS: list[dict[str, Any]] = []
+NotificationBuilder = Callable[[dict[str, Any]], list[dict[str, Any]]]
+REGISTERED_NOTIFICATION_BUILDERS: list[dict[str, Any]] = []
 
 JOB_TITLES = {
     "run-daily": "每日流程",
@@ -23,9 +23,9 @@ JOB_TITLES = {
 }
 
 
-def register_reminder_event(event_type: str, description: str) -> Callable[[ReminderBuilder], ReminderBuilder]:
-    def decorator(builder: ReminderBuilder) -> ReminderBuilder:
-        REGISTERED_REMINDER_EVENTS.append(
+def register_notification_builder(event_type: str, description: str) -> Callable[[NotificationBuilder], NotificationBuilder]:
+    def decorator(builder: NotificationBuilder) -> NotificationBuilder:
+        REGISTERED_NOTIFICATION_BUILDERS.append(
             {"type": event_type, "description": description, "builder": builder}
         )
         return builder
@@ -45,25 +45,37 @@ def _meta_number(meta: dict[str, Any], keys: list[str]) -> int:
     return 0
 
 
-def _event(
-    event_id: str,
-    event_type: str,
+def _safe_int(value: Any) -> int | None:
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _notification(
+    notification_id: str,
+    notification_type: str,
     severity: str,
     title: str,
     detail: str,
     *,
     created_at: str | None = None,
     source: dict[str, Any] | None = None,
+    channels: list[str] | None = None,
+    requires_action: bool = False,
     progress: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     item: dict[str, Any] = {
-        "id": event_id,
-        "type": event_type,
+        "id": notification_id,
+        "type": notification_type,
         "severity": severity,
         "title": title,
         "detail": detail,
         "created_at": created_at,
         "source": source or {},
+        "channels": channels or ["list"],
+        "requires_action": requires_action,
     }
     if progress:
         item["progress"] = progress
@@ -74,7 +86,7 @@ def _activity_time(item: dict[str, Any]) -> str:
     return str(item.get("finished_at") or item.get("started_at") or "")
 
 
-def _reminder_sort_key(item: dict[str, Any]) -> tuple[int, str, int]:
+def _notification_sort_key(item: dict[str, Any]) -> tuple[int, str, int]:
     active_types = {
         "daily_run_progress",
         "job_running",
@@ -132,6 +144,36 @@ def _paper_report_stats(conn: DbConnection) -> dict[str, int]:
     return stats
 
 
+def _experiment_report_rows(conn: DbConnection, limit: int = 5) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT id, scope_id, title, source_json, updated_at
+        FROM artifacts
+        WHERE artifact_type = 'experiment_report'
+          AND status != 'removed'
+        ORDER BY updated_at DESC, id DESC
+        LIMIT ?
+        """,
+        (max(1, int(limit or 5)),),
+    ).fetchall()
+    items = []
+    for row in rows:
+        source_raw = from_json(row["source_json"], {})
+        source = source_raw if isinstance(source_raw, dict) else {}
+        project_id = _safe_int(source.get("project_id")) or _safe_int(row["scope_id"])
+        source_agent = str(source.get("source_agent") or source.get("source") or "").strip()
+        items.append(
+            {
+                "id": int(row["id"]),
+                "project_id": project_id,
+                "title": row["title"],
+                "source_agent": source_agent,
+                "updated_at": row["updated_at"],
+            }
+        )
+    return items
+
+
 def _completed(activities: list[dict[str, Any]], predicate: Callable[[dict[str, Any], dict[str, Any]], bool]) -> dict[str, Any] | None:
     return next(
         (
@@ -143,7 +185,7 @@ def _completed(activities: list[dict[str, Any]], predicate: Callable[[dict[str, 
     )
 
 
-@register_reminder_event("daily_run_progress", "每日流程运行中的步骤进度")
+@register_notification_builder("daily_run_progress", "每日流程运行中的步骤进度")
 def _daily_run_progress(context: dict[str, Any]) -> list[dict[str, Any]]:
     running_daily = next(
         (
@@ -158,7 +200,7 @@ def _daily_run_progress(context: dict[str, Any]) -> list[dict[str, Any]]:
         return []
     current = progress.get("current_label") or "准备中"
     return [
-        _event(
+        _notification(
             "daily-run-progress",
             "daily_run_progress",
             "info",
@@ -171,7 +213,7 @@ def _daily_run_progress(context: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-@register_reminder_event("job_running", "非每日流程任务运行中")
+@register_notification_builder("job_running", "非每日流程任务运行中")
 def _job_running(context: dict[str, Any]) -> list[dict[str, Any]]:
     if any(item.get("type") == "daily_run_progress" for item in context["items"]):
         return []
@@ -179,7 +221,7 @@ def _job_running(context: dict[str, Any]) -> list[dict[str, Any]]:
     if not running:
         return []
     return [
-        _event(
+        _notification(
             f"job-running-{running['id']}",
             "job_running",
             "info",
@@ -191,7 +233,7 @@ def _job_running(context: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-@register_reminder_event("job_failed", "最近失败任务")
+@register_notification_builder("job_failed", "最近失败任务")
 def _job_failed(context: dict[str, Any]) -> list[dict[str, Any]]:
     failed = next(
         (
@@ -210,7 +252,7 @@ def _job_failed(context: dict[str, Any]) -> list[dict[str, Any]]:
     if not failed:
         return []
     return [
-        _event(
+        _notification(
             f"job-failed-{failed['id']}",
             "job_failed",
             "bad",
@@ -222,7 +264,7 @@ def _job_failed(context: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-@register_reminder_event("daily_run_completed", "每日流程完成摘要")
+@register_notification_builder("daily_run_completed", "每日流程完成摘要")
 def _daily_run_completed(context: dict[str, Any]) -> list[dict[str, Any]]:
     completed_daily = _completed(
         context["activities"],
@@ -250,7 +292,7 @@ def _daily_run_completed(context: dict[str, Any]) -> list[dict[str, Any]]:
     if meta.get("daily_report_path"):
         parts.append(f"日报 {meta['daily_report_path']}")
     return [
-        _event(
+        _notification(
             f"daily-run-completed-{completed_daily['id']}",
             "daily_run_completed",
             "ok",
@@ -262,7 +304,7 @@ def _daily_run_completed(context: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-@register_reminder_event("arxiv_papers_arrived", "新 arXiv 论文入库")
+@register_notification_builder("arxiv_papers_arrived", "新 arXiv 论文入库")
 def _arxiv_papers_arrived(context: dict[str, Any]) -> list[dict[str, Any]]:
     paper_job = _completed(
         context["activities"],
@@ -272,7 +314,7 @@ def _arxiv_papers_arrived(context: dict[str, Any]) -> list[dict[str, Any]]:
         return []
     count = _meta_number(paper_job["meta"], ["arxiv_papers_inserted", "papers_inserted"])
     return [
-        _event(
+        _notification(
             f"arxiv-papers-arrived-{paper_job['id']}",
             "arxiv_papers_arrived",
             "info",
@@ -284,7 +326,7 @@ def _arxiv_papers_arrived(context: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-@register_reminder_event("obsidian_sync_completed", "Obsidian 同步完成")
+@register_notification_builder("obsidian_sync_completed", "Obsidian 同步完成")
 def _obsidian_sync_completed(context: dict[str, Any]) -> list[dict[str, Any]]:
     sync_job = _completed(
         context["activities"],
@@ -300,7 +342,7 @@ def _obsidian_sync_completed(context: dict[str, Any]) -> list[dict[str, Any]]:
         else "Obsidian 同步完成"
     )
     return [
-        _event(
+        _notification(
             f"obsidian-sync-completed-{sync_job['id']}",
             "obsidian_sync_completed",
             "ok",
@@ -312,7 +354,7 @@ def _obsidian_sync_completed(context: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-@register_reminder_event("paper_text_cached", "PDF/TXT 缓存完成")
+@register_notification_builder("paper_text_cached", "PDF/TXT 缓存完成")
 def _paper_text_cached(context: dict[str, Any]) -> list[dict[str, Any]]:
     text_job = _completed(
         context["activities"],
@@ -331,7 +373,7 @@ def _paper_text_cached(context: dict[str, Any]) -> list[dict[str, Any]]:
     if failed_count:
         parts.append(f"{failed_count} 篇失败")
     return [
-        _event(
+        _notification(
             f"paper-text-cached-{text_job['id']}",
             "paper_text_cached",
             "ok",
@@ -343,7 +385,7 @@ def _paper_text_cached(context: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-@register_reminder_event("paper_matching_completed", "论文匹配完成")
+@register_notification_builder("paper_matching_completed", "论文匹配完成")
 def _paper_matching_completed(context: dict[str, Any]) -> list[dict[str, Any]]:
     rank_job = _completed(
         context["activities"],
@@ -353,7 +395,7 @@ def _paper_matching_completed(context: dict[str, Any]) -> list[dict[str, Any]]:
         return []
     count = _meta_number(rank_job["meta"], ["matched_papers", "project_paper_matches_created"])
     return [
-        _event(
+        _notification(
             f"paper-matching-completed-{rank_job['id']}",
             "paper_matching_completed",
             "info",
@@ -365,13 +407,13 @@ def _paper_matching_completed(context: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-@register_reminder_event("paper_report_queue_processing", "全文报告队列处理中")
+@register_notification_builder("paper_report_queue_processing", "全文报告队列处理中")
 def _paper_report_queue_processing(context: dict[str, Any]) -> list[dict[str, Any]]:
     stats = context["paper_report_stats"]
     if not stats.get("processing"):
         return []
     return [
-        _event(
+        _notification(
             "paper-report-queue-processing",
             "paper_report_queue_processing",
             "info",
@@ -381,13 +423,13 @@ def _paper_report_queue_processing(context: dict[str, Any]) -> list[dict[str, An
     ]
 
 
-@register_reminder_event("paper_report_queue_failed", "全文报告生成失败积压")
+@register_notification_builder("paper_report_queue_failed", "全文报告生成失败积压")
 def _paper_report_queue_failed(context: dict[str, Any]) -> list[dict[str, Any]]:
     failed = context["paper_report_stats"].get("failed", 0)
     if not failed:
         return []
     return [
-        _event(
+        _notification(
             "paper-report-queue-failed",
             "paper_report_queue_failed",
             "bad",
@@ -397,13 +439,13 @@ def _paper_report_queue_failed(context: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-@register_reminder_event("paper_report_queue_backlog", "全文报告队列排队积压")
+@register_notification_builder("paper_report_queue_backlog", "全文报告队列排队积压")
 def _paper_report_queue_backlog(context: dict[str, Any]) -> list[dict[str, Any]]:
     queued = context["paper_report_stats"].get("queued", 0)
     if not queued:
         return []
     return [
-        _event(
+        _notification(
             "paper-report-queue-backlog",
             "paper_report_queue_backlog",
             "warn",
@@ -413,7 +455,7 @@ def _paper_report_queue_backlog(context: dict[str, Any]) -> list[dict[str, Any]]
     ]
 
 
-@register_reminder_event("paper_report_completed", "最近全文报告生成完成")
+@register_notification_builder("paper_report_completed", "最近全文报告生成完成")
 def _paper_report_completed(context: dict[str, Any]) -> list[dict[str, Any]]:
     report_job = _completed(
         context["activities"],
@@ -423,7 +465,7 @@ def _paper_report_completed(context: dict[str, Any]) -> list[dict[str, Any]]:
         return []
     count = _meta_number(report_job["meta"], ["paper_reports_done"])
     return [
-        _event(
+        _notification(
             f"paper-report-completed-{report_job['id']}",
             "paper_report_completed",
             "ok",
@@ -435,30 +477,64 @@ def _paper_report_completed(context: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def reminders(conn: DbConnection, limit: int = 5) -> dict[str, Any]:
+@register_notification_builder("experiment_report_arrived", "KRIS agent 实验报告到达")
+def _experiment_report_arrived(context: dict[str, Any]) -> list[dict[str, Any]]:
+    items = []
+    for report in context["experiment_reports"]:
+        project_id = report["project_id"]
+        source_agent = report["source_agent"] or "unknown"
+        updated_at = report["updated_at"] or ""
+        detail_parts = [str(report["title"] or "未命名实验报告")]
+        if project_id:
+            detail_parts.append(f"项目 {project_id}")
+        if source_agent:
+            detail_parts.append(f"来源 {source_agent}")
+        if updated_at:
+            detail_parts.append(f"更新于 {updated_at}")
+        items.append(
+            _notification(
+                f"experiment-report-arrived-{report['id']}",
+                "experiment_report_arrived",
+                "info",
+                "收到实验报告",
+                " · ".join(detail_parts),
+                created_at=updated_at,
+                source={
+                    "artifact_id": report["id"],
+                    "project_id": project_id,
+                    "source_agent": source_agent,
+                },
+                channels=["list"],
+            )
+        )
+    return items
+
+
+def notifications(conn: DbConnection, limit: int = 5) -> dict[str, Any]:
     context: dict[str, Any] = {
         "activities": _activity_rows(conn, 20),
         "paper_report_stats": _paper_report_stats(conn),
+        "experiment_reports": _experiment_report_rows(conn, min(max(1, int(limit or 5)), 10)),
         "items": [],
     }
-    for entry in REGISTERED_REMINDER_EVENTS:
+    for entry in REGISTERED_NOTIFICATION_BUILDERS:
         built = entry["builder"](context)
         context["items"].extend(built)
-    items = sorted(context["items"], key=_reminder_sort_key, reverse=True)[: max(1, int(limit or 5))]
+    items = sorted(context["items"], key=_notification_sort_key, reverse=True)[: max(1, int(limit or 5))]
     if not items:
         items = [
-            _event(
+            _notification(
                 "empty",
                 "empty",
                 "neutral",
-                "暂无新提醒",
+                "暂无通知",
                 "没有新的任务完成、论文到达或实验同步事件。",
             )
         ]
     return {
         "items": items,
-        "registered_events": [
+        "registered_builders": [
             {"type": entry["type"], "description": entry["description"]}
-            for entry in REGISTERED_REMINDER_EVENTS
+            for entry in REGISTERED_NOTIFICATION_BUILDERS
         ],
     }

@@ -24,17 +24,17 @@ export const API_CACHE_TARGETS = {
   papers: cacheNamespace("paper"),
   projects: cacheNamespace("projects"),
   readerPapers: cacheKey("reader", "papers"),
-  reminders: cacheNamespace("reminders"),
+  notifications: cacheNamespace("notifications"),
   settings: cacheKey("settings")
 };
 
 export const DEFAULT_API_CACHE_EVENT_RULES = {
   "artifacts.changed": {
-    invalidate: [API_CACHE_TARGETS.artifacts, API_CACHE_TARGETS.health, API_CACHE_TARGETS.reminders]
+    invalidate: [API_CACHE_TARGETS.artifacts, API_CACHE_TARGETS.health, API_CACHE_TARGETS.notifications]
   },
   "jobs.changed": {
     refresh: [API_CACHE_TARGETS.jobsStatus],
-    invalidate: [API_CACHE_TARGETS.jobsHistory, API_CACHE_TARGETS.paperReports, API_CACHE_TARGETS.health, API_CACHE_TARGETS.reminders]
+    invalidate: [API_CACHE_TARGETS.jobsHistory, API_CACHE_TARGETS.paperReports, API_CACHE_TARGETS.health, API_CACHE_TARGETS.notifications]
   },
   "jobs.finished": {
     refresh: [API_CACHE_TARGETS.jobsStatus],
@@ -42,14 +42,14 @@ export const DEFAULT_API_CACHE_EVENT_RULES = {
       API_CACHE_TARGETS.jobsHistory,
       API_CACHE_TARGETS.paperReports,
       API_CACHE_TARGETS.health,
-      API_CACHE_TARGETS.reminders,
+      API_CACHE_TARGETS.notifications,
       API_CACHE_TARGETS.artifacts,
       API_CACHE_TARGETS.library
     ]
   },
   "jobs.started": {
     refresh: [API_CACHE_TARGETS.jobsStatus],
-    invalidate: [API_CACHE_TARGETS.jobsHistory, API_CACHE_TARGETS.reminders]
+    invalidate: [API_CACHE_TARGETS.jobsHistory, API_CACHE_TARGETS.notifications]
   },
   "papers.changed": {
     invalidate: [
@@ -58,14 +58,14 @@ export const DEFAULT_API_CACHE_EVENT_RULES = {
       API_CACHE_TARGETS.readerPapers,
       API_CACHE_TARGETS.paperReports,
       API_CACHE_TARGETS.health,
-      API_CACHE_TARGETS.reminders
+      API_CACHE_TARGETS.notifications
     ]
   },
   "projects.changed": {
-    invalidate: [API_CACHE_TARGETS.projects, API_CACHE_TARGETS.health, API_CACHE_TARGETS.reminders]
+    invalidate: [API_CACHE_TARGETS.projects, API_CACHE_TARGETS.health, API_CACHE_TARGETS.notifications]
   },
   "reports.changed": {
-    invalidate: [API_CACHE_TARGETS.paperReports, API_CACHE_TARGETS.artifacts, API_CACHE_TARGETS.reminders]
+    invalidate: [API_CACHE_TARGETS.paperReports, API_CACHE_TARGETS.artifacts, API_CACHE_TARGETS.notifications]
   },
   "settings.changed": {
     invalidate: [API_CACHE_TARGETS.settings, API_CACHE_TARGETS.health],

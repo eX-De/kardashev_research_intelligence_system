@@ -58,12 +58,43 @@ function asStringId(value) {
   return value === null || value === undefined ? "" : String(value);
 }
 
+function notificationChannels(notification) {
+  if (!notification || typeof notification !== "object") return [];
+  if (Array.isArray(notification.channels)) return notification.channels.map((channel) => String(channel).toLowerCase());
+  if (notification.channels) return [String(notification.channels).toLowerCase()];
+  return [];
+}
+
+function eventNotification(event, data) {
+  const candidates = [event?.notification, data?.notification];
+  return candidates.find((candidate) => candidate && typeof candidate === "object") || null;
+}
+
+function notificationToastType(notification) {
+  const severity = String(notification?.severity || "").toLowerCase();
+  if (severity === "bad" || severity === "error") return "error";
+  if (severity === "warn" || severity === "warning") return "warning";
+  if (severity === "ok" || severity === "success") return "success";
+  return "info";
+}
+
+function notifyToastNotification(notify, notification) {
+  if (!notificationChannels(notification).includes("toast")) return null;
+
+  const title = typeof notification?.title === "string" ? notification.title.trim() : "";
+  const detail = typeof notification?.detail === "string" ? notification.detail.trim() : "";
+  const message = title && detail ? `${title}: ${detail}` : title || detail;
+
+  if (!message) return null;
+  return notify(message, { type: notificationToastType(notification) });
+}
+
 function markProjectChanged(cache, projectId) {
   cache.markStale(["projects"]);
   if (projectId) cache.markStale(["project", asStringId(projectId)]);
   cache.markStale(["health"]);
   cache.markStale(["health", "summary"]);
-  cache.markStale(["reminders"]);
+  cache.markStale(["notifications"]);
 }
 
 function markArtifactChanged(cache, artifactId) {
@@ -88,7 +119,7 @@ function markPaperChanged(cache, paperId) {
   }
   cache.markStale(["health"]);
   cache.markStale(["health", "summary"]);
-  cache.markStale(["reminders"]);
+  cache.markStale(["notifications"]);
 }
 
 function markReaderPapersChanged(cache, imported = []) {
@@ -120,7 +151,7 @@ function markGlobalStale(cache) {
   cache.markStale(cacheNamespace("project"));
   cache.markStale(["artifacts"]);
   cache.markStale(cacheNamespace("artifact"));
-  cache.markStale(["reminders"]);
+  cache.markStale(["notifications"]);
 }
 
 function applyServerEvent(cache, event) {
@@ -138,6 +169,7 @@ function applyServerEvent(cache, event) {
   if (type === SERVER_EVENTS.EXPERIMENT_REPORT_UPSERTED) {
     markProjectChanged(cache, projectId);
     markArtifactChanged(cache, artifactId);
+    cache.markStale(["notifications"]);
     return;
   }
 
@@ -208,10 +240,11 @@ function applyServerEvent(cache, event) {
     cache.markStale(cacheNamespace("reader", "paper"));
     cache.markStale(["health"]);
     cache.markStale(["health", "summary"]);
+    cache.markStale(["notifications"]);
   }
 }
 
-export function useServerEvents({ enabled = true, notify = () => {} } = {}) {
+export function useServerEvents({ enabled = true, notify = () => {}, notifyNotification = null } = {}) {
   const cache = useApiCacheClient();
 
   useEffect(() => {
@@ -233,9 +266,10 @@ export function useServerEvents({ enabled = true, notify = () => {} } = {}) {
         return;
       }
       applyServerEvent(cache, event);
-      if (event?.type === SERVER_EVENTS.EXPERIMENT_REPORT_UPSERTED) {
-        notify("收到新的实验报告", { type: "info" });
-      }
+      const data = event?.data && typeof event.data === "object" ? event.data : event;
+      const notification = eventNotification(event, data);
+      if (typeof notifyNotification === "function") notifyNotification(notification);
+      else notifyToastNotification(notify, notification);
     };
     const eventTypes = Object.values(SERVER_EVENTS);
 
@@ -256,5 +290,5 @@ export function useServerEvents({ enabled = true, notify = () => {} } = {}) {
       source.removeEventListener("open", handleOpen);
       source.close();
     };
-  }, [cache, enabled, notify]);
+  }, [cache, enabled, notify, notifyNotification]);
 }

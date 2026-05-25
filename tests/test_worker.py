@@ -70,7 +70,7 @@ from worker.paper_reader import (
     save_reader_note_to_obsidian,
     retry_reader_report,
 )
-from worker.reminders import reminders
+from worker.notifications import notifications
 from worker.recommendations import sync_project_paper_recommendations
 from worker.reports import generate_daily_report
 from worker.search import hybrid_search, rank_project_papers, rank_unmatched_papers
@@ -2298,7 +2298,7 @@ class WorkerTests(unittest.TestCase):
         state = conn.execute("SELECT state FROM project_paper_recommendations").fetchone()["state"]
         self.assertEqual(state, "discarded")
 
-    def test_reminder_registry_includes_paper_report_queue_events(self) -> None:
+    def test_notification_registry_includes_paper_report_queue_events(self) -> None:
         conn = connect_test_db()
         init_db(conn)
         conn.execute(
@@ -2308,7 +2308,7 @@ class WorkerTests(unittest.TestCase):
               updated_at, link, pdf_link, text_status, fetched_batch_id, created_at
             )
             VALUES (
-              '2605.00015', 'Reminder Report Paper', '[]', 'Abstract', '["cs.AI"]',
+              '2605.00015', 'Notification Report Paper', '[]', 'Abstract', '["cs.AI"]',
               '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z',
               'https://arxiv.org/abs/2605.00015', 'https://arxiv.org/pdf/2605.00015',
               'complete', 'batch', 'now'
@@ -2319,15 +2319,16 @@ class WorkerTests(unittest.TestCase):
         seed_paper_report_artifact(conn, paper_id, status="queued", prompt=PAPER_READER_DEFAULT_PROMPT)
         conn.commit()
 
-        result = reminders(conn, limit=10)
+        result = notifications(conn, limit=10)
 
-        registered = {event["type"] for event in result["registered_events"]}
+        registered = {builder["type"] for builder in result["registered_builders"]}
         item_types = {item["type"] for item in result["items"]}
         self.assertIn("daily_run_completed", registered)
         self.assertIn("paper_report_queue_backlog", registered)
         self.assertIn("paper_report_queue_backlog", item_types)
+        self.assertTrue(all("channels" in item for item in result["items"]))
 
-    def test_reminders_hide_superseded_failure_and_sort_by_latest_event(self) -> None:
+    def test_notifications_hide_superseded_failure_and_sort_by_latest_event(self) -> None:
         conn = connect_test_db()
         init_db(conn)
         conn.execute(
@@ -2364,12 +2365,45 @@ class WorkerTests(unittest.TestCase):
         )
         conn.commit()
 
-        result = reminders(conn, limit=5)
+        result = notifications(conn, limit=5)
         item_types = [item["type"] for item in result["items"]]
 
         self.assertEqual(item_types[0], "paper_report_completed")
         self.assertIn("daily_run_completed", item_types)
         self.assertNotIn("job_failed", item_types)
+
+    def test_notifications_include_recent_experiment_reports(self) -> None:
+        conn = connect_test_db()
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO research_projects(name, status, keywords_json, created_at, updated_at)
+            VALUES ('Experiment Notification Project', 'active', '[]', 'now', 'now')
+            """
+        )
+        project_id = conn.execute("SELECT id FROM research_projects").fetchone()["id"]
+        artifact = upsert_artifact(
+            conn,
+            scope_type="project",
+            scope_id=int(project_id),
+            artifact_type="experiment_report",
+            title="KRIS run 42",
+            content_markdown="Report",
+            content_json={"project_id": int(project_id), "source_agent": "codex"},
+            source_json={"source": "kris-agent", "source_agent": "codex", "project_id": int(project_id)},
+            source_key="experiment_report:test-notification",
+            commit=False,
+        )
+        conn.commit()
+
+        result = notifications(conn, limit=10)
+        report_item = next(item for item in result["items"] if item["type"] == "experiment_report_arrived")
+
+        self.assertEqual(report_item["title"], "收到实验报告")
+        self.assertEqual(report_item["channels"], ["list"])
+        self.assertEqual(report_item["source"]["artifact_id"], int(artifact["id"]))
+        self.assertEqual(report_item["source"]["project_id"], int(project_id))
+        self.assertEqual(report_item["source"]["source_agent"], "codex")
 
     def test_accept_recommendation_without_obsidian_vault_skips_sync_only(self) -> None:
         conn = connect_test_db()

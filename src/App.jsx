@@ -19,13 +19,19 @@ import { PapersWorkspaceView } from "./components/PapersWorkspaceView.jsx";
 import { ProjectPage } from "./components/ProjectPage.jsx";
 import { ProjectsView } from "./components/ProjectsView.jsx";
 import { Sidebar } from "./components/Sidebar.jsx";
-import { TasksView } from "./components/TasksView.jsx";
 import { ToastHost } from "./components/ToastHost.jsx";
 import { ApiCacheProvider } from "./lib/apiCache.jsx";
 import { AUTH_REQUIRED_EVENT, api, postJson } from "./lib/dashboard.js";
 import { useServerEvents } from "./lib/serverEvents.js";
 
 const TOAST_TYPES = new Set(["success", "error", "info", "warning"]);
+const NOTIFICATION_TOAST_TYPES = {
+  bad: "error",
+  info: "info",
+  neutral: "info",
+  ok: "success",
+  warn: "warning"
+};
 const DEFAULT_TOAST_DURATION = 3500;
 const ERROR_TOAST_DURATION = 5500;
 const MAX_TOASTS = 4;
@@ -160,7 +166,7 @@ function AppRoutes({ notify, setStatusMessage }) {
       <Route path="/projects" element={<ProjectsRoute setStatusMessage={setStatusMessage} />} />
       <Route path="/projects/new" element={<ProjectPageRoute isNew setStatusMessage={setStatusMessage} />} />
       <Route path="/projects/:projectId" element={<ProjectPageRoute setStatusMessage={setStatusMessage} />} />
-      <Route path="/tasks" element={<TasksView setStatusMessage={setStatusMessage} />} />
+      <Route path="/tasks" element={<Navigate to="/settings" replace />} />
       <Route path="/settings" element={<ControlView setStatusMessage={setStatusMessage} notify={notify} />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
@@ -268,15 +274,15 @@ function ProtectedShell({ authInfo, authStatusLabel, notify, onLogout, setStatus
   );
 }
 
-function ServerEventBridge({ notify }) {
-  useServerEvents({ notify });
+function ServerEventBridge({ notify, notifyNotification }) {
+  useServerEvents({ notify, notifyNotification });
   return null;
 }
 
 function CachedProtectedShell(props) {
   return (
     <ApiCacheProvider>
-      <ServerEventBridge notify={props.notify} />
+      <ServerEventBridge notify={props.notify} notifyNotification={props.notifyNotification} />
       <ProtectedShell {...props} />
     </ApiCacheProvider>
   );
@@ -319,6 +325,24 @@ function AuthenticatedApp() {
 
     return id;
   }, []);
+
+  const notifyNotification = useCallback((notification) => {
+    if (!notification || typeof notification !== "object") return null;
+    const channels = Array.isArray(notification.channels)
+      ? notification.channels.map((channel) => String(channel).toLowerCase())
+      : notification.channels
+        ? [String(notification.channels).toLowerCase()]
+        : [];
+    if (!channels.includes("toast")) return null;
+
+    const title = typeof notification.title === "string" ? notification.title.trim() : "";
+    const detail = typeof notification.detail === "string" ? notification.detail.trim() : "";
+    const message = [title, detail].filter(Boolean).join("：");
+    if (!message) return null;
+
+    const type = NOTIFICATION_TOAST_TYPES[notification.severity] || "info";
+    return notify(message, { type });
+  }, [notify]);
 
   useEffect(() => {
     let active = true;
@@ -401,6 +425,7 @@ function AuthenticatedApp() {
               authInfo={authState.info}
               authStatusLabel={authStatusLabel(authState.info)}
               notify={notify}
+              notifyNotification={notifyNotification}
               onDismissToast={dismissToast}
               onLogout={handleLogout}
               setStatusMessage={setStatusMessage}

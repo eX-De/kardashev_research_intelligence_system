@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { LoadingPanel } from "./Loading.jsx";
 import { PanelTitle } from "./PanelTitle.jsx";
 import { normalizeProviders, providerPayload, SettingsForm } from "./SettingsForm.jsx";
+import { TaskControlPanel } from "./TaskControlPanel.jsx";
+import { TaskHistoryPanel } from "./TaskHistoryPanel.jsx";
 import { useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { api, chooseLocalPath, postJson } from "../lib/dashboard.js";
 import { friendlyObsidianMessage, obsidianCapabilityFrom } from "../lib/obsidianCapability.js";
@@ -52,6 +55,11 @@ function HealthGrid({ health, settings }) {
   );
 }
 
+function schedulerStatusMessage(scheduler) {
+  const current = scheduler?.current_job;
+  return current ? `Running ${current.command}...` : scheduler?.last_job?.message || scheduler?.last_error?.message || "Idle";
+}
+
 export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) {
   const [settings, setSettings] = useState({});
   const [providers, setProviders] = useState([]);
@@ -65,14 +73,24 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
   const pendingAutosaveRef = useRef(null);
   const lastSavedSignatureRef = useRef("");
   const lastSuccessToastAtRef = useRef(0);
+  const taskDetailsLoadedRef = useRef(false);
   const cache = useApiCacheClient();
   const settingsQuery = useCachedApi(["settings"], () => api("/api/settings"), { staleTime: Infinity });
   const jobStatusQuery = useCachedApi(["jobs", "status"], () => api("/api/jobs/status"), { staleTime: 5000 });
+  const jobsSummaryQuery = useCachedApi(["jobs", "summary"], () => api("/api/jobs/summary"), { staleTime: 15000 });
+  const historyQuery = useCachedApi(["jobs", "history", 12], () => api("/api/jobs/history?limit=12"), { enabled: false, staleTime: 60000 });
   const healthQuery = useCachedApi(["health"], () => api("/api/health"), { staleTime: 30000 });
   const refreshSettingsCache = settingsQuery.refresh;
   const refreshJobStatusCache = jobStatusQuery.refresh;
+  const refreshJobsSummaryCache = jobsSummaryQuery.refresh;
+  const refreshHistoryCache = historyQuery.refresh;
   const refreshHealthCache = healthQuery.refresh;
   const health = healthQuery.data || null;
+  const scheduler = jobStatusQuery.data?.scheduler || {};
+  const jobsSummary = jobsSummaryQuery.data || {};
+  const fallbackHistory = jobsSummary.latest_job ? [{ ...jobsSummary.latest_job, meta: {} }] : [];
+  const history = historyQuery.hasData ? historyQuery.data?.items || [] : fallbackHistory;
+  const tasksLoading = !jobStatusQuery.hasData || !jobsSummaryQuery.hasData;
 
   settingsRef.current = settings;
   providersRef.current = providers;
@@ -93,16 +111,18 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
     return true;
   }, []);
 
-  const refreshControl = useCallback(async ({ hydrate = false } = {}) => {
-    const [settingsData, statusData] = await Promise.all([
+  const refreshControl = useCallback(async ({ hydrate = false, includeTaskHistory = false } = {}) => {
+    const tasks = [
       hydrate ? refreshSettingsCache({ force: true }) : Promise.resolve(null),
       refreshJobStatusCache({ force: true }),
-      refreshHealthCache({ force: true })
-    ]);
+      refreshHealthCache({ force: true }),
+      refreshJobsSummaryCache({ force: true })
+    ];
+    if (includeTaskHistory) tasks.push(refreshHistoryCache({ force: true }));
+    const [settingsData, statusData] = await Promise.all(tasks);
     if (hydrate) hydrateSettings(settingsData, { force: true });
-    const current = statusData.scheduler?.current_job;
-    setStatusMessage(current ? `Running ${current.command}...` : statusData.scheduler?.last_job?.message || statusData.scheduler?.last_error?.message || "Idle");
-  }, [hydrateSettings, refreshHealthCache, refreshJobStatusCache, refreshSettingsCache, setStatusMessage]);
+    setStatusMessage(schedulerStatusMessage(statusData.scheduler || {}));
+  }, [hydrateSettings, refreshHealthCache, refreshHistoryCache, refreshJobStatusCache, refreshJobsSummaryCache, refreshSettingsCache, setStatusMessage]);
 
   useEffect(() => {
     if (settingsQuery.data?.settings) hydrateSettings(settingsQuery.data);
@@ -110,15 +130,20 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
 
   useEffect(() => {
     if (!jobStatusQuery.data?.scheduler) return;
-    const scheduler = jobStatusQuery.data.scheduler;
-    const current = scheduler.current_job;
-    setStatusMessage(current ? `Running ${current.command}...` : scheduler.last_job?.message || scheduler.last_error?.message || "Idle");
+    setStatusMessage(schedulerStatusMessage(jobStatusQuery.data.scheduler));
   }, [jobStatusQuery.data, setStatusMessage]);
 
   useEffect(() => {
-    const error = settingsQuery.error || jobStatusQuery.error || healthQuery.error;
+    if (taskDetailsLoadedRef.current) return undefined;
+    taskDetailsLoadedRef.current = true;
+    refreshHistoryCache({ force: true }).catch((error) => setStatusMessage(error.message));
+    return undefined;
+  }, [refreshHistoryCache, setStatusMessage]);
+
+  useEffect(() => {
+    const error = settingsQuery.error || jobStatusQuery.error || jobsSummaryQuery.error || historyQuery.error || healthQuery.error;
     if (error) setStatusMessage(error.message);
-  }, [healthQuery.error, jobStatusQuery.error, setStatusMessage, settingsQuery.error]);
+  }, [healthQuery.error, historyQuery.error, jobStatusQuery.error, jobsSummaryQuery.error, setStatusMessage, settingsQuery.error]);
 
   const showSaveSuccess = useCallback(({ force = false } = {}) => {
     const now = Date.now();
@@ -239,6 +264,51 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
     setProviders((current) => current.map((provider, providerIndex) => providerIndex === index ? { ...provider, [field]: value } : provider));
   }
 
+  async function refreshTaskActivity({ includeHistory = true } = {}) {
+    const refreshes = [
+      refreshJobStatusCache({ force: true }),
+      refreshJobsSummaryCache({ force: true })
+    ];
+    if (includeHistory) refreshes.push(refreshHistoryCache({ force: true }));
+    const [statusData] = await Promise.all(refreshes);
+    setStatusMessage(schedulerStatusMessage(statusData.scheduler || {}));
+    return statusData;
+  }
+
+  async function setSchedulerSettings(payload) {
+    setStatusMessage("Updating scheduler...");
+    try {
+      const data = await postJson("/api/settings", payload);
+      if (data.settings) {
+        cache.setCache(["settings"], data);
+        hydrateSettings(data, { force: true });
+      } else {
+        const settingsData = await refreshSettingsCache({ force: true });
+        hydrateSettings(settingsData, { force: true });
+      }
+      if (data.scheduler) {
+        cache.setCache(["jobs", "status"], { scheduler: data.scheduler });
+        setStatusMessage(schedulerStatusMessage(data.scheduler));
+      }
+      cache.markStale(["health"]);
+      await refreshTaskActivity({ includeHistory: false });
+      refreshHealthCache({ force: true }).catch((error) => setStatusMessage(error.message));
+    } catch (error) {
+      setStatusMessage(error.message);
+    }
+  }
+
+  async function runJob(name, endpoint = `/api/jobs/${name}`) {
+    setStatusMessage(`Running ${name}...`);
+    try {
+      const data = await postJson(endpoint);
+      setStatusMessage(data.message || `${name} finished`);
+      await refreshTaskActivity({ includeHistory: true });
+    } catch (error) {
+      setStatusMessage(error.message);
+    }
+  }
+
   async function pickPath(name, { mode, relativeTo, title }) {
     setStatusMessage("正在打开本地路径选择器...");
     try {
@@ -305,16 +375,31 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
           <h1>设置</h1>
           <p>系统连接、模型路由、论文源、检索策略和自动化规则。</p>
         </div>
-        <button onClick={() => refreshControl({ hydrate: false }).catch((error) => setStatusMessage(error.message))} type="button">
+        <button onClick={() => refreshControl({ hydrate: false, includeTaskHistory: true }).catch((error) => setStatusMessage(error.message))} type="button">
           刷新状态
         </button>
       </header>
 
       <div className="control-grid">
         <section className="panel">
-          <PanelTitle title="连接状态" subtitle="这里只显示基础设施连通性；任务执行和历史统一放在任务页。" />
+          <PanelTitle title="连接状态" subtitle="基础设施连通性；任务控制和最近历史在本页下方。" />
           <HealthGrid health={health} settings={settings} />
         </section>
+
+        {tasksLoading ? (
+          <LoadingPanel className="panel" description="正在同步调度器和任务摘要。" rows={5} title="读取任务状态" />
+        ) : (
+          <TaskControlPanel
+            scheduler={scheduler}
+            onStartStartup={() => setSchedulerSettings({ run_daily_on_startup_enabled: true, scheduler_enabled: false })}
+            onStartScheduler={() => setSchedulerSettings({ run_daily_on_startup_enabled: false, scheduler_enabled: true })}
+            onStopScheduler={() => setSchedulerSettings({ run_daily_on_startup_enabled: false, scheduler_enabled: false })}
+            onRunNow={() => runJob("run-daily", "/api/jobs/run-now")}
+            onResumeDaily={() => runJob("resume-daily", "/api/jobs/resume-daily")}
+            onRetryDaily={() => runJob("retry-daily", "/api/jobs/retry-daily")}
+            onRunJob={runJob}
+          />
+        )}
       </div>
 
       <section className="panel">
@@ -331,6 +416,8 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
           saveStatus={saveStatus}
         />
       </section>
+
+      <TaskHistoryPanel history={history} loading={tasksLoading} refreshing={historyQuery.refreshing} />
 
     </section>
   );

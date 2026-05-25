@@ -488,18 +488,29 @@ function compactExperimentReportPayload(data) {
     ? data.knowledge_document
     : contentJson.knowledge_document;
 
+  const projectId = contentJson.project_id ?? artifact.scope_id ?? null;
+  const sourceAgent = contentJson.source_agent ?? null;
+  const artifactId = artifact.id ?? null;
+  const updatedAt = artifact.updated_at ?? contentJson.received_at ?? null;
+  const detail = [
+    artifact.title || "未命名实验报告",
+    projectId ? `项目 ${projectId}` : "",
+    sourceAgent ? `来源 ${sourceAgent}` : "",
+    updatedAt ? `更新于 ${updatedAt}` : ""
+  ].filter(Boolean).join(" · ");
+
   return {
     artifact: {
-      id: artifact.id ?? null,
+      id: artifactId,
       artifact_type: artifact.artifact_type ?? null,
       title: artifact.title ?? null,
       scope_type: artifact.scope_type ?? null,
       scope_id: artifact.scope_id ?? null,
       created_at: artifact.created_at ?? null,
-      updated_at: artifact.updated_at ?? null
+      updated_at: updatedAt
     },
-    project_id: contentJson.project_id ?? artifact.scope_id ?? null,
-    source_agent: contentJson.source_agent ?? null,
+    project_id: projectId,
+    source_agent: sourceAgent,
     idempotency_key: contentJson.idempotency_key ?? null,
     received_at: contentJson.received_at ?? null,
     knowledge_document: knowledgeDocument ? {
@@ -509,7 +520,22 @@ function compactExperimentReportPayload(data) {
       relation: knowledgeDocument.relation ?? null,
       source_type: knowledgeDocument.source_type ?? null
     } : null,
-    obsidian: data?.obsidian ?? contentJson.obsidian_export ?? null
+    obsidian: data?.obsidian ?? contentJson.obsidian_export ?? null,
+    notification: {
+      id: artifactId ? `experiment-report-upserted-${artifactId}` : "experiment-report-upserted",
+      type: "experiment_report_arrived",
+      severity: "info",
+      title: "收到实验报告",
+      detail,
+      created_at: updatedAt,
+      source: {
+        artifact_id: artifactId,
+        project_id: projectId,
+        source_agent: sourceAgent
+      },
+      channels: ["toast"],
+      requires_action: false
+    }
   };
 }
 
@@ -1581,9 +1607,9 @@ async function routeApi(req, res, url) {
     return;
   }
 
-  if (req.method === "GET" && url.pathname === "/api/reminders") {
+  if (req.method === "GET" && url.pathname === "/api/notifications") {
     const limit = url.searchParams.get("limit") || "5";
-    const data = await jsonFromWorker(["api-reminders", "--limit", limit]);
+    const data = await jsonFromWorker(["api-notifications", "--limit", limit]);
     sendJson(res, 200, data);
     return;
   }

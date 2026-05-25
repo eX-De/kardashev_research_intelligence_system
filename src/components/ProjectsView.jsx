@@ -9,9 +9,9 @@ function sumProject(projects, field) {
   return projects.reduce((total, project) => total + Number(project[field] || 0), 0);
 }
 
-function Reminder({ item }) {
+function Notification({ item }) {
   return (
-    <article className={`reminder ${item.severity || "neutral"}`}>
+    <article className={`notification ${item.severity || "neutral"}`}>
       <strong>{item.title}</strong>
       <p>
         {item.detail}
@@ -21,41 +21,41 @@ function Reminder({ item }) {
   );
 }
 
-function ProjectReminders({ reminders }) {
-  const projectItems = reminders.filter((item) => !item.progress);
+function ProjectNotifications({ notifications }) {
+  const projectItems = notifications.filter((item) => !item.progress);
   const items = projectItems.length ? projectItems : [
     {
       id: "empty",
       severity: "neutral",
-      title: "暂无新提醒",
+      title: "暂无新通知",
       detail: "没有新的项目相关动态。"
     }
   ];
   return (
-    <div className="project-reminders">
-      {items.slice(0, 5).map((item) => <Reminder item={item} key={item.id} />)}
+    <div className="project-notifications">
+      {items.slice(0, 5).map((item) => <Notification item={item} key={item.id} />)}
     </div>
   );
 }
 
 export function ProjectsView({ onOpenProject, onNewProject, setStatusMessage }) {
   const projectsQuery = useCachedApi(["projects"], () => api("/api/projects"), { staleTime: 60000 });
-  const remindersQuery = useCachedApi(["reminders", 5], () => api("/api/reminders?limit=5"), { staleTime: 30000 });
+  const notificationsQuery = useCachedApi(["notifications", 5], () => api("/api/notifications?limit=5"), { staleTime: 30000 });
 
   useEffect(() => {
-    const error = projectsQuery.error || remindersQuery.error;
+    const error = projectsQuery.error || notificationsQuery.error;
     if (error) setStatusMessage(error.message);
-  }, [projectsQuery.error, remindersQuery.error, setStatusMessage]);
+  }, [projectsQuery.error, notificationsQuery.error, setStatusMessage]);
 
   const projects = projectsQuery.data?.items || [];
-  const reminders = remindersQuery.data?.items || [];
-  const loading = !projectsQuery.hasData || !remindersQuery.hasData;
+  const notifications = notificationsQuery.data?.items || [];
+  const loading = !projectsQuery.hasData || !notificationsQuery.hasData;
 
   async function refresh() {
     try {
       await Promise.all([
         projectsQuery.refresh({ force: true }),
-        remindersQuery.refresh({ force: true })
+        notificationsQuery.refresh({ force: true })
       ]);
     } catch (error) {
       setStatusMessage(error.message);
@@ -103,9 +103,9 @@ export function ProjectsView({ onOpenProject, onNewProject, setStatusMessage }) 
           )}
         </section>
 
-        <section className="project-reminders-panel" aria-label="项目提醒">
-          <PanelTitle title="提醒" subtitle="全局任务、论文缓存和同步状态。" />
-          {loading ? <LoadingPanel compact rows={4} title="读取提醒" /> : <ProjectReminders reminders={reminders} />}
+        <section className="project-notifications-panel" aria-label="项目通知">
+          <PanelTitle title="通知" subtitle="全局任务、论文缓存和同步状态。" />
+          {loading ? <LoadingPanel compact rows={4} title="读取通知" /> : <ProjectNotifications notifications={notifications} />}
         </section>
 
         <section className="project-list-panel" aria-label="项目列表">

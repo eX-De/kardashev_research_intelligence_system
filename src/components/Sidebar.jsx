@@ -26,8 +26,7 @@ export function Sidebar({ authInfo, authStatusLabel, isLoggingOut = false, onLog
     },
     { to: "/projects", label: "项目", hint: "上下文、论文和产物" },
     { to: "/artifacts", label: "产物", hint: "日报、摘要和报告" },
-    { to: "/tasks", label: "任务", hint: "运行控制台" },
-    { to: "/settings", label: "设置", hint: "系统连接与规则" }
+    { to: "/settings", label: "设置", hint: "系统连接、规则和任务" }
   ];
 
   return (

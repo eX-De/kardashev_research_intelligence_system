@@ -17,7 +17,7 @@ function reportStatusLabel(status) {
 
 function PaperList({ papers, activePaperId, onSelect }) {
   if (!papers.length) {
-    return <div className="paper-card paper-card-empty"><h2>还没有推荐</h2><div className="card-meta">先在“配置与任务”里保存配置，再执行每日流程。</div></div>;
+    return <div className="paper-card paper-card-empty"><h2>还没有推荐</h2><div className="card-meta">先在“设置”里保存配置，再执行每日流程。</div></div>;
   }
   return papers.map((paper) => {
     function handleSelect() {
