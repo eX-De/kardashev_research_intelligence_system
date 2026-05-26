@@ -13,20 +13,20 @@ const AUTO_SAVE_DELAY_MS = 850;
 const QUICK_SAVE_DELAY_MS = 150;
 const QUICK_SAVE_FIELDS = new Set([
   "arxiv_cache_full_text",
-  "rag_prefilter_enabled",
-  "run_daily_on_startup_enabled",
-  "scheduler_enabled"
+  "rag_prefilter_enabled"
 ]);
 const SUCCESS_TOAST_THROTTLE_MS = 2500;
 
 function settingsPayload(settings, providers) {
+  const {
+    run_daily_on_startup_enabled: _runDailyOnStartupEnabled,
+    scheduler_enabled: _schedulerEnabled,
+    ...formSettings
+  } = settings || {};
   const payload = {
-    ...settings,
+    ...formSettings,
     llm_providers: providerPayload(providers)
   };
-  if (payload.scheduler_enabled && payload.run_daily_on_startup_enabled) {
-    payload.run_daily_on_startup_enabled = false;
-  }
   return payload;
 }
 
@@ -251,8 +251,6 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
     });
     setSettings((current) => {
       const next = { ...current, [name]: value };
-      if (name === "run_daily_on_startup_enabled" && value) next.scheduler_enabled = false;
-      if (name === "scheduler_enabled" && value) next.run_daily_on_startup_enabled = false;
       return next;
     });
   }
@@ -275,16 +273,17 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
     return statusData;
   }
 
-  async function setSchedulerSettings(payload) {
+  async function setSchedulerMode(mode) {
     setStatusMessage("Updating scheduler...");
     try {
-      const data = await postJson("/api/settings", payload);
+      const data = await postJson("/api/jobs/scheduler/mode", { mode });
       if (data.settings) {
         cache.setCache(["settings"], data);
-        hydrateSettings(data, { force: true });
-      } else {
-        const settingsData = await refreshSettingsCache({ force: true });
-        hydrateSettings(settingsData, { force: true });
+        setSettings((current) => ({
+          ...current,
+          run_daily_on_startup_enabled: Boolean(data.settings.run_daily_on_startup_enabled),
+          scheduler_enabled: Boolean(data.settings.scheduler_enabled)
+        }));
       }
       if (data.scheduler) {
         cache.setCache(["jobs", "status"], { scheduler: data.scheduler });
@@ -391,9 +390,9 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
         ) : (
           <TaskControlPanel
             scheduler={scheduler}
-            onStartStartup={() => setSchedulerSettings({ run_daily_on_startup_enabled: true, scheduler_enabled: false })}
-            onStartScheduler={() => setSchedulerSettings({ run_daily_on_startup_enabled: false, scheduler_enabled: true })}
-            onStopScheduler={() => setSchedulerSettings({ run_daily_on_startup_enabled: false, scheduler_enabled: false })}
+            onStartStartup={() => setSchedulerMode("startup")}
+            onStartScheduler={() => setSchedulerMode("scheduler")}
+            onStopScheduler={() => setSchedulerMode("off")}
             onRunNow={() => runJob("run-daily", "/api/jobs/run-now")}
             onResumeDaily={() => runJob("resume-daily", "/api/jobs/resume-daily")}
             onRetryDaily={() => runJob("retry-daily", "/api/jobs/retry-daily")}

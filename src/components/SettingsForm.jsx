@@ -382,11 +382,9 @@ export function SettingsForm({ settings, providers, onSettingChange, onProviderC
 
       <SettingsSection
         eyebrow="Automation"
-        title="自动化执行"
-        description="两种每日流程触发方式互斥，执行内容相同。"
+        title="自动化参数"
+        description="任务模式由上方任务控制切换；这里保留执行时间和队列参数。"
       >
-        <CheckboxField label="每日首次访问 dashboard 时执行" name="run_daily_on_startup_enabled" checked={settings.run_daily_on_startup_enabled} onChange={onSettingChange} />
-        <CheckboxField label="按时间定时执行" name="scheduler_enabled" checked={settings.scheduler_enabled} onChange={onSettingChange} />
         <label>
           <span>每日执行时间</span>
           <input name="scheduler_run_time" type="time" value={settings.scheduler_run_time || ""} onChange={(event) => onSettingChange("scheduler_run_time", event.target.value)} />

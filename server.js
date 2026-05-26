@@ -100,6 +100,9 @@ const SERVER_EVENTS = Object.freeze({
   TASK_STARTED: "task.started"
 });
 
+const SCHEDULER_MODE_FIELDS = new Set(["run_daily_on_startup_enabled", "scheduler_enabled"]);
+const SCHEDULER_MODES = new Set(["off", "scheduler", "startup"]);
+
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -663,6 +666,47 @@ async function saveAppSettings(payload) {
   return jsonFromWorker(["api-settings-save"], JSON.stringify(payload));
 }
 
+function settingsPayloadWithoutSchedulerMode(payload = {}) {
+  const nextPayload = {};
+  for (const [key, value] of Object.entries(payload || {})) {
+    if (!SCHEDULER_MODE_FIELDS.has(key)) nextPayload[key] = value;
+  }
+  return nextPayload;
+}
+
+function truthySetting(value) {
+  if (typeof value === "boolean") return value;
+  return ["1", "true", "yes", "on", "enabled"].includes(String(value || "").trim().toLowerCase());
+}
+
+function schedulerModeFromPayload(payload = {}) {
+  const rawMode = String(payload.mode || "").trim().toLowerCase();
+  if (rawMode) {
+    if (SCHEDULER_MODES.has(rawMode)) return rawMode;
+    const err = new Error("mode must be one of: off, scheduler, startup");
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const schedulerEnabled = truthySetting(payload.scheduler_enabled);
+  const startupEnabled = truthySetting(payload.run_daily_on_startup_enabled);
+  if (schedulerEnabled && startupEnabled) {
+    const err = new Error("scheduler_enabled and run_daily_on_startup_enabled are mutually exclusive");
+    err.statusCode = 400;
+    throw err;
+  }
+  if (schedulerEnabled) return "scheduler";
+  if (startupEnabled) return "startup";
+  return "off";
+}
+
+function schedulerSettingsForMode(mode) {
+  return {
+    run_daily_on_startup_enabled: mode === "startup",
+    scheduler_enabled: mode === "scheduler"
+  };
+}
+
 async function cleanupStaleJobs() {
   try {
     return await jsonFromWorker(["api-jobs-cleanup"]);
@@ -742,7 +786,7 @@ function scheduleNext(settings) {
 async function startScheduler({ persist = true, settings = null } = {}) {
   let activeSettings = settings;
   if (persist) {
-    const data = await saveAppSettings({ scheduler_enabled: true });
+    const data = await saveAppSettings(schedulerSettingsForMode("scheduler"));
     activeSettings = data.settings;
   }
   if (!activeSettings) activeSettings = await readAppSettings();
@@ -759,14 +803,33 @@ async function stopScheduler({ persist = true } = {}) {
   clearSchedulerTimer();
   schedulerRuntime.enabled = false;
   schedulerRuntime.nextRunAt = null;
+  startupDailyRuntime.enabled = false;
+  if (persist) startupDailyRuntime.lastSkipReason = "disabled";
   let activeSettings = null;
   if (persist) {
-    const data = await saveAppSettings({ scheduler_enabled: false });
+    const data = await saveAppSettings(schedulerSettingsForMode("off"));
     activeSettings = data.settings;
   }
   const status = schedulerStatus();
   if (persist) publishSettingsChanged(activeSettings, status);
   return status;
+}
+
+async function applySchedulerMode(mode) {
+  const data = await saveAppSettings(schedulerSettingsForMode(mode));
+  if (mode === "scheduler") {
+    await startScheduler({ persist: false, settings: data.settings });
+  } else {
+    await stopScheduler({ persist: false });
+    startupDailyRuntime.enabled = mode === "startup";
+    startupDailyRuntime.lastError = null;
+    startupDailyRuntime.lastSkipReason = mode === "startup"
+      ? "will_run_on_next_dashboard_visit"
+      : "disabled";
+  }
+  const scheduler = schedulerStatus();
+  publishSettingsChanged(data.settings, scheduler);
+  return { ok: true, mode, settings: data.settings, scheduler };
 }
 
 async function runManagedJob(command, source = "manual", args = []) {
@@ -1541,17 +1604,11 @@ async function routeApi(req, res, url) {
 
   if (req.method === "POST" && url.pathname === "/api/settings") {
     const body = await readRequestJson(req);
-    const data = await saveAppSettings(body);
+    const data = await saveAppSettings(settingsPayloadWithoutSchedulerMode(body));
     paperReportQueueRuntime.concurrency = paperReportQueueConcurrency(data.settings || {});
     schedulePaperReportQueue(1000);
-    if (data.settings?.scheduler_enabled) {
-      await startScheduler({ persist: false, settings: data.settings });
-    } else {
-      await stopScheduler({ persist: false });
-      startupDailyRuntime.enabled = Boolean(data.settings?.run_daily_on_startup_enabled);
-      if (startupDailyRuntime.enabled) {
-        startupDailyRuntime.lastSkipReason = "will_run_on_next_dashboard_visit";
-      }
+    if (schedulerRuntime.enabled) {
+      scheduleNext(data.settings || {});
     }
     const responseBody = { ...data, scheduler: schedulerStatus() };
     sendJson(res, 200, responseBody);
@@ -1623,6 +1680,13 @@ async function routeApi(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/jobs/scheduler/stop") {
     const scheduler = await stopScheduler({ persist: true });
     sendJson(res, 200, { ok: true, scheduler });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/jobs/scheduler/mode") {
+    const body = await readRequestJson(req);
+    const data = await applySchedulerMode(schedulerModeFromPayload(body));
+    sendJson(res, 200, data);
     return;
   }
 
