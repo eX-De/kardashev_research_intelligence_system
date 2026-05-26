@@ -27,11 +27,11 @@ export function LoginView({ onLogin }) {
       <section className="login-panel" aria-labelledby="login-title">
         <div className="login-brand">
           <span className="brand-mark">
-            <img src="/research-mark.svg" alt="" />
+            <img src="/kris-logo.svg" alt="" />
           </span>
           <div>
-            <strong id="login-title">科研情报系统</strong>
-            <span>访问验证</span>
+            <strong id="login-title">KRIS</strong>
+            <span>Kardashev Research Intelligence System</span>
           </div>
         </div>
 

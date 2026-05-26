@@ -33,11 +33,11 @@ export function Sidebar({ authInfo, authStatusLabel, isLoggingOut = false, onLog
     <aside className="sidebar">
       <div className="brand">
         <span className="brand-mark">
-          <img src="/research-mark.svg" alt="" />
+          <img src="/kris-logo.svg" alt="" />
         </span>
         <div>
-          <strong>科研情报系统</strong>
-          <span>System-first workspace</span>
+          <strong>KRIS</strong>
+          <span>Kardashev Research Intelligence System</span>
         </div>
       </div>
 

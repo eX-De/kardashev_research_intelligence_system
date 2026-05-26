@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import socket
 from .db_types import DbConnection, DbRow
 import urllib.error
 import urllib.request
@@ -20,6 +21,10 @@ PROJECT_JUDGMENT_REPORT_USEFULNESS_THRESHOLD = 0.60
 PROJECT_JUDGMENT_REPORT_RELATIONS = {"direct", "indirect"}
 PROJECT_JUDGMENT_ACTIONS = {"read", "read_later", "ignore"}
 PROJECT_JUDGMENT_RELATIONS = {"direct", "indirect", "weak", "none"}
+
+
+class ChatJsonError(RuntimeError):
+    pass
 
 
 def _short(value: object, limit: int = 1200) -> str:
@@ -85,10 +90,17 @@ def call_chat_json(
     prompt: str,
     system: str = "You judge whether papers are useful for a specific research project.",
     response_format: dict[str, object] | None = None,
+    timeout_seconds: float = 60,
+    raise_errors: bool = False,
 ) -> dict[str, object] | None:
+    def fail(message: str) -> None:
+        if raise_errors:
+            raise ChatJsonError(message)
+        return None
+
     provider = settings.chat_provider()
     if not provider or not provider.api_key or not provider.base_url or not settings.llm_chat_model:
-        return None
+        return fail("chat provider is not fully configured")
     payload = {
         "model": settings.llm_chat_model,
         "messages": [
@@ -108,19 +120,38 @@ def call_chat_json(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            body = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-        return None
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            raw_body = response.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        detail = clean_unicode(exc.read().decode("utf-8", "replace")).strip()
+        suffix = f": {detail[:500]}" if detail else ""
+        return fail(f"provider returned HTTP {exc.code}{suffix}")
+    except (TimeoutError, socket.timeout):
+        return fail(f"request timed out after {int(timeout_seconds)}s")
+    except urllib.error.URLError as exc:
+        reason = exc.reason
+        if isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in str(reason).lower():
+            return fail(f"request timed out after {int(timeout_seconds)}s")
+        return fail(f"request failed: {reason}")
+    try:
+        body = json.loads(raw_body)
+    except json.JSONDecodeError as exc:
+        return fail(f"provider response was not valid JSON: {exc}")
     content = (
         body.get("choices", [{}])[0]
         .get("message", {})
         .get("content", "")
     )
+    if not clean_unicode(str(content or "")).strip():
+        return fail("assistant response content was empty")
     try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        return None
+        parsed = json.loads(content)
+    except json.JSONDecodeError as exc:
+        preview = clean_unicode(str(content or "")).strip()[:500]
+        return fail(f"assistant response content was not valid JSON: {exc}; content starts with: {preview}")
+    if not isinstance(parsed, dict):
+        return fail(f"assistant JSON response was {type(parsed).__name__}, expected object")
+    return parsed
 
 
 def _call_chat(settings: Settings, prompt: str) -> dict[str, object] | None:

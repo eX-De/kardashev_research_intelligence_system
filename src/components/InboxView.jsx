@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { api, fmtScore, postJson } from "../lib/dashboard.js";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
+import { RefreshButton } from "./RefreshButton.jsx";
 
 const REPORT_STATUS_LABELS = {
   queued: "报告排队中",
@@ -307,9 +308,7 @@ export function InboxView({ onOpenReportQueue, onSelectPaper, selectedPaperId, s
             <h1>论文推荐</h1>
             <p>{papers.length} 篇待判断论文</p>
           </div>
-          <button className="icon-button" title="刷新" aria-label="刷新" onClick={() => refresh().catch((error) => setStatusMessage(error.message))} type="button">
-            <span aria-hidden="true">↻</span>
-          </button>
+          <RefreshButton onClick={() => refresh().catch((error) => setStatusMessage(error.message))} />
         </header>
         <div className="paper-list">
           <PaperList

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { LoadingPanel } from "./Loading.jsx";
 import { PanelTitle } from "./PanelTitle.jsx";
 import { normalizeProviders, providerPayload, SettingsForm } from "./SettingsForm.jsx";
+import { RefreshButton } from "./RefreshButton.jsx";
 import { TaskControlPanel } from "./TaskControlPanel.jsx";
 import { TaskHistoryPanel } from "./TaskHistoryPanel.jsx";
 import { useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
@@ -16,6 +17,7 @@ const QUICK_SAVE_FIELDS = new Set([
   "rag_prefilter_enabled"
 ]);
 const SUCCESS_TOAST_THROTTLE_MS = 2500;
+const DAILY_JOB_TYPES = new Set(["run-daily", "resume-daily", "retry-daily"]);
 
 function settingsPayload(settings, providers) {
   const {
@@ -60,6 +62,27 @@ function schedulerStatusMessage(scheduler) {
   return current ? `Running ${current.command}...` : scheduler?.last_job?.message || scheduler?.last_error?.message || "Idle";
 }
 
+function dailyRecoveryFromHistory(history = []) {
+  for (const item of history) {
+    if (!DAILY_JOB_TYPES.has(item?.job_type)) continue;
+    if (item.status === "completed") return null;
+    if (item.status !== "failed") continue;
+    const progress = item.meta?.daily_progress && typeof item.meta.daily_progress === "object"
+      ? item.meta.daily_progress
+      : null;
+    if (!progress) continue;
+    const steps = Array.isArray(progress.steps) ? progress.steps : [];
+    const failedStep = steps.find((step) => step?.status === "failed") || {};
+    return {
+      job_id: item.id,
+      failed_label: failedStep.label || progress.current_label || "未知阶段",
+      completed: Number(progress.completed || steps.filter((step) => step?.status === "completed").length || 0),
+      total: Number(progress.total || steps.length || 0),
+    };
+  }
+  return null;
+}
+
 export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) {
   const [settings, setSettings] = useState({});
   const [providers, setProviders] = useState([]);
@@ -90,6 +113,7 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
   const jobsSummary = jobsSummaryQuery.data || {};
   const fallbackHistory = jobsSummary.latest_job ? [{ ...jobsSummary.latest_job, meta: {} }] : [];
   const history = historyQuery.hasData ? historyQuery.data?.items || [] : fallbackHistory;
+  const dailyRecovery = dailyRecoveryFromHistory(history);
   const tasksLoading = !jobStatusQuery.hasData || !jobsSummaryQuery.hasData;
 
   settingsRef.current = settings;
@@ -297,13 +321,26 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
     }
   }
 
-  async function runJob(name, endpoint = `/api/jobs/${name}`) {
+  async function runJob(name, endpoint = `/api/jobs/${name}`, body = {}) {
+    let payload = body;
+    if (name === "run-daily" && dailyRecovery && !payload.force) {
+      const ok = window.confirm("今天已有失败但可恢复的每日流程。重新执行会新建一轮流程，可能重复抓取、匹配和消耗 LLM。确定重新执行？");
+      if (!ok) return;
+      payload = { ...payload, force: true };
+    }
     setStatusMessage(`Running ${name}...`);
     try {
-      const data = await postJson(endpoint);
+      const data = await postJson(endpoint, payload);
       setStatusMessage(data.message || `${name} finished`);
       await refreshTaskActivity({ includeHistory: true });
     } catch (error) {
+      if (error.code === "daily_run_recoverable") {
+        const ok = window.confirm(`${error.message}\n\n确定重新执行今日流程？`);
+        if (ok) {
+          await runJob(name, endpoint, { ...payload, force: true });
+        }
+        return;
+      }
       setStatusMessage(error.message);
     }
   }
@@ -374,9 +411,7 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
           <h1>设置</h1>
           <p>系统连接、模型路由、论文源、检索策略和自动化规则。</p>
         </div>
-        <button onClick={() => refreshControl({ hydrate: false, includeTaskHistory: true }).catch((error) => setStatusMessage(error.message))} type="button">
-          刷新状态
-        </button>
+        <RefreshButton label="刷新状态" onClick={() => refreshControl({ hydrate: false, includeTaskHistory: true }).catch((error) => setStatusMessage(error.message))} />
       </header>
 
       <div className="control-grid">
@@ -390,6 +425,7 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
         ) : (
           <TaskControlPanel
             scheduler={scheduler}
+            recovery={dailyRecovery}
             onStartStartup={() => setSchedulerMode("startup")}
             onStartScheduler={() => setSchedulerMode("scheduler")}
             onStopScheduler={() => setSchedulerMode("off")}

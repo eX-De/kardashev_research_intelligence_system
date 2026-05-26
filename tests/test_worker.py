@@ -2372,6 +2372,79 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("daily_run_completed", item_types)
         self.assertNotIn("job_failed", item_types)
 
+    def test_notifications_recommend_resuming_recoverable_daily_run(self) -> None:
+        conn = connect_test_db()
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO job_runs(job_type, status, started_at, finished_at, message, meta_json)
+            VALUES ('run-daily', 'failed', ?, ?, ?, ?)
+            """,
+            (
+                "2026-05-26T04:24:26+00:00",
+                "2026-05-26T05:15:25+00:00",
+                "LLM daily report generation failed: request timed out after 300s",
+                to_json(
+                    {
+                        "daily_mode": "run-daily",
+                        "daily_progress": {
+                            "completed": 10,
+                            "current": 11,
+                            "current_key": "generate_daily_report_artifact",
+                            "current_label": "生成日报产物",
+                            "status": "failed",
+                            "total": 11,
+                            "steps": [
+                                {"key": "sync_context_sources", "label": "同步上下文来源", "status": "completed"},
+                                {"key": "generate_daily_report_artifact", "label": "生成日报产物", "status": "failed"},
+                            ],
+                        },
+                    }
+                ),
+            ),
+        )
+        job_id = conn.execute("SELECT id FROM job_runs").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO daily_run_meta(job_id, mode, settings_hash, searchers_json, embedding_model, created_at)
+            VALUES (?, 'run-daily', 'hash', '[]', 'embedding', '2026-05-26T04:24:26+00:00')
+            """,
+            (job_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO arxiv_papers(
+              arxiv_id, title, authors_json, summary, categories_json, published_at,
+              updated_at, link, pdf_link, text_status, fetched_batch_id, created_at
+            )
+            VALUES (
+              '2605.99999', 'Recoverable Daily Paper', '[]', 'Abstract', '["cs.CL"]',
+              '2026-05-26T00:00:00Z', '2026-05-26T00:00:00Z',
+              'https://arxiv.org/abs/2605.99999', 'https://arxiv.org/pdf/2605.99999',
+              'complete', 'batch', 'now'
+            )
+            """
+        )
+        paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO daily_run_papers(job_id, paper_id, selected, updated_at)
+            VALUES (?, ?, 1, '2026-05-26T04:24:26+00:00')
+            """,
+            (job_id, paper_id),
+        )
+        conn.commit()
+
+        result = notifications(conn, limit=5)
+        item_types = [item["type"] for item in result["items"]]
+        recovery = next(item for item in result["items"] if item["type"] == "daily_run_recoverable")
+
+        self.assertEqual(item_types[0], "daily_run_recoverable")
+        self.assertNotIn("job_failed", item_types)
+        self.assertTrue(recovery["requires_action"])
+        self.assertEqual(recovery["source"]["recovery"]["recommended_action"], "resume-daily")
+        self.assertEqual(recovery["source"]["recovery"]["failed_label"], "生成日报产物")
+
     def test_notifications_include_recent_experiment_reports(self) -> None:
         conn = connect_test_db()
         init_db(conn)
@@ -3575,6 +3648,8 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(result["daily_report_mode"], "llm")
         call_chat.assert_called_once()
         self.assertEqual(call_chat.call_args.kwargs["response_format"], {"type": "json_object"})
+        self.assertEqual(call_chat.call_args.kwargs["timeout_seconds"], 300)
+        self.assertTrue(call_chat.call_args.kwargs["raise_errors"])
         prompt = call_chat.call_args.args[1]
         self.assertIn("项目级判定认为它为什么相关", prompt)
         self.assertIn("120-220 个中文字符", prompt)

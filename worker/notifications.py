@@ -21,6 +21,7 @@ JOB_TITLES = {
     "sync-obsidian": "Obsidian 同步",
     "rank-papers": "论文匹配",
 }
+DAILY_JOB_TYPES = {"run-daily", "resume-daily", "retry-daily"}
 
 
 def register_notification_builder(event_type: str, description: str) -> Callable[[NotificationBuilder], NotificationBuilder]:
@@ -88,6 +89,7 @@ def _activity_time(item: dict[str, Any]) -> str:
 
 def _notification_sort_key(item: dict[str, Any]) -> tuple[int, str, int]:
     active_types = {
+        "daily_run_recoverable",
         "daily_run_progress",
         "job_running",
         "paper_report_queue_processing",
@@ -185,13 +187,79 @@ def _completed(activities: list[dict[str, Any]], predicate: Callable[[dict[str, 
     )
 
 
+def _recoverable_daily_run(conn: DbConnection) -> dict[str, Any] | None:
+    latest_completed_id = int(
+        conn.execute(
+            """
+            SELECT COALESCE(MAX(id), 0) AS id
+            FROM job_runs
+            WHERE job_type IN ('run-daily', 'resume-daily', 'retry-daily')
+              AND status = 'completed'
+            """
+        ).fetchone()["id"]
+        or 0
+    )
+    row = conn.execute(
+        """
+        SELECT jr.id, jr.job_type, jr.status, jr.started_at, jr.finished_at, jr.message,
+               jr.meta_json, drm.mode, drm.source_job_id, drm.arxiv_batch_id
+        FROM job_runs jr
+        JOIN daily_run_meta drm ON drm.job_id = jr.id
+        WHERE jr.job_type IN ('run-daily', 'resume-daily', 'retry-daily')
+          AND jr.status = 'failed'
+          AND jr.id > ?
+          AND EXISTS (
+            SELECT 1 FROM daily_run_papers drp
+            WHERE drp.job_id = jr.id AND drp.selected = 1
+          )
+        ORDER BY jr.id DESC
+        LIMIT 1
+        """,
+        (latest_completed_id,),
+    ).fetchone()
+    if not row:
+        return None
+    meta = from_json(row["meta_json"], {})
+    return {
+        "id": int(row["id"]),
+        "job_type": row["job_type"],
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
+        "message": row["message"],
+        "meta": meta if isinstance(meta, dict) else {},
+    }
+
+
+def _daily_recovery_payload(job: dict[str, Any]) -> dict[str, Any]:
+    progress = job.get("meta", {}).get("daily_progress")
+    progress = progress if isinstance(progress, dict) else {}
+    steps = progress.get("steps") if isinstance(progress.get("steps"), list) else []
+    failed_step = next(
+        (step for step in steps if isinstance(step, dict) and step.get("status") == "failed"),
+        None,
+    )
+    completed = int(progress.get("completed") or sum(
+        1 for step in steps if isinstance(step, dict) and step.get("status") == "completed"
+    ))
+    total = int(progress.get("total") or len(steps) or 0)
+    return {
+        "resumable": True,
+        "job_id": int(job["id"]),
+        "failed_step": str((failed_step or {}).get("key") or progress.get("current_key") or ""),
+        "failed_label": str((failed_step or {}).get("label") or progress.get("current_label") or "未知阶段"),
+        "completed": completed,
+        "total": total,
+        "recommended_action": "resume-daily",
+    }
+
+
 @register_notification_builder("daily_run_progress", "每日流程运行中的步骤进度")
 def _daily_run_progress(context: dict[str, Any]) -> list[dict[str, Any]]:
     running_daily = next(
         (
             item
             for item in context["activities"]
-            if item["job_type"] in {"run-daily", "resume-daily", "retry-daily"} and item["status"] == "running"
+            if item["job_type"] in DAILY_JOB_TYPES and item["status"] == "running"
         ),
         None,
     )
@@ -209,6 +277,34 @@ def _daily_run_progress(context: dict[str, Any]) -> list[dict[str, Any]]:
             created_at=running_daily["started_at"],
             source={"job_id": running_daily["id"], "job_type": running_daily["job_type"]},
             progress=progress,
+        )
+    ]
+
+
+@register_notification_builder("daily_run_recoverable", "可恢复的失败每日流程")
+def _daily_run_recoverable(context: dict[str, Any]) -> list[dict[str, Any]]:
+    if any(item.get("type") == "daily_run_progress" for item in context["items"]):
+        return []
+    recoverable = _recoverable_daily_run(context["conn"])
+    if not recoverable:
+        return []
+    recovery = _daily_recovery_payload(recoverable)
+    step_label = recovery["failed_label"]
+    count = f"{recovery['completed']}/{recovery['total']}" if recovery["total"] else f"{recovery['completed']} 步"
+    return [
+        _notification(
+            f"daily-run-recoverable-{recoverable['id']}",
+            "daily_run_recoverable",
+            "warn",
+            "每日流程可继续",
+            f"上次流程失败在：{step_label}，已完成 {count}，建议继续上次流程。",
+            created_at=_activity_time(recoverable),
+            source={
+                "job_id": recoverable["id"],
+                "job_type": recoverable["job_type"],
+                "recovery": recovery,
+            },
+            requires_action=True,
         )
     ]
 
@@ -235,6 +331,8 @@ def _job_running(context: dict[str, Any]) -> list[dict[str, Any]]:
 
 @register_notification_builder("job_failed", "最近失败任务")
 def _job_failed(context: dict[str, Any]) -> list[dict[str, Any]]:
+    if any(item.get("type") == "daily_run_recoverable" for item in context["items"]):
+        return []
     failed = next(
         (
             item
@@ -268,7 +366,7 @@ def _job_failed(context: dict[str, Any]) -> list[dict[str, Any]]:
 def _daily_run_completed(context: dict[str, Any]) -> list[dict[str, Any]]:
     completed_daily = _completed(
         context["activities"],
-        lambda _meta, item: item["job_type"] in {"run-daily", "resume-daily", "retry-daily"},
+        lambda _meta, item: item["job_type"] in DAILY_JOB_TYPES,
     )
     if not completed_daily:
         return []
@@ -512,6 +610,7 @@ def _experiment_report_arrived(context: dict[str, Any]) -> list[dict[str, Any]]:
 
 def notifications(conn: DbConnection, limit: int = 5) -> dict[str, Any]:
     context: dict[str, Any] = {
+        "conn": conn,
         "activities": _activity_rows(conn, 20),
         "paper_report_stats": _paper_report_stats(conn),
         "experiment_reports": _experiment_report_rows(conn, min(max(1, int(limit or 5)), 10)),

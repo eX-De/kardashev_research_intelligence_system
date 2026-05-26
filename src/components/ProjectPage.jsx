@@ -16,6 +16,7 @@ import {
 import { useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { friendlyObsidianMessage, postObsidianJson, useObsidianCapability } from "../lib/obsidianCapability.js";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
+import { RefreshButton } from "./RefreshButton.jsx";
 
 function relationOptions(options) {
   return options.map(([value, label]) => <option key={value} value={value}>{label}</option>);
@@ -527,7 +528,7 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
           <h1>{title}</h1>
           <p>{isNew ? "创建系统内项目配置；也可以稍后接入可选 Obsidian 同步。" : `${project.paper_count || 0} papers · ${project.note_count || 0} notes · ${artifacts.length} outputs`}</p>
         </div>
-        {!isNew ? <button onClick={() => refreshProject().catch((error) => setStatusMessage(error.message))} type="button">刷新</button> : null}
+        {!isNew ? <RefreshButton onClick={() => refreshProject().catch((error) => setStatusMessage(error.message))} /> : null}
       </header>
 
       <div className="project-page-grid">

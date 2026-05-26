@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from .db_types import DbConnection, DbRow
 import sys
 import time
@@ -84,6 +85,26 @@ from .settings_store import apply_stored_settings, get_app_settings, save_app_se
 def _print_json(payload: dict[str, object]) -> None:
     data = json.dumps(clean_unicode(payload), ensure_ascii=False)
     sys.stdout.buffer.write(data.encode("utf-8", "replace") + b"\n")
+
+
+WORKER_PROGRESS_EVENT_PREFIX = "KRIS_PROGRESS_EVENT "
+
+
+def _progress_events_enabled() -> bool:
+    return os.environ.get("KRIS_WORKER_PROGRESS_EVENTS") == "1"
+
+
+def _emit_worker_progress_event(event: str, data: dict[str, Any]) -> None:
+    if not _progress_events_enabled():
+        return
+    payload = json.dumps(
+        clean_unicode({"event": event, "data": data}),
+        ensure_ascii=False,
+    )
+    sys.stderr.buffer.write(
+        f"{WORKER_PROGRESS_EVENT_PREFIX}{payload}\n".encode("utf-8", "replace")
+    )
+    sys.stderr.buffer.flush()
 
 
 def _read_json_stdin(context: str) -> dict[str, object]:
@@ -235,6 +256,20 @@ def _update_daily_progress(
     elif status == "failed":
         message = f"Daily run failed at {progress['current_label']}"
     update_job_meta(conn, job_id, message, {**accumulated, "daily_progress": progress})
+    _emit_worker_progress_event(
+        "daily_run_progress.updated",
+        {
+            "job_id": job_id,
+            "job_type": str(accumulated.get("daily_mode") or "run-daily"),
+            "status": progress.get("status"),
+            "current": progress.get("current"),
+            "total": progress.get("total"),
+            "completed": progress.get("completed"),
+            "current_key": progress.get("current_key"),
+            "current_label": progress.get("current_label"),
+            "updated_at": utc_now(),
+        },
+    )
 
 
 def _run_daily_step(

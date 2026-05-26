@@ -16,8 +16,9 @@ function schedulerSummary(scheduler) {
   return "未启用";
 }
 
-export function TaskControlPanel({ scheduler, onStartStartup, onStartScheduler, onStopScheduler, onRunNow, onResumeDaily, onRetryDaily, onRunJob }) {
+export function TaskControlPanel({ scheduler, recovery = null, onStartStartup, onStartScheduler, onStopScheduler, onRunNow, onResumeDaily, onRetryDaily, onRunJob }) {
   const activeMode = schedulerMode(scheduler);
+  const recoveryCount = recovery?.total ? `${recovery.completed || 0}/${recovery.total}` : `${recovery?.completed || 0} 步`;
 
   return (
     <section className="panel task-control-panel">
@@ -42,12 +43,18 @@ export function TaskControlPanel({ scheduler, onStartStartup, onStartScheduler, 
           <p>不自动运行，只保留手动执行入口。</p>
         </button>
       </div>
+      {recovery ? (
+        <div className="task-recovery-banner">
+          <strong>上次每日流程可继续</strong>
+          <p>失败在：{recovery.failed_label || "未知阶段"}，已完成 {recoveryCount}。</p>
+        </div>
+      ) : null}
       <div className="task-action-panel">
-        <button className="primary run-now-button" onClick={onRunNow} type="button">
-          立即执行每日流程
+        <button className="primary run-now-button" onClick={recovery ? onResumeDaily : onRunNow} type="button">
+          {recovery ? "继续上次每日流程" : "立即执行每日流程"}
         </button>
-        <button onClick={onResumeDaily} type="button">
-          恢复上次每日流程
+        <button onClick={recovery ? onRunNow : onResumeDaily} type="button">
+          {recovery ? "重新执行今日流程" : "恢复上次每日流程"}
         </button>
         <button onClick={onRetryDaily} type="button">
           补跑历史论文

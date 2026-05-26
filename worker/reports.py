@@ -10,6 +10,7 @@ from .config import Settings
 from .artifacts import content_hash, export_artifact_to_obsidian, upsert_artifact
 from .db import clean_unicode, from_json, to_json, utc_now
 from .llm import (
+    ChatJsonError,
     PROJECT_JUDGMENT_REPORT_CONFIDENCE_THRESHOLD,
     PROJECT_JUDGMENT_REPORT_USEFULNESS_THRESHOLD,
     call_chat_json,
@@ -20,6 +21,7 @@ from .obsidian_remote import obsidian_remote_enabled
 
 DAILY_REPORT_DIR = Path("Research Intelligence") / "Daily"
 DAILY_REPORT_LIMIT = 40
+DAILY_REPORT_LLM_TIMEOUT_SECONDS = 300
 
 
 def _safe_filename(value: str) -> str:
@@ -328,12 +330,17 @@ def _llm_daily_report_markdown(
     if not provider or not provider.api_key or not provider.base_url or not settings.llm_chat_model:
         raise RuntimeError("LLM chat provider is not fully configured; daily report generation requires LLM output")
     payload = _report_source_payload(report_date, rel_path, stats, project_rows, global_rows)
-    response = call_chat_json(
-        settings,
-        _llm_report_prompt(payload),
-        system="你是严谨的中文科研情报编辑，只根据输入事实生成可读 Markdown 日报。",
-        response_format={"type": "json_object"},
-    )
+    try:
+        response = call_chat_json(
+            settings,
+            _llm_report_prompt(payload),
+            system="你是严谨的中文科研情报编辑，只根据输入事实生成可读 Markdown 日报。",
+            response_format={"type": "json_object"},
+            timeout_seconds=DAILY_REPORT_LLM_TIMEOUT_SECONDS,
+            raise_errors=True,
+        )
+    except ChatJsonError as exc:
+        raise RuntimeError(f"LLM daily report generation failed: {exc}") from exc
     if not isinstance(response, dict):
         raise RuntimeError("LLM daily report generation failed: no valid JSON response")
     body = _normalize_llm_markdown(response.get("markdown"), report_date)

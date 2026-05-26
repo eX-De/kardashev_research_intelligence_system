@@ -12,6 +12,7 @@ import {
 import { useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { friendlyObsidianMessage, postObsidianJson, useObsidianCapability } from "../lib/obsidianCapability.js";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
+import { RefreshButton } from "./RefreshButton.jsx";
 import { InlineLoader, LoadingPanel } from "./Loading.jsx";
 
 const REPORT_STATUS_LABELS = {
@@ -1215,7 +1216,7 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
           <button onClick={() => setImportOpen((current) => !current)} type="button">
             {importOpen ? "收起导入" : "导入论文"}
           </button>
-          <button onClick={() => refresh().catch((error) => setStatusMessage(error.message))} type="button">刷新</button>
+          <RefreshButton onClick={() => refresh().catch((error) => setStatusMessage(error.message))} />
         </div>
       </header>
 

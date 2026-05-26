@@ -30,6 +30,12 @@ const IN_MEMORY_JOB_RECONCILE_GRACE_MS = Math.max(
   Number(process.env.IN_MEMORY_JOB_RECONCILE_GRACE_MS || 60000)
 );
 const SSE_HEARTBEAT_MS = Math.max(5000, positiveInteger(process.env.SSE_HEARTBEAT_MS, 25000));
+const DAILY_PROGRESS_SSE_THROTTLE_MS = Math.max(
+  250,
+  Number(process.env.DAILY_PROGRESS_SSE_THROTTLE_MS || 1000)
+);
+const WORKER_PROGRESS_EVENT_PREFIX = "KRIS_PROGRESS_EVENT ";
+const DAILY_JOB_COMMANDS = new Set(["run-daily", "resume-daily", "retry-daily"]);
 
 const jobRuntime = {
   currentJob: null,
@@ -74,6 +80,7 @@ const eventBus = {
 const SERVER_EVENTS = Object.freeze({
   ARTIFACT_CREATED: "artifact.created",
   ARTIFACT_UPDATED: "artifact.updated",
+  DAILY_RUN_PROGRESS_UPDATED: "daily_run_progress.updated",
   EVENTS_CONNECTED: "events.connected",
   EXPERIMENT_REPORT_UPSERTED: "experiment_report.upserted",
   JOB_FAILED: "job.failed",
@@ -146,6 +153,39 @@ function positiveInteger(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
+function workerErrorFromOutput(error, stdout = "", stderr = "") {
+  let message = error?.message || "Worker failed";
+  const stderrText = String(stderr || "").trim();
+  const stdoutText = String(stdout || "").trim();
+  let workerPayload = null;
+  try {
+    const parsed = JSON.parse(stdoutText || "{}");
+    if (parsed && typeof parsed === "object") {
+      workerPayload = parsed;
+      if (parsed.error) message = String(parsed.error);
+    }
+  } catch {
+    message = stderrText || stdoutText || message;
+  }
+  if (stderrText && !String(message).includes(stderrText)) {
+    message = `${message}\n${stderrText}`.trim();
+  }
+  const err = new Error(message);
+  const structuredCode = String(workerPayload?.code || workerPayload?.reason || "");
+  if (structuredCode) {
+    err.structuredCode = structuredCode;
+    err.code = structuredCode;
+    err.reason = String(workerPayload?.reason || structuredCode);
+    err.workerPayload = workerPayload;
+  }
+  err.statusCode = Number(workerPayload?.status_code || 0) || (
+    structuredCode === OBSIDIAN_NOT_CONFIGURED_CODE ? 409 : 500
+  );
+  err.stdout = stdoutText;
+  err.stderr = stderrText;
+  return err;
+}
+
 function worker(args, input = null) {
   return new Promise((resolvePromise, reject) => {
     const child = execFile(
@@ -166,42 +206,91 @@ function worker(args, input = null) {
           if (stderr) {
             console.error(stderr.trimEnd());
           }
-          let message = error.message;
-          const stderrText = String(stderr || "").trim();
-          const stdoutText = String(stdout || "").trim();
-          let workerPayload = null;
-          try {
-            const parsed = JSON.parse(stdoutText || "{}");
-            if (parsed && typeof parsed === "object") {
-              workerPayload = parsed;
-              if (parsed.error) message = String(parsed.error);
-            }
-          } catch {
-            message = stderrText || stdoutText || error.message;
-          }
-          if (stderrText && !String(message).includes(stderrText)) {
-            message = `${message}\n${stderrText}`.trim();
-          }
-          const err = new Error(message);
-          const structuredCode = String(workerPayload?.code || workerPayload?.reason || "");
-          if (structuredCode) {
-            err.structuredCode = structuredCode;
-            err.code = structuredCode;
-            err.reason = String(workerPayload?.reason || structuredCode);
-            err.workerPayload = workerPayload;
-          }
-          err.statusCode = Number(workerPayload?.status_code || 0) || (
-            structuredCode === OBSIDIAN_NOT_CONFIGURED_CODE ? 409 : 500
-          );
-          err.stdout = stdoutText;
-          err.stderr = stderrText;
-          reject(err);
+          reject(workerErrorFromOutput(error, stdout, stderr));
           return;
         }
         resolvePromise(stdout);
       }
     );
   if (input !== null) child.stdin.end(input, "utf8");
+  });
+}
+
+function handleWorkerProgressLine(line, onProgressEvent, stderrLines) {
+  if (line.startsWith(WORKER_PROGRESS_EVENT_PREFIX)) {
+    const rawPayload = line.slice(WORKER_PROGRESS_EVENT_PREFIX.length).trim();
+    try {
+      const payload = JSON.parse(rawPayload || "{}");
+      if (payload && typeof payload === "object" && typeof onProgressEvent === "function") {
+        try {
+          onProgressEvent(payload);
+        } catch (error) {
+          console.error(error.stack || error.message || error);
+        }
+      }
+    } catch {
+      stderrLines.push(line);
+    }
+    return;
+  }
+  if (line) stderrLines.push(line);
+}
+
+function managedWorker(args, input = null, { onProgressEvent = null } = {}) {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(PYTHON_BIN, ["-m", "worker.cli", ...args], {
+      cwd: __dirname,
+      env: {
+        ...process.env,
+        KRIS_WORKER_PROGRESS_EVENTS: "1",
+        PYTHONUTF8: "1",
+        PYTHONIOENCODING: "utf-8"
+      },
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+
+    let stdout = "";
+    let stderrBuffer = "";
+    let settled = false;
+    const stderrLines = [];
+
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      stderrBuffer += chunk;
+      const lines = stderrBuffer.split(/\r?\n/);
+      stderrBuffer = lines.pop() || "";
+      for (const line of lines) handleWorkerProgressLine(line, onProgressEvent, stderrLines);
+    });
+
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      if (stderrBuffer) handleWorkerProgressLine(stderrBuffer, onProgressEvent, stderrLines);
+      reject(workerErrorFromOutput(error, stdout, stderrLines.join("\n")));
+    });
+
+    child.on("close", (code, signal) => {
+      if (settled) return;
+      settled = true;
+      if (stderrBuffer) handleWorkerProgressLine(stderrBuffer, onProgressEvent, stderrLines);
+      const stderr = stderrLines.join("\n");
+      if (code === 0 && !signal) {
+        resolvePromise(stdout);
+        return;
+      }
+      const message = signal
+        ? `Worker terminated by signal ${signal}`
+        : `Worker exited with code ${code}`;
+      reject(workerErrorFromOutput(new Error(message), stdout, stderr));
+    });
+
+    if (input !== null) child.stdin.end(input, "utf8");
+    else child.stdin.end();
   });
 }
 
@@ -474,6 +563,68 @@ function publishTaskEvent(type, job, options = {}) {
   };
   if (options.stale) payload.stale = true;
   publishEvent(type, payload);
+}
+
+function compactDailyProgressEvent(payload, command) {
+  if (payload?.event && payload.event !== SERVER_EVENTS.DAILY_RUN_PROGRESS_UPDATED) return null;
+  const data = payload?.data && typeof payload.data === "object" ? payload.data : payload;
+  if (!data || typeof data !== "object") return null;
+  if (!data.job_id && !data.current_key && !data.current_label) return null;
+  return {
+    job_id: data.job_id || null,
+    job_type: data.job_type || command || null,
+    status: data.status || null,
+    current: data.current || null,
+    total: data.total || null,
+    completed: data.completed || 0,
+    current_key: data.current_key || null,
+    current_label: data.current_label || null,
+    updated_at: data.updated_at || new Date().toISOString()
+  };
+}
+
+function createDailyProgressPublisher(command) {
+  let latestProgress = null;
+  let timer = null;
+  let lastPublishedAt = 0;
+
+  function emit() {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    if (!latestProgress) return;
+    const progress = latestProgress;
+    latestProgress = null;
+    lastPublishedAt = Date.now();
+    publishEvent(SERVER_EVENTS.DAILY_RUN_PROGRESS_UPDATED, {
+      progress,
+      scheduler: compactSchedulerStatus()
+    });
+  }
+
+  function queue(payload) {
+    const progress = compactDailyProgressEvent(payload, command);
+    if (!progress) return;
+    latestProgress = progress;
+    const elapsed = Date.now() - lastPublishedAt;
+    if (elapsed >= DAILY_PROGRESS_SSE_THROTTLE_MS) {
+      emit();
+      return;
+    }
+    if (!timer) {
+      timer = setTimeout(emit, DAILY_PROGRESS_SSE_THROTTLE_MS - elapsed);
+      timer.unref?.();
+    }
+  }
+
+  function stop() {
+    if (timer) clearTimeout(timer);
+    timer = null;
+    latestProgress = null;
+  }
+
+  return { flush: emit, queue, stop };
 }
 
 function publishSettingsChanged(_settings, scheduler = schedulerStatus()) {
@@ -857,8 +1008,16 @@ async function runManagedJob(command, source = "manual", args = []) {
   const startedAt = new Date().toISOString();
   jobRuntime.currentJob = { command, source, args, started_at: startedAt };
   publishTaskEvent(SERVER_EVENTS.TASK_STARTED, { ...jobRuntime.currentJob, status: "running" });
+  const progressPublisher = DAILY_JOB_COMMANDS.has(command)
+    ? createDailyProgressPublisher(command)
+    : null;
   try {
-    const data = await jsonFromWorker([command, ...args]);
+    const data = progressPublisher
+      ? await jsonFromManagedWorker([command, ...args], null, {
+        onProgressEvent: (payload) => progressPublisher.queue(payload)
+      })
+      : await jsonFromWorker([command, ...args]);
+    progressPublisher?.flush();
     const finishedAt = new Date().toISOString();
     jobRuntime.lastJob = {
       command,
@@ -874,6 +1033,7 @@ async function runManagedJob(command, source = "manual", args = []) {
     publishTaskEvent(SERVER_EVENTS.TASK_FINISHED, jobRuntime.lastJob, { result: data });
     return data;
   } catch (error) {
+    progressPublisher?.flush();
     const finishedAt = new Date().toISOString();
     jobRuntime.lastJob = {
       command,
@@ -893,6 +1053,7 @@ async function runManagedJob(command, source = "manual", args = []) {
     publishTaskEvent(SERVER_EVENTS.TASK_FAILED, jobRuntime.lastJob);
     throw error;
   } finally {
+    progressPublisher?.stop();
     jobRuntime.currentJob = null;
   }
 }
@@ -1038,6 +1199,19 @@ async function runDailyStateToday() {
   return "none";
 }
 
+async function dailyRunRecoveryState() {
+  const data = await jsonFromWorker(["api-notifications", "--limit", "20"]);
+  const item = (data.items || []).find((entry) => entry?.type === "daily_run_recoverable");
+  const recovery = item?.source?.recovery;
+  if (!recovery?.resumable) return null;
+  return {
+    ...recovery,
+    title: item.title || "每日流程可继续",
+    detail: item.detail || "",
+    created_at: item.created_at || null,
+  };
+}
+
 async function runDailyOnDashboardOpenIfNeeded(settings) {
   startupDailyRuntime.enabled = Boolean(settings.run_daily_on_startup_enabled);
   startupDailyRuntime.lastCheckAt = new Date().toISOString();
@@ -1081,6 +1255,16 @@ async function runDailyOnDashboardOpenIfNeeded(settings) {
     startupDailyRuntime.lastSkipReason = "already_completed_today";
     return { triggered: false, reason: "already_completed_today", scheduler: schedulerStatus() };
   }
+  const recovery = await dailyRunRecoveryState();
+  if (recovery) {
+    startupDailyRuntime.lastSkipReason = "recoverable_daily_run";
+    return {
+      triggered: false,
+      reason: "recoverable_daily_run",
+      recovery,
+      scheduler: schedulerStatus()
+    };
+  }
   startupDailyRuntime.triggerInFlight = true;
   startupDailyRuntime.lastSkipReason = "launched";
   runManagedJob("run-daily", "dashboard-open")
@@ -1101,6 +1285,17 @@ async function runDailyOnDashboardOpenIfNeeded(settings) {
 
 async function jsonFromWorker(args, input = null) {
   const output = await worker(args, input);
+  try {
+    return JSON.parse(output || "{}");
+  } catch (error) {
+    const err = new Error(`Worker returned invalid JSON: ${output.slice(0, 300)}`);
+    err.statusCode = 500;
+    throw err;
+  }
+}
+
+async function jsonFromManagedWorker(args, input = null, options = {}) {
+  const output = await managedWorker(args, input, options);
   try {
     return JSON.parse(output || "{}");
   } catch (error) {
@@ -1698,6 +1893,18 @@ async function routeApi(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/jobs/run-now") {
+    const body = await readRequestJson(req);
+    if (!body.force) {
+      const recovery = await dailyRunRecoveryState();
+      if (recovery) {
+        sendJson(res, 409, {
+          error: "今天已有失败但可恢复的每日流程。继续上次流程，或确认后重新执行今日流程。",
+          code: "daily_run_recoverable",
+          recovery,
+        });
+        return;
+      }
+    }
     const data = await runManagedJob("run-daily", "manual");
     sendJson(res, 200, { ok: true, ...data, scheduler: schedulerStatus() });
     return;
