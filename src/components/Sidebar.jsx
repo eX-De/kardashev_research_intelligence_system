@@ -1,5 +1,7 @@
 import { NavLink } from "react-router-dom";
 
+import { ThemeControl } from "./ThemeControl.jsx";
+
 function authLabel(authInfo, fallback) {
   if (fallback) return fallback;
   const user = authInfo?.user;
@@ -32,14 +34,18 @@ export function Sidebar({ authInfo, authStatusLabel, isLoggingOut = false, onLog
   return (
     <aside className="sidebar">
       <div className="brand">
-        <span className="brand-mark">
-          <img src="/kris-logo.svg" alt="" />
-        </span>
-        <div>
-          <strong>KRIS</strong>
-          <span>Kardashev Research Intelligence System</span>
+        <div className="brand-row">
+          <span className="brand-mark">
+            <img src="/kris-logo.svg" alt="" />
+          </span>
+          <div className="brand-copy">
+            <strong>KRIS</strong>
+            <span>Kardashev Research Intelligence System</span>
+          </div>
         </div>
       </div>
+
+      <ThemeControl />
 
       <nav className="main-nav" aria-label="主导航">
         {navItems.map(({ to, label, hint, end, children }) => (

@@ -21,7 +21,7 @@ services:
     restart: unless-stopped
 
   app:
-    image: ${KRIS_IMAGE:-exde1968/kardashev-research-intelligence-system:0.1.0}
+    image: ${KRIS_IMAGE:-exde1968/kardashev-research-intelligence-system:latest}
     depends_on:
       db:
         condition: service_healthy

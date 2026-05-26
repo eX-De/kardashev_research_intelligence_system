@@ -10,7 +10,7 @@ KRIS 还可以作为实验进展接收端，与 [eX-De/kris-agent](https://githu
 
 KRIS 支持两种主要部署方式：
 
-- Docker 部署：推荐用于服务器或长期运行环境。发布镜像为 `exde1968/kardashev-research-intelligence-system:0.1.0`；建议直接使用仓库内的 [docker-compose.yml](docker-compose.yml)，它会启动 PostgreSQL 17、secrets 和可选 Nginx HTTPS。
+- Docker 部署：推荐用于服务器或长期运行环境。默认发布镜像为 `exde1968/kardashev-research-intelligence-system:latest`；建议直接使用仓库内的 [docker-compose.yml](docker-compose.yml)，它会启动 PostgreSQL 17、secrets 和可选 Nginx HTTPS。需要固定版本或回滚时，可在 `.env` 中设置 `KRIS_IMAGE` 为版本 tag 或 `sha-*` tag。
 - 源代码部署：推荐用于本地开发和快速调试。直接从仓库安装 Node/Python 依赖，配置 PostgreSQL 连接后使用 `npm start` 启动构建后的 dashboard。
 
 最小 Docker Compose 运行示例（按本文 Docker Compose 章节准备 `secrets/*.txt` 后执行）：
@@ -318,7 +318,7 @@ Payload 约束：
 
 ## Docker Compose
 
-发布镜像是 `exde1968/kardashev-research-intelligence-system:0.1.0`。仓库内的 [docker-compose.yml](docker-compose.yml) 默认拉取该镜像，并启动 PostgreSQL 17：
+默认发布镜像是 `exde1968/kardashev-research-intelligence-system:latest`。仓库内的 [docker-compose.yml](docker-compose.yml) 默认拉取该镜像，并启动 PostgreSQL 17：
 
 - `db`：`pgvector/pgvector:pg17`，数据在 named volume `pgdata17`。
 - `app`：Node 22 + Python venv，启动时先执行 `python -m worker.cli init-db`，再运行 `node server.js`。
@@ -342,9 +342,35 @@ Set-Content -NoNewline secrets/kris_agent_token.txt "replace-with-agent-token-or
 docker compose up -d
 ```
 
+更新到 Docker Hub 上最新的 `latest` 镜像：
+
+```powershell
+docker compose pull app
+docker compose up -d app
+```
+
+如果需要固定部署某个版本或回滚，把 `.env` 里的 `KRIS_IMAGE` 改成对应 tag，例如：
+
+```env
+KRIS_IMAGE=exde1968/kardashev-research-intelligence-system:sha-abc1234
+```
+
 访问 `http://localhost:3000`，或按 `.env` 中的 `APP_HOST_PORT` 访问。`panel_password.txt` 为空时保持无密码模式；`kris_agent_token.txt` 为空时关闭外部实验报告上报。
 
 如果容器需要访问本地 Obsidian vault，在 `docker-compose.yml` 中挂载 vault，并把 `OBSIDIAN_VAULT_PATH` 设置为容器内路径，例如 `/vault`。
+
+## Docker Hub 自动构建
+
+仓库内的 [.github/workflows/dockerhub.yml](.github/workflows/dockerhub.yml) 会在 GitHub Actions 中构建 Dockerfile，并把镜像推送到 Docker Hub。首次使用前，在 GitHub 仓库的 `Settings` -> `Secrets and variables` -> `Actions` -> `Secrets` 中添加：
+
+- `DOCKERHUB_USERNAME`：Docker Hub 用户名。
+- `DOCKERHUB_TOKEN`：Docker Hub access token。
+
+触发规则：
+
+- push 到 `main`：构建并推送 `latest`、`main` 和 `sha-*` tag。
+- push `v*.*.*` tag：构建并推送对应版本 tag、`major.minor` tag 和 `sha-*` tag。
+- pull request：只验证镜像能否构建，不推送到 Docker Hub。
 
 ## Nginx HTTPS
 

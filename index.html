@@ -4,6 +4,21 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="icon" type="image/svg+xml" href="/kris-logo.svg" />
+    <script>
+      (() => {
+        const key = "kris.theme.mode";
+        const modes = new Set(["light", "dark", "system"]);
+        let mode = "system";
+        try {
+          const stored = window.localStorage.getItem(key);
+          if (modes.has(stored)) mode = stored;
+        } catch {}
+        const systemDark = window.matchMedia?.("(prefers-color-scheme: dark)")?.matches;
+        const theme = mode === "dark" || (mode === "system" && systemDark) ? "dark" : "light";
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.style.colorScheme = theme;
+      })();
+    </script>
     <title>科研情报系统</title>
   </head>
   <body>

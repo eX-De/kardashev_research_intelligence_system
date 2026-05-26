@@ -23,6 +23,7 @@ import { ToastHost } from "./components/ToastHost.jsx";
 import { ApiCacheProvider } from "./lib/apiCache.jsx";
 import { AUTH_REQUIRED_EVENT, api, postJson } from "./lib/dashboard.js";
 import { useServerEvents } from "./lib/serverEvents.js";
+import { ThemeProvider } from "./lib/theme.jsx";
 
 const TOAST_TYPES = new Set(["success", "error", "info", "warning"]);
 const NOTIFICATION_TOAST_TYPES = {
@@ -441,8 +442,10 @@ function AuthenticatedApp() {
 
 export function App() {
   return (
-    <BrowserRouter>
-      <AuthenticatedApp />
-    </BrowserRouter>
+    <ThemeProvider>
+      <BrowserRouter>
+        <AuthenticatedApp />
+      </BrowserRouter>
+    </ThemeProvider>
   );
 }
