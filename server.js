@@ -34,8 +34,18 @@ const DAILY_PROGRESS_SSE_THROTTLE_MS = Math.max(
   250,
   Number(process.env.DAILY_PROGRESS_SSE_THROTTLE_MS || 1000)
 );
+const UPDATE_CHECK_ENABLED = envBoolean("KRIS_UPDATE_CHECK_ENABLED", true);
+const UPDATE_CHECK_INITIAL_DELAY_MS = Math.max(
+  0,
+  Number(process.env.KRIS_UPDATE_CHECK_INITIAL_DELAY_MS || 30000)
+);
+const UPDATE_CHECK_INTERVAL_MS = Math.max(
+  60 * 1000,
+  Number(process.env.KRIS_UPDATE_CHECK_INTERVAL_MS || 12 * 60 * 60 * 1000)
+);
 const WORKER_PROGRESS_EVENT_PREFIX = "KRIS_PROGRESS_EVENT ";
 const DAILY_JOB_COMMANDS = new Set(["run-daily", "resume-daily", "retry-daily"]);
+const PAPER_REPORT_QUEUE_COMMAND = "generate-paper-reports";
 
 const jobRuntime = {
   currentJob: null,
@@ -70,6 +80,15 @@ const paperReportQueueRuntime = {
   lastError: null
 };
 
+const updateCheckRuntime = {
+  enabled: UPDATE_CHECK_ENABLED,
+  timer: null,
+  checking: false,
+  lastCheckAt: null,
+  lastError: null,
+  lastNotifiedVersion: null
+};
+
 const eventBus = {
   nextEventId: 1,
   nextClientId: 1,
@@ -80,6 +99,7 @@ const eventBus = {
 const SERVER_EVENTS = Object.freeze({
   ARTIFACT_CREATED: "artifact.created",
   ARTIFACT_UPDATED: "artifact.updated",
+  APP_UPDATE_AVAILABLE: "app.update_available",
   DAILY_RUN_PROGRESS_UPDATED: "daily_run_progress.updated",
   EVENTS_CONNECTED: "events.connected",
   EXPERIMENT_REPORT_UPSERTED: "experiment_report.upserted",
@@ -151,6 +171,11 @@ function envValue(name, fallback = "") {
 function positiveInteger(value, fallback) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function envBoolean(name, fallback = false) {
+  const raw = envValue(name, fallback ? "true" : "false");
+  return new Set(["1", "true", "yes", "on", "enabled"]).has(String(raw).trim().toLowerCase());
 }
 
 function workerErrorFromOutput(error, stdout = "", stderr = "") {
@@ -531,6 +556,14 @@ function compactRuntimeJob(job) {
   };
 }
 
+function isDailyJobCommand(command) {
+  return DAILY_JOB_COMMANDS.has(String(command || ""));
+}
+
+function isPaperReportQueueCommand(command) {
+  return String(command || "") === PAPER_REPORT_QUEUE_COMMAND;
+}
+
 function compactSchedulerStatus(status = schedulerStatus()) {
   return {
     ...status,
@@ -631,6 +664,71 @@ function publishSettingsChanged(_settings, scheduler = schedulerStatus()) {
   publishEvent(SERVER_EVENTS.SETTINGS_CHANGED, {
     scheduler: compactSchedulerStatus(scheduler)
   });
+}
+
+function updateVersionKey(data = {}) {
+  return String(data.latest_tag || data.latest_version || data.notification?.source?.update?.latest_tag || "").trim();
+}
+
+function compactUpdatePayload(data = {}) {
+  const update = data.notification?.source?.update || {};
+  return {
+    ok: Boolean(data.ok),
+    available: Boolean(data.available),
+    checked_at: data.checked_at || update.checked_at || null,
+    current_version: data.current_version || update.current_version || null,
+    latest_version: data.latest_version || update.latest_version || null,
+    latest_tag: data.latest_tag || update.latest_tag || null,
+    repository: data.repository || update.repository || null,
+    release_url: data.release_url || update.release_url || null,
+    source: data.source || update.source || null
+  };
+}
+
+function publishUpdateAvailable(data = {}, { force = false } = {}) {
+  if (!data?.available || !data?.notification) return null;
+  const versionKey = updateVersionKey(data);
+  if (!force && versionKey && versionKey === updateCheckRuntime.lastNotifiedVersion) return null;
+  if (versionKey) updateCheckRuntime.lastNotifiedVersion = versionKey;
+  return publishEvent(SERVER_EVENTS.APP_UPDATE_AVAILABLE, {
+    update: compactUpdatePayload(data),
+    notification: data.notification
+  });
+}
+
+function scheduleUpdateCheck(delayMs = UPDATE_CHECK_INTERVAL_MS) {
+  if (!updateCheckRuntime.enabled) return;
+  if (updateCheckRuntime.timer) clearTimeout(updateCheckRuntime.timer);
+  updateCheckRuntime.timer = setTimeout(() => {
+    updateCheckRuntime.timer = null;
+    runUpdateCheck().catch((error) => {
+      updateCheckRuntime.lastError = { message: error.message, at: new Date().toISOString() };
+      scheduleUpdateCheck();
+    });
+  }, Math.max(0, Number(delayMs) || 0));
+  updateCheckRuntime.timer.unref?.();
+}
+
+async function runUpdateCheck({ forceNotify = false, reschedule = true } = {}) {
+  if (!updateCheckRuntime.enabled) {
+    return { ok: false, disabled: true, available: false };
+  }
+  if (updateCheckRuntime.checking) {
+    return { ok: false, checking: true, available: false };
+  }
+  updateCheckRuntime.checking = true;
+  updateCheckRuntime.lastCheckAt = new Date().toISOString();
+  try {
+    const data = await jsonFromWorker(["api-update-check"]);
+    updateCheckRuntime.lastError = data.ok === false
+      ? { message: data.error || "Update check failed", at: new Date().toISOString() }
+      : null;
+    publishUpdateAvailable(data, { force: forceNotify });
+    return data;
+  } finally {
+    updateCheckRuntime.checking = false;
+    if (reschedule) scheduleUpdateCheck();
+  }
 }
 
 function compactExperimentReportPayload(data) {
@@ -872,10 +970,15 @@ function jobAgeMs(job) {
   return Number.isFinite(startedAt) ? Date.now() - startedAt : Number.POSITIVE_INFINITY;
 }
 
-async function runningDatabaseJob() {
+async function runningDatabaseJob({ ignoreDailyJobs = false, ignorePaperReportQueueJobs = false } = {}) {
   await cleanupStaleJobs();
   const history = await jsonFromWorker(["api-jobs-history", "--limit", "100"]);
-  return (history.items || []).find((job) => job.status === "running") || null;
+  return (history.items || []).find((job) => {
+    if (job.status !== "running") return false;
+    if (ignoreDailyJobs && isDailyJobCommand(job.job_type)) return false;
+    if (ignorePaperReportQueueJobs && isPaperReportQueueCommand(job.job_type)) return false;
+    return true;
+  }) || null;
 }
 
 async function reconcileCurrentJobWithDatabase() {
@@ -984,6 +1087,7 @@ async function applySchedulerMode(mode) {
 }
 
 async function runManagedJob(command, source = "manual", args = []) {
+  const isDailyJob = isDailyJobCommand(command);
   if (jobRuntime.currentJob) {
     await reconcileCurrentJobWithDatabase();
   }
@@ -992,13 +1096,13 @@ async function runManagedJob(command, source = "manual", args = []) {
     err.statusCode = 409;
     throw err;
   }
-  if (source !== "paper-report-queue" && paperReportQueueRuntime.active > 0) {
+  if (!isDailyJob && source !== "paper-report-queue" && paperReportQueueRuntime.active > 0) {
     const err = new Error(`Paper report queue is running: ${paperReportQueueRuntime.active} active`);
     err.statusCode = 409;
     throw err;
   }
   if (source !== "paper-report-queue") {
-    const running = await runningDatabaseJob();
+    const running = await runningDatabaseJob({ ignorePaperReportQueueJobs: isDailyJob });
     if (running) {
       const err = new Error(`Database job is already running: ${running.job_type} #${running.id}`);
       err.statusCode = 409;
@@ -1076,7 +1180,7 @@ async function runPaperReportWorker(workerId) {
   const startedAt = new Date().toISOString();
   const activeJob = {
     id: workerId,
-    command: "generate-paper-reports",
+    command: PAPER_REPORT_QUEUE_COMMAND,
     source: "paper-report-queue",
     args: ["--limit", "1"],
     started_at: startedAt
@@ -1088,7 +1192,7 @@ async function runPaperReportWorker(workerId) {
   let failure = null;
   let finishedAt = null;
   try {
-    result = await jsonFromWorker(["generate-paper-reports", "--limit", "1"]);
+    result = await jsonFromWorker([PAPER_REPORT_QUEUE_COMMAND, "--limit", "1"]);
     finishedAt = new Date().toISOString();
     paperReportQueueRuntime.lastRunAt = finishedAt;
     paperReportQueueRuntime.lastError = null;
@@ -1121,14 +1225,8 @@ async function runPaperReportQueueOnce() {
   if (jobRuntime.currentJob) {
     await reconcileCurrentJobWithDatabase();
   }
-  const running = jobRuntime.currentJob ? null : await runningDatabaseJob();
-  if (jobRuntime.currentJob) {
+  if (jobRuntime.currentJob && !isDailyJobCommand(jobRuntime.currentJob.command)) {
     paperReportQueueRuntime.lastSkipReason = `busy:${jobRuntime.currentJob.command}`;
-    schedulePaperReportQueue();
-    return schedulerStatus();
-  }
-  if (running) {
-    paperReportQueueRuntime.lastSkipReason = `busy:${running.job_type}`;
     schedulePaperReportQueue();
     return schedulerStatus();
   }
@@ -1138,6 +1236,16 @@ async function runPaperReportQueueOnce() {
   paperReportQueueRuntime.concurrency = concurrency;
   if (paperReportQueueRuntime.active >= concurrency) {
     paperReportQueueRuntime.lastSkipReason = `active:${paperReportQueueRuntime.active}/${concurrency}`;
+    schedulePaperReportQueue();
+    return schedulerStatus();
+  }
+
+  const running = await runningDatabaseJob({
+    ignoreDailyJobs: true,
+    ignorePaperReportQueueJobs: paperReportQueueRuntime.active > 0
+  });
+  if (running) {
+    paperReportQueueRuntime.lastSkipReason = `busy:${running.job_type}`;
     schedulePaperReportQueue();
     return schedulerStatus();
   }
@@ -1233,17 +1341,15 @@ async function runDailyOnDashboardOpenIfNeeded(settings) {
   if (jobRuntime.currentJob) {
     await reconcileCurrentJobWithDatabase();
   }
-  const running = jobRuntime.currentJob ? null : await runningDatabaseJob();
+  const running = jobRuntime.currentJob
+    ? null
+    : await runningDatabaseJob({ ignorePaperReportQueueJobs: true });
   if (jobRuntime.currentJob) {
     startupDailyRuntime.lastSkipReason = `busy:${jobRuntime.currentJob.command}`;
     return { triggered: false, reason: startupDailyRuntime.lastSkipReason, scheduler: schedulerStatus() };
   }
   if (running) {
     startupDailyRuntime.lastSkipReason = `busy:${running.job_type}`;
-    return { triggered: false, reason: startupDailyRuntime.lastSkipReason, scheduler: schedulerStatus() };
-  }
-  if (paperReportQueueRuntime.active > 0) {
-    startupDailyRuntime.lastSkipReason = `busy:paper_report_queue:${paperReportQueueRuntime.active}`;
     return { triggered: false, reason: startupDailyRuntime.lastSkipReason, scheduler: schedulerStatus() };
   }
   const todayState = await runDailyStateToday();
@@ -1866,6 +1972,18 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/api/update-status") {
+    const data = await jsonFromWorker(["api-update-status"]);
+    sendJson(res, 200, data);
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/update-check") {
+    const data = await runUpdateCheck({ forceNotify: true, reschedule: false });
+    sendJson(res, 200, data);
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/api/jobs/scheduler/start") {
     const scheduler = await startScheduler({ persist: true });
     sendJson(res, 200, { ok: true, scheduler });
@@ -2282,6 +2400,7 @@ const server = createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log(`Research Intelligence dashboard listening on http://localhost:${PORT}`);
   schedulePaperReportQueue(1000);
+  scheduleUpdateCheck(UPDATE_CHECK_INITIAL_DELAY_MS);
   readAppSettings()
     .then(async (settings) => {
       if (settings.scheduler_enabled) {

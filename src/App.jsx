@@ -154,7 +154,7 @@ function ArtifactsRoute({ setStatusMessage }) {
 function AppRoutes({ notify, setStatusMessage }) {
   return (
     <Routes>
-      <Route path="/" element={<DashboardView setStatusMessage={setStatusMessage} />} />
+      <Route path="/" element={<DashboardView setStatusMessage={setStatusMessage} notify={notify} />} />
       <Route path="/artifacts" element={<ArtifactsRoute setStatusMessage={setStatusMessage} />} />
       <Route path="/artifacts/:artifactId" element={<ArtifactsRoute setStatusMessage={setStatusMessage} />} />
       <Route path="/papers" element={<Navigate to="/papers/inbox" replace />} />

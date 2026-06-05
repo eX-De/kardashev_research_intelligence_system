@@ -71,7 +71,10 @@ def embed_many(settings: Settings, texts: Iterable[str]) -> list[list[float] | N
 
 
 def _embedding_concurrency(settings: Settings, item_count: int | None = None) -> int:
-    configured = max(1, min(8, int(getattr(settings, "embedding_concurrency", 1) or 1)))
+    raw_value = getattr(settings, "embedding_concurrency", 1)
+    configured = int(1 if raw_value is None or str(raw_value).strip() == "" else raw_value)
+    if configured < 1:
+        raise RuntimeError("embedding_concurrency must be at least 1")
     if item_count is None:
         return configured
     return min(configured, max(1, item_count))

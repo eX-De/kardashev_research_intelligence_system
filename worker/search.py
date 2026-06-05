@@ -4,6 +4,12 @@ import re
 from .db_types import DbConnection, DbRow
 from collections import defaultdict
 from dataclasses import dataclass
+from typing import Any
+
+try:
+    import numpy as np
+except ImportError:  # pragma: no cover - runtime fallback for minimal installs
+    np = None  # type: ignore[assignment]
 
 from .config import Settings
 from .arxiv_text import ensure_arxiv_chunks
@@ -60,6 +66,13 @@ class SearchHit:
     searcher: str
 
 
+@dataclass(frozen=True)
+class EmbeddingMatrix:
+    ids: tuple[int, ...]
+    matrix: Any
+    index_by_id: dict[int, int]
+
+
 def tokenize(text: str) -> list[str]:
     tokens = [match.group(0).lower() for match in TOKEN_PATTERN.finditer(text)]
     return [token for token in tokens if token not in STOPWORDS]
@@ -69,6 +82,154 @@ def _chunk_id_set(chunk_ids: set[int] | list[int] | tuple[int, ...] | None) -> s
     if chunk_ids is None:
         return None
     return {int(chunk_id) for chunk_id in chunk_ids}
+
+
+def _empty_embedding_matrix() -> EmbeddingMatrix:
+    return EmbeddingMatrix((), None, {})
+
+
+def _embedding_matrix_from_rows(rows: list[DbRow], id_key: str) -> EmbeddingMatrix:
+    if np is None:
+        return _empty_embedding_matrix()
+    ids: list[int] = []
+    vectors: list[Any] = []
+    dimension: int | None = None
+    for row in rows:
+        values = from_json(row["embedding_json"], [])
+        if not isinstance(values, list) or not values:
+            continue
+        try:
+            vector = np.asarray(values, dtype=np.float32)
+        except (TypeError, ValueError):
+            continue
+        if vector.ndim != 1 or not vector.size:
+            continue
+        if dimension is None:
+            dimension = int(vector.shape[0])
+        elif int(vector.shape[0]) != dimension:
+            continue
+        norm = float(np.linalg.norm(vector))
+        if not np.isfinite(norm) or norm <= 0:
+            continue
+        ids.append(int(row[id_key]))
+        vectors.append(vector / norm)
+    if not vectors:
+        return _empty_embedding_matrix()
+    matrix = np.vstack(vectors).astype(np.float32, copy=False)
+    return EmbeddingMatrix(tuple(ids), matrix, {chunk_id: index for index, chunk_id in enumerate(ids)})
+
+
+def _load_chunk_embedding_matrix(
+    conn: DbConnection,
+    model: str,
+    chunk_ids: set[int] | frozenset[int] | list[int] | tuple[int, ...] | None = None,
+) -> EmbeddingMatrix:
+    if np is None or not model:
+        return _empty_embedding_matrix()
+    if chunk_ids is None:
+        rows = conn.execute(
+            """
+            SELECT chunk_id, embedding_json
+            FROM chunk_embeddings
+            WHERE model = ?
+            ORDER BY chunk_id
+            """,
+            (model,),
+        ).fetchall()
+        return _embedding_matrix_from_rows(rows, "chunk_id")
+    selected = sorted({int(chunk_id) for chunk_id in chunk_ids})
+    if not selected:
+        return _empty_embedding_matrix()
+    placeholders = ", ".join("?" for _ in selected)
+    rows = conn.execute(
+        f"""
+        SELECT chunk_id, embedding_json
+        FROM chunk_embeddings
+        WHERE model = ?
+          AND chunk_id IN ({placeholders})
+        ORDER BY chunk_id
+        """,
+        (model, *selected),
+    ).fetchall()
+    return _embedding_matrix_from_rows(rows, "chunk_id")
+
+
+def _load_arxiv_chunk_embedding_matrix(
+    conn: DbConnection,
+    model: str,
+    arxiv_chunk_ids: list[int] | tuple[int, ...] | set[int],
+) -> EmbeddingMatrix:
+    if np is None or not model:
+        return _empty_embedding_matrix()
+    selected = sorted({int(chunk_id) for chunk_id in arxiv_chunk_ids})
+    if not selected:
+        return _empty_embedding_matrix()
+    placeholders = ", ".join("?" for _ in selected)
+    rows = conn.execute(
+        f"""
+        SELECT arxiv_chunk_id, embedding_json
+        FROM arxiv_chunk_embeddings
+        WHERE model = ?
+          AND arxiv_chunk_id IN ({placeholders})
+        ORDER BY arxiv_chunk_id
+        """,
+        (model, *selected),
+    ).fetchall()
+    return _embedding_matrix_from_rows(rows, "arxiv_chunk_id")
+
+
+def _arxiv_chunks_by_paper(conn: DbConnection, paper_ids: list[int]) -> dict[int, list[DbRow]]:
+    selected = sorted({int(paper_id) for paper_id in paper_ids})
+    if not selected:
+        return {}
+    placeholders = ", ".join("?" for _ in selected)
+    rows = conn.execute(
+        f"""
+        SELECT id, paper_id, chunk_index, source, page_start, page_end, text
+        FROM arxiv_text_chunks
+        WHERE paper_id IN ({placeholders})
+        ORDER BY paper_id, chunk_index
+        """,
+        selected,
+    ).fetchall()
+    chunks_by_paper: dict[int, list[DbRow]] = defaultdict(list)
+    for row in rows:
+        chunks_by_paper[int(row["paper_id"])].append(row)
+    return dict(chunks_by_paper)
+
+
+def _batch_embedding_hits(
+    query_embeddings: EmbeddingMatrix,
+    candidate_embeddings: EmbeddingMatrix,
+    *,
+    limit: int | None = None,
+) -> dict[int, list[SearchHit]] | None:
+    if np is None or query_embeddings.matrix is None or candidate_embeddings.matrix is None:
+        return None
+    if not query_embeddings.ids or not candidate_embeddings.ids:
+        return None
+    if query_embeddings.matrix.shape[1] != candidate_embeddings.matrix.shape[1]:
+        return None
+    scores = query_embeddings.matrix @ candidate_embeddings.matrix.T
+    candidate_count = len(candidate_embeddings.ids)
+    effective_limit = candidate_count if limit is None else max(1, min(int(limit), candidate_count))
+    hits_by_query: dict[int, list[SearchHit]] = {}
+    for row_index, query_id in enumerate(query_embeddings.ids):
+        row_scores = scores[row_index]
+        if effective_limit < candidate_count:
+            candidate_indexes = np.argpartition(row_scores, -effective_limit)[-effective_limit:]
+            ordered_indexes = candidate_indexes[np.argsort(row_scores[candidate_indexes])[::-1]]
+        else:
+            ordered_indexes = np.argsort(row_scores)[::-1]
+        hits: list[SearchHit] = []
+        for raw_index in ordered_indexes:
+            index = int(raw_index)
+            score = float(row_scores[index])
+            if score <= 0:
+                continue
+            hits.append(SearchHit(int(candidate_embeddings.ids[index]), score, "embedding_search"))
+        hits_by_query[int(query_id)] = hits
+    return hits_by_query
 
 
 def _chunks(
@@ -214,11 +375,14 @@ def hybrid_search_with_embedding(
     top_k: int,
     query_embedding: list[float] | None,
     chunk_ids: set[int] | list[int] | tuple[int, ...] | None = None,
+    embedding_hits: list[SearchHit] | None = None,
 ) -> list[dict[str, object]]:
     searcher_hits: list[list[SearchHit]] = []
     for searcher in settings.rag_searchers:
         if searcher == "embedding_search":
-            if query_embedding is not None:
+            if embedding_hits is not None:
+                searcher_hits.append(embedding_hits)
+            elif query_embedding is not None:
                 searcher_hits.append(embedding_search_with_vector(conn, query_embedding, chunk_ids))
             else:
                 searcher_hits.append(embedding_search(conn, settings, query, chunk_ids))
@@ -289,11 +453,14 @@ def _hybrid_search_project_cache(
     top_k: int,
     query_embedding: list[float] | None,
     cache: ProjectMatchCache,
+    embedding_hits: list[SearchHit] | None = None,
 ) -> list[dict[str, object]]:
     searcher_hits: list[list[SearchHit]] = []
     for searcher in settings.rag_searchers:
         if searcher == "embedding_search":
-            if query_embedding is not None:
+            if embedding_hits is not None:
+                searcher_hits.append(embedding_hits)
+            elif query_embedding is not None:
                 searcher_hits.append(
                     _project_embedding_search_with_vector(conn, query_embedding, cache.chunk_ids, top_k)
                 )
@@ -585,32 +752,47 @@ def rank_unmatched_papers(
     matched_papers = 0
     matches_created = 0
     arxiv_chunks_scored = 0
+    embedding_enabled = "embedding_search" in settings.rag_searchers
+    arxiv_chunks_by_paper = _arxiv_chunks_by_paper(conn, paper_ids)
+    arxiv_chunk_ids = [
+        int(chunk["id"])
+        for chunks in arxiv_chunks_by_paper.values()
+        for chunk in chunks
+    ]
+    embedding_hits_by_arxiv_chunk: dict[int, list[SearchHit]] | None = None
+    if embedding_enabled:
+        arxiv_embedding_matrix = _load_arxiv_chunk_embedding_matrix(
+            conn,
+            settings.llm_embedding_model,
+            arxiv_chunk_ids,
+        )
+        note_embedding_matrix = _load_chunk_embedding_matrix(conn, settings.llm_embedding_model)
+        embedding_hits_by_arxiv_chunk = _batch_embedding_hits(arxiv_embedding_matrix, note_embedding_matrix)
 
     for paper in papers:
-        arxiv_chunks = conn.execute(
-            """
-            SELECT id, chunk_index, source, page_start, page_end, text
-            FROM arxiv_text_chunks
-            WHERE paper_id = ?
-            ORDER BY chunk_index
-            """,
-            (int(paper["id"]),),
-        ).fetchall()
+        arxiv_chunks = arxiv_chunks_by_paper.get(int(paper["id"]), [])
         best_by_obsidian_chunk: dict[int, dict[str, object]] = {}
         for arxiv_chunk in arxiv_chunks:
             arxiv_chunks_scored += 1
-            query_embedding = ensure_arxiv_chunk_embedding(
-                conn,
-                settings,
-                int(arxiv_chunk["id"]),
-                arxiv_chunk["text"],
-            )
+            query_embedding = None
+            embedding_hits = None
+            if embedding_enabled:
+                if embedding_hits_by_arxiv_chunk is not None:
+                    embedding_hits = embedding_hits_by_arxiv_chunk.get(int(arxiv_chunk["id"]), [])
+                else:
+                    query_embedding = ensure_arxiv_chunk_embedding(
+                        conn,
+                        settings,
+                        int(arxiv_chunk["id"]),
+                        arxiv_chunk["text"],
+                    )
             hits = hybrid_search_with_embedding(
                 conn,
                 settings,
                 arxiv_chunk["text"],
                 settings.rag_top_k,
                 query_embedding,
+                embedding_hits=embedding_hits,
             )
             for hit in hits:
                 if float(hit["score"]) < settings.rag_score_threshold:
@@ -720,6 +902,18 @@ def rank_project_papers(
     arxiv_chunks_skipped_by_early_stop = 0
     project_paper_scan_early_stops = 0
     project_paper_matches_created = 0
+    embedding_enabled = "embedding_search" in settings.rag_searchers
+    arxiv_chunks_by_paper = _arxiv_chunks_by_paper(conn, paper_ids)
+    arxiv_chunk_ids = [
+        int(chunk["id"])
+        for chunks in arxiv_chunks_by_paper.values()
+        for chunk in chunks
+    ]
+    arxiv_embedding_matrix = (
+        _load_arxiv_chunk_embedding_matrix(conn, settings.llm_embedding_model, arxiv_chunk_ids)
+        if embedding_enabled
+        else _empty_embedding_matrix()
+    )
 
     for project in projects:
         projects_considered += 1
@@ -729,27 +923,36 @@ def rank_project_papers(
         if not project_cache.chunk_ids:
             continue
         projects_with_context += 1
+        embedding_hits_by_arxiv_chunk: dict[int, list[SearchHit]] | None = None
+        if embedding_enabled:
+            project_embedding_matrix = _load_chunk_embedding_matrix(
+                conn,
+                settings.llm_embedding_model,
+                project_cache.chunk_ids,
+            )
+            embedding_hits_by_arxiv_chunk = _batch_embedding_hits(
+                arxiv_embedding_matrix,
+                project_embedding_matrix,
+            )
         for paper in papers:
             papers_considered += 1
-            arxiv_chunks = conn.execute(
-                """
-                SELECT id, chunk_index, source, page_start, page_end, text
-                FROM arxiv_text_chunks
-                WHERE paper_id = ?
-                ORDER BY chunk_index
-                """,
-                (int(paper["id"]),),
-            ).fetchall()
+            arxiv_chunks = arxiv_chunks_by_paper.get(int(paper["id"]), [])
             best_by_obsidian_chunk: dict[int, dict[str, object]] = {}
             early_stopper = ProjectPaperMatchEarlyStopper()
             for chunk_position, arxiv_chunk in enumerate(arxiv_chunks, start=1):
                 arxiv_chunks_scored += 1
-                query_embedding = ensure_arxiv_chunk_embedding(
-                    conn,
-                    settings,
-                    int(arxiv_chunk["id"]),
-                    arxiv_chunk["text"],
-                )
+                query_embedding = None
+                embedding_hits = None
+                if embedding_enabled:
+                    if embedding_hits_by_arxiv_chunk is not None:
+                        embedding_hits = embedding_hits_by_arxiv_chunk.get(int(arxiv_chunk["id"]), [])
+                    else:
+                        query_embedding = ensure_arxiv_chunk_embedding(
+                            conn,
+                            settings,
+                            int(arxiv_chunk["id"]),
+                            arxiv_chunk["text"],
+                        )
                 hits = _hybrid_search_project_cache(
                     conn,
                     settings,
@@ -757,6 +960,7 @@ def rank_project_papers(
                     settings.rag_top_k,
                     query_embedding,
                     project_cache,
+                    embedding_hits=embedding_hits,
                 )
                 accepted_hits: list[dict[str, object]] = []
                 for hit in hits:

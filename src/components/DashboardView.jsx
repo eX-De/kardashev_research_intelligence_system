@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { DailyRunProgressCard } from "./DailyRunProgressCard.jsx";
@@ -7,6 +7,13 @@ import { PanelTitle } from "./PanelTitle.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
 import { api, fmtDate, postJson } from "../lib/dashboard.js";
 import { useCachedApi } from "../lib/apiCache.jsx";
+
+const SOURCE_UPDATE_COMMAND = `git pull
+npm install
+npm run build
+npm run start:api`;
+
+const DEFAULT_DOCKER_SERVICE = "app";
 
 function Metric({ label, value, hint }) {
   return (
@@ -31,6 +38,133 @@ function recoveryFromNotification(item) {
   return recovery?.resumable ? recovery : null;
 }
 
+function updateFromNotification(item) {
+  const update = item?.source?.update;
+  return update && typeof update === "object" ? update : {};
+}
+
+function updateDialogTitle(kind) {
+  if (kind === "source") return "源码更新命令";
+  if (kind === "docker") return "Docker 更新命令";
+  return "更新说明";
+}
+
+function updateDialogDescription(kind) {
+  if (kind === "source") return "适合从 GitHub 源码运行的部署。执行前请先停止或切换正在运行的服务进程。";
+  if (kind === "docker") return "适合 Docker Compose 部署。服务名不是 app 时，请把命令里的 app 改成实际服务名。";
+  return "本弹窗显示该版本的 GitHub Release 说明；如果没有发布说明，会显示版本和链接信息。";
+}
+
+function releaseNotesText(update) {
+  const notes = String(update.release_notes || "").trim();
+  if (notes) return notes;
+  const tag = update.latest_tag || update.latest_version || "新版本";
+  return `这个版本没有可用的 GitHub Release 更新说明。\n\n版本：${tag}`;
+}
+
+async function copyText(text) {
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  if (typeof document === "undefined") throw new Error("复制不可用，请手动复制命令。");
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  document.body.removeChild(textarea);
+}
+
+function UpdateNotificationCard({ item, onOpen }) {
+  const update = updateFromNotification(item);
+  return (
+    <article className={`compact-item update-available ${item.severity || ""}`} key={item.id}>
+      <strong>{item.title}</strong>
+      <p>{item.detail}{item.created_at ? ` · ${fmtDate(item.created_at)}` : ""}</p>
+      <div className="compact-actions">
+        <button className="primary" onClick={() => onOpen("release", item)} type="button">查看更新说明</button>
+        <button onClick={() => onOpen("source", item)} type="button">源码更新命令</button>
+        <button onClick={() => onOpen("docker", item)} type="button">Docker 更新命令</button>
+      </div>
+      {update.release_url ? <p><a href={update.release_url} target="_blank" rel="noreferrer">GitHub 页面</a></p> : null}
+    </article>
+  );
+}
+
+function UpdateDialog({ dialog, onClose, onCopy }) {
+  const [dockerService, setDockerService] = useState(DEFAULT_DOCKER_SERVICE);
+  const update = updateFromNotification(dialog.item);
+  const dockerServiceName = dockerService.trim() || DEFAULT_DOCKER_SERVICE;
+  const dockerCommands = [
+    `docker compose pull ${dockerServiceName}`,
+    `docker compose up -d ${dockerServiceName}`
+  ];
+  const command = dialog.kind === "docker" ? dockerCommands.join("\n") : SOURCE_UPDATE_COMMAND;
+  const isCommand = dialog.kind === "source" || dialog.kind === "docker";
+  const title = updateDialogTitle(dialog.kind);
+  const description = updateDialogDescription(dialog.kind);
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <article aria-modal="true" aria-labelledby="update-dialog-title" className="modal-dialog update-dialog" role="dialog">
+        <header className="modal-header">
+          <div>
+            <span>应用更新</span>
+            <h2 id="update-dialog-title">{title}</h2>
+            <p>{description}</p>
+          </div>
+          <button aria-label="关闭" className="modal-close" onClick={onClose} type="button">×</button>
+        </header>
+        {dialog.kind === "docker" ? (
+          <div className="modal-body">
+            <label className="service-name-field">
+              <span>服务名</span>
+              <input
+                autoComplete="off"
+                spellCheck="false"
+                type="text"
+                value={dockerService}
+                onChange={(event) => setDockerService(event.target.value)}
+              />
+            </label>
+            <div className="command-line-list">
+              {dockerCommands.map((line) => (
+                <div className="command-line-row" key={line}>
+                  <code>{line}</code>
+                  <button onClick={() => onCopy(line, "Docker 命令")} type="button">复制</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : isCommand ? (
+          <div className="modal-body">
+            <pre className="command-block"><code>{command}</code></pre>
+          </div>
+        ) : (
+          <div className="modal-body">
+            <div className="release-meta">
+              <strong>{update.release_name || update.latest_tag || update.latest_version || "新版本"}</strong>
+              <p>
+                当前 {update.current_version || "未知"} · 最新 {update.latest_version || update.latest_tag || "未知"}
+                {update.published_at ? ` · 发布于 ${fmtDate(update.published_at)}` : ""}
+              </p>
+            </div>
+            <pre className="release-notes">{releaseNotesText(update)}</pre>
+          </div>
+        )}
+        <div className="modal-actions">
+          {isCommand ? <button className="primary" onClick={() => onCopy(command, title)} type="button">复制全部</button> : null}
+          {update.release_url ? <a className="modal-link-button" href={update.release_url} target="_blank" rel="noreferrer">打开 GitHub 页面</a> : null}
+          <button onClick={onClose} type="button">关闭</button>
+        </div>
+      </article>
+    </div>
+  );
+}
+
 function DailyRunRecoveryCard({ item, onResume, onRunNow }) {
   const recovery = recoveryFromNotification(item) || {};
   const count = recovery.total ? `${recovery.completed || 0}/${recovery.total}` : `${recovery.completed || 0} 步`;
@@ -47,7 +181,21 @@ function DailyRunRecoveryCard({ item, onResume, onRunNow }) {
   );
 }
 
-export function DashboardView({ setStatusMessage }) {
+function DailyRunIssueCard({ item, onRunNow }) {
+  return (
+    <article className="current-run-card bad">
+      <span>需要处理</span>
+      <strong>{item?.title || "每日流程失败"}</strong>
+      <p>{item?.detail || "每日流程失败，请查看通知详情。"}</p>
+      <div className="current-run-actions">
+        <button className="primary" onClick={onRunNow} type="button">重新执行每日流程</button>
+      </div>
+    </article>
+  );
+}
+
+export function DashboardView({ setStatusMessage, notify = () => {} }) {
+  const [updateDialog, setUpdateDialog] = useState(null);
   const healthQuery = useCachedApi(["health", "summary"], () => api("/api/health/summary"), { staleTime: 60000 });
   const jobStatusQuery = useCachedApi(["jobs", "status"], () => api("/api/jobs/status"), { staleTime: 5000 });
   const notificationsQuery = useCachedApi(["notifications", 5], () => api("/api/notifications?limit=5"), { staleTime: 30000 });
@@ -80,8 +228,11 @@ export function DashboardView({ setStatusMessage }) {
   const latestJob = health?.latest_job;
   const dailyRunNotification = notifications.find((item) => item.progress);
   const recoverableNotification = notifications.find((item) => item.type === "daily_run_recoverable");
+  const arxivRateLimitNotification = notifications.find((item) => item.type === "arxiv_rate_limited");
   const listNotifications = notifications.filter((item) => (
-    item.id !== dailyRunNotification?.id && item.id !== recoverableNotification?.id
+    item.id !== dailyRunNotification?.id
+    && item.id !== recoverableNotification?.id
+    && item.id !== arxivRateLimitNotification?.id
   ));
   const recentUpdates = [
     ...artifacts.map((artifact) => ({
@@ -125,6 +276,27 @@ export function DashboardView({ setStatusMessage }) {
     runDailyCommand("/api/jobs/run-now", { force: true }, "正在重新执行今日流程...");
   }
 
+  function rerunDaily() {
+    runDailyCommand("/api/jobs/run-now", {}, "正在重新执行每日流程...");
+  }
+
+  function openUpdateDialog(kind, item) {
+    setUpdateDialog({ kind, item });
+  }
+
+  async function copyUpdateCommand(command, label) {
+    try {
+      await copyText(command);
+      const message = `${label}复制成功`;
+      setStatusMessage(message);
+      notify(message, { type: "success" });
+    } catch (error) {
+      const message = error.message || "复制失败，请手动复制命令。";
+      setStatusMessage(message);
+      notify(message, { type: "error" });
+    }
+  }
+
   return (
     <section className="view dashboard-view">
       <header className="project-dashboard-header">
@@ -150,6 +322,11 @@ export function DashboardView({ setStatusMessage }) {
                   onResume={resumeDailyRun}
                   onRunNow={runDailyNow}
                 />
+              ) : arxivRateLimitNotification ? (
+                <DailyRunIssueCard
+                  item={arxivRateLimitNotification}
+                  onRunNow={rerunDaily}
+                />
               ) : (
                 <div className={`current-run-card ${currentJob ? "running" : latestJob?.status === "failed" ? "bad" : "idle"}`}>
                   <span>{currentJob ? "运行中" : "当前状态"}</span>
@@ -174,10 +351,14 @@ export function DashboardView({ setStatusMessage }) {
           ) : (
             <div className="compact-list">
               {listNotifications.map((item) => (
-                <article className={`compact-item ${item.severity || ""}`} key={item.id}>
-                  <strong>{item.title}</strong>
-                  <p>{item.detail}{item.created_at ? ` · ${fmtDate(item.created_at)}` : ""}</p>
-                </article>
+                item.type === "app_update_available" ? (
+                  <UpdateNotificationCard item={item} key={item.id} onOpen={openUpdateDialog} />
+                ) : (
+                  <article className={`compact-item ${item.severity || ""}`} key={item.id}>
+                    <strong>{item.title}</strong>
+                    <p>{item.detail}{item.created_at ? ` · ${fmtDate(item.created_at)}` : ""}</p>
+                  </article>
+                )
               ))}
               {!listNotifications.length ? <p className="muted">暂无通知。</p> : null}
             </div>
@@ -201,6 +382,13 @@ export function DashboardView({ setStatusMessage }) {
           )}
         </section>
       </div>
+      {updateDialog ? (
+        <UpdateDialog
+          dialog={updateDialog}
+          onClose={() => setUpdateDialog(null)}
+          onCopy={copyUpdateCommand}
+        />
+      ) : null}
     </section>
   );
 }

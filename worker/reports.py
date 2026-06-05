@@ -210,6 +210,75 @@ def _normalize_llm_markdown(value: object, report_date: str) -> str:
     return clean_unicode(body.rstrip() + "\n")
 
 
+def _paper_link_entries(payload: dict[str, object]) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for key in ("project_candidates", "global_recommendations"):
+        items = payload.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            arxiv_id = clean_unicode(str(item.get("arxiv_id") or "")).strip()
+            if not arxiv_id or arxiv_id in seen:
+                continue
+            link = clean_unicode(str(item.get("link") or "")).strip() or f"https://arxiv.org/abs/{arxiv_id}"
+            title = clean_unicode(str(item.get("title") or "")).strip()
+            entries.append({"arxiv_id": arxiv_id, "link": link, "title": title})
+            seen.add(arxiv_id)
+    return entries
+
+
+def _inject_arxiv_link_after_title(body: str, title: str, link_text: str) -> tuple[str, bool]:
+    if not title:
+        return body, False
+    escaped = re.escape(title)
+    patterns = [
+        re.compile(rf"(\*\*{escaped}\*\*)"),
+        re.compile(rf"(#{1,6}\s+{escaped})"),
+        re.compile(rf"({escaped})"),
+    ]
+    for pattern in patterns:
+        next_body, count = pattern.subn(lambda match: f"{match.group(1)} {link_text}", body, count=1)
+        if count:
+            return next_body, True
+    return body, False
+
+
+def _ensure_arxiv_links(body: str, payload: dict[str, object]) -> str:
+    if not body.strip():
+        return ""
+    missing: list[dict[str, str]] = []
+    for entry in _paper_link_entries(payload):
+        arxiv_id = entry["arxiv_id"]
+        link = entry["link"]
+        link_text = f"[{arxiv_id}]({link})"
+        if link in body or link_text in body:
+            continue
+
+        id_pattern = re.compile(
+            rf"(?<![\w./-])(?:arXiv:\s*)?{re.escape(arxiv_id)}(?![\w./-])",
+            flags=re.IGNORECASE,
+        )
+        next_body, count = id_pattern.subn(link_text, body, count=1)
+        if count:
+            body = next_body
+            continue
+
+        body, injected = _inject_arxiv_link_after_title(body, entry["title"], link_text)
+        if not injected:
+            missing.append(entry)
+
+    if missing:
+        lines = ["", "## arXiv 链接"]
+        for entry in missing:
+            title = f" - {entry['title']}" if entry["title"] else ""
+            lines.append(f"- [{entry['arxiv_id']}]({entry['link']}){title}")
+        body = body.rstrip() + "\n" + "\n".join(lines) + "\n"
+    return clean_unicode(body.rstrip() + "\n")
+
+
 def _project_payload(row: DbRow) -> dict[str, object]:
     return {
         "project": row["project_name"],
@@ -283,7 +352,7 @@ JSON schema: {{"markdown": "...完整 Markdown 正文..."}}
 - markdown 字段必须是一篇完整 Markdown 正文，不要包含 YAML frontmatter。
 - 使用中文撰写；论文标题可以保留英文。
 - 事实只能来自输入 JSON；不要编造 arXiv ID、链接、项目名、分数或不存在的论文。
-- 保留每篇论文的 arXiv 链接，格式可用 [arXivID](URL)。
+- 每篇论文第一次出现时必须带 arXiv 链接，使用输入 JSON 的 link 字段，格式为 [arXivID](URL)。
 - 按项目组织“项目候选论文”；每个项目下，每篇候选论文写成一个自然段，不要用脚本式字段堆砌。
 - 项目候选论文已经由 project_paper_judgments 判定通过；不得把 relation_type、confidence、usefulness_score 改写成更强的结论。
 - 每篇项目候选论文都必须解释清楚 5 件事：一句话结论、项目级判定认为它为什么相关、论文里具体可借鉴的机制/方法/实验、可以落到项目里的下一步动作、主要不确定性或 missing_evidence。
@@ -343,7 +412,7 @@ def _llm_daily_report_markdown(
         raise RuntimeError(f"LLM daily report generation failed: {exc}") from exc
     if not isinstance(response, dict):
         raise RuntimeError("LLM daily report generation failed: no valid JSON response")
-    body = _normalize_llm_markdown(response.get("markdown"), report_date)
+    body = _ensure_arxiv_links(_normalize_llm_markdown(response.get("markdown"), report_date), payload)
     if not body:
         raise RuntimeError("LLM daily report generation failed: response missing non-empty markdown")
     return body

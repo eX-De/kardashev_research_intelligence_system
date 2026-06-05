@@ -43,7 +43,7 @@ from .api import (
     unlink_project_paper,
 )
 from .arxiv_archive import archive_zero_match_papers
-from .arxiv_client import fetch_arxiv
+from .arxiv_client import ARXIV_RATE_LIMITED, ArxivRateLimitError, fetch_arxiv
 from .arxiv_text import cache_arxiv_full_texts
 from .config import load_settings
 from .db import (
@@ -80,6 +80,7 @@ from .recommendations import sync_project_paper_recommendations
 from .reports import generate_daily_report
 from .search import prefilter_papers, rank_project_papers, rank_unmatched_papers
 from .settings_store import apply_stored_settings, get_app_settings, save_app_settings
+from .update_check import check_for_updates, read_update_status, update_notification
 
 
 def _print_json(payload: dict[str, object]) -> None:
@@ -165,7 +166,7 @@ DAILY_STEPS = [
     ("rank_project", "项目论文匹配"),
     ("judge_project_papers", "项目级判定"),
     ("paper_recommendations", "生成论文推荐"),
-    ("paper_reports", "生成全文报告"),
+    ("paper_reports", "全文报告入队"),
     ("archive_zero_match", "归档未通过论文"),
     ("generate_daily_report_artifact", "生成日报产物"),
 ]
@@ -272,6 +273,23 @@ def _update_daily_progress(
     )
 
 
+def _daily_step_error_payload(exc: Exception) -> dict[str, Any] | None:
+    if isinstance(exc, ArxivRateLimitError):
+        payload = exc.to_payload()
+        return {
+            "type": ARXIV_RATE_LIMITED,
+            "title": str(payload.get("title") or "arXiv 暂时限流"),
+            "message": str(payload.get("error") or str(exc)),
+            "detail": str(payload.get("detail") or ""),
+            "suggested_action": str(payload.get("suggested_action") or ""),
+            "retry_after_seconds": payload.get("retry_after_seconds"),
+            "attempts": payload.get("attempts"),
+            "status_code": payload.get("status_code"),
+            "technical_message": str(payload.get("technical_message") or ""),
+        }
+    return None
+
+
 def _run_daily_step(
     conn,
     job_id: int,
@@ -293,12 +311,32 @@ def _run_daily_step(
             conn.rollback()
         except Exception:
             pass
+        error_payload = _daily_step_error_payload(exc)
+        display_error = (error_payload or {}).get("message") or str(exc)
         step["status"] = "failed"
-        step["error"] = str(exc)
+        step["error"] = display_error
+        if error_payload:
+            step["error_type"] = error_payload["type"]
+            step["suggested_action"] = error_payload.get("suggested_action", "")
         step["finished_at"] = utc_now()
         try:
-            _record_daily_step(conn, job_id, step["key"], "failed", error=str(exc))
-            _update_daily_progress(conn, job_id, steps, index, "failed", accumulated)
+            _record_daily_step(
+                conn,
+                job_id,
+                step["key"],
+                "failed",
+                error=display_error,
+                meta={"error": error_payload} if error_payload else None,
+            )
+            _update_daily_progress(
+                conn,
+                job_id,
+                steps,
+                index,
+                "failed",
+                accumulated,
+                {"error": error_payload} if error_payload else None,
+            )
         except Exception:
             try:
                 conn.rollback()
@@ -1653,10 +1691,7 @@ def cmd_run_daily(args: argparse.Namespace) -> None:
 
             paper_report_result = run_or_resume(
                 8,
-                lambda: {
-                    **ensure_paper_reports_for_recommendations(conn, selected_paper_ids),
-                    **process_paper_report_queue(conn, settings, selected_paper_ids),
-                },
+                lambda: ensure_paper_reports_for_recommendations(conn, selected_paper_ids),
             )
             accumulated.update(paper_report_result)
 
@@ -2079,6 +2114,24 @@ def cmd_api_notifications(args: argparse.Namespace) -> None:
     _print_json(result)
 
 
+def _update_status_payload(status: dict[str, Any]) -> dict[str, Any]:
+    notification = update_notification(status)
+    result = dict(status)
+    if notification:
+        result["notification"] = notification
+    return result
+
+
+def cmd_api_update_status(_: argparse.Namespace) -> None:
+    result = _with_db(lambda conn, settings: _update_status_payload(read_update_status(conn)))
+    _print_json(result)
+
+
+def cmd_api_update_check(_: argparse.Namespace) -> None:
+    result = _with_db(lambda conn, settings: _update_status_payload(check_for_updates(conn)))
+    _print_json(result)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="research-intelligence-worker")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2297,6 +2350,12 @@ def build_parser() -> argparse.ArgumentParser:
     api_notifications.add_argument("--limit", default="5")
     api_notifications.set_defaults(func=cmd_api_notifications)
 
+    api_update_status = sub.add_parser("api-update-status")
+    api_update_status.set_defaults(func=cmd_api_update_status)
+
+    api_update_check = sub.add_parser("api-update-check")
+    api_update_check.set_defaults(func=cmd_api_update_check)
+
     return parser
 
 
@@ -2307,6 +2366,9 @@ def main(argv: list[str] | None = None) -> int:
         args.func(args)
         return 0
     except ObsidianNotConfiguredError as exc:
+        _print_json({"ok": False, **exc.to_payload()})
+        return 1
+    except ArxivRateLimitError as exc:
         _print_json({"ok": False, **exc.to_payload()})
         return 1
     except Exception as exc:

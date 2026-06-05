@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import Any
 
 from .db import from_json
+from .update_check import UPDATE_NOTIFICATION_TYPE, read_update_status, update_notification
 
 
 NotificationBuilder = Callable[[dict[str, Any]], list[dict[str, Any]]]
@@ -22,6 +23,7 @@ JOB_TITLES = {
     "rank-papers": "论文匹配",
 }
 DAILY_JOB_TYPES = {"run-daily", "resume-daily", "retry-daily"}
+ARXIV_RATE_LIMITED = "arxiv_rate_limited"
 
 
 def register_notification_builder(event_type: str, description: str) -> Callable[[NotificationBuilder], NotificationBuilder]:
@@ -89,6 +91,8 @@ def _activity_time(item: dict[str, Any]) -> str:
 
 def _notification_sort_key(item: dict[str, Any]) -> tuple[int, str, int]:
     active_types = {
+        ARXIV_RATE_LIMITED,
+        UPDATE_NOTIFICATION_TYPE,
         "daily_run_recoverable",
         "daily_run_progress",
         "job_running",
@@ -253,6 +257,61 @@ def _daily_recovery_payload(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _job_structured_error(item: dict[str, Any]) -> dict[str, Any] | None:
+    meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+    progress = meta.get("daily_progress") if isinstance(meta.get("daily_progress"), dict) else {}
+    error = progress.get("error") if isinstance(progress.get("error"), dict) else None
+    if isinstance(error, dict) and error.get("type"):
+        return error
+
+    message = str(item.get("message") or "")
+    if item.get("job_type") in {*DAILY_JOB_TYPES, "fetch-arxiv"} and (
+        "HTTP Error 429" in message or "Too Many Requests" in message
+    ):
+        return {
+            "type": ARXIV_RATE_LIMITED,
+            "title": "arXiv 暂时限流",
+            "message": "arXiv 请求被限流（HTTP 429），请稍后重试，或调大 arXiv 请求间隔秒数。",
+            "detail": "抓取 arXiv 时被限流，系统已重试但仍未成功。",
+            "suggested_action": "稍后重新执行每日流程，或在设置中调大 arXiv 请求间隔秒数。",
+            "technical_message": message,
+            "status_code": 429,
+        }
+    return None
+
+
+def _arxiv_rate_limited_notification(failed: dict[str, Any]) -> dict[str, Any] | None:
+    error = _job_structured_error(failed)
+    if not error or error.get("type") != ARXIV_RATE_LIMITED:
+        return None
+    progress = failed.get("meta", {}).get("daily_progress") if isinstance(failed.get("meta"), dict) else {}
+    failed_step = str((progress or {}).get("current_label") or "抓取 arXiv")
+    retry_after = _safe_int(error.get("retry_after_seconds"))
+    retry_note = f"arXiv 建议等待 {retry_after} 秒后再试。" if retry_after else "建议稍后再试。"
+    detail = (
+        f"{failed_step} 时触发 arXiv 限流，系统已重试但仍失败。"
+        f"{retry_note}也可以在设置中调大 arXiv 请求间隔秒数。"
+    )
+    return _notification(
+        f"arxiv-rate-limited-{failed['id']}",
+        ARXIV_RATE_LIMITED,
+        "warn",
+        str(error.get("title") or "arXiv 暂时限流"),
+        detail,
+        created_at=_activity_time(failed),
+        source={
+            "job_id": failed["id"],
+            "job_type": failed["job_type"],
+            "error_type": ARXIV_RATE_LIMITED,
+            "failed_step": failed_step,
+            "retry_after_seconds": retry_after,
+            "suggested_action": str(error.get("suggested_action") or ""),
+            "technical_message": str(error.get("technical_message") or failed.get("message") or ""),
+        },
+        requires_action=True,
+    )
+
+
 @register_notification_builder("daily_run_progress", "每日流程运行中的步骤进度")
 def _daily_run_progress(context: dict[str, Any]) -> list[dict[str, Any]]:
     running_daily = next(
@@ -309,6 +368,28 @@ def _daily_run_recoverable(context: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+@register_notification_builder("arxiv_rate_limited", "arXiv 限流导致任务失败")
+def _arxiv_rate_limited(context: dict[str, Any]) -> list[dict[str, Any]]:
+    if any(item.get("type") in {"daily_run_progress", "daily_run_recoverable"} for item in context["items"]):
+        return []
+    failed = next(
+        (
+            item
+            for item in context["activities"]
+            if item["status"] == "failed"
+            and not any(
+                later["job_type"] == item["job_type"]
+                and later["status"] == "completed"
+                and later["id"] > item["id"]
+                for later in context["activities"]
+            )
+        ),
+        None,
+    )
+    notification = _arxiv_rate_limited_notification(failed or {})
+    return [notification] if notification else []
+
+
 @register_notification_builder("job_running", "非每日流程任务运行中")
 def _job_running(context: dict[str, Any]) -> list[dict[str, Any]]:
     if any(item.get("type") == "daily_run_progress" for item in context["items"]):
@@ -331,7 +412,7 @@ def _job_running(context: dict[str, Any]) -> list[dict[str, Any]]:
 
 @register_notification_builder("job_failed", "最近失败任务")
 def _job_failed(context: dict[str, Any]) -> list[dict[str, Any]]:
-    if any(item.get("type") == "daily_run_recoverable" for item in context["items"]):
+    if any(item.get("type") in {"daily_run_recoverable", ARXIV_RATE_LIMITED} for item in context["items"]):
         return []
     failed = next(
         (
@@ -608,12 +689,19 @@ def _experiment_report_arrived(context: dict[str, Any]) -> list[dict[str, Any]]:
     return items
 
 
+@register_notification_builder("app_update_available", "应用新版本可用")
+def _app_update_available(context: dict[str, Any]) -> list[dict[str, Any]]:
+    notification = update_notification(context.get("app_update_status") or {})
+    return [notification] if notification else []
+
+
 def notifications(conn: DbConnection, limit: int = 5) -> dict[str, Any]:
     context: dict[str, Any] = {
         "conn": conn,
         "activities": _activity_rows(conn, 20),
         "paper_report_stats": _paper_report_stats(conn),
         "experiment_reports": _experiment_report_rows(conn, min(max(1, int(limit or 5)), 10)),
+        "app_update_status": read_update_status(conn),
         "items": [],
     }
     for entry in REGISTERED_NOTIFICATION_BUILDERS:

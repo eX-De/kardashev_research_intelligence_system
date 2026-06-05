@@ -18,6 +18,7 @@ ATOM = "{http://www.w3.org/2005/Atom}"
 ARXIV = "{http://arxiv.org/schemas/atom}"
 API_URL = "https://export.arxiv.org/api/query"
 ARXIV_RETRY_BACKOFF_SECONDS = (30, 60, 120)
+ARXIV_RATE_LIMITED = "arxiv_rate_limited"
 
 
 @dataclass
@@ -31,6 +32,47 @@ class ArxivPaper:
     updated_at: str
     link: str
     pdf_link: str
+
+
+class ArxivRateLimitError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        attempts: int,
+        retry_after_seconds: int | None = None,
+        technical_message: str = "",
+    ) -> None:
+        self.attempts = max(1, int(attempts or 1))
+        self.retry_after_seconds = retry_after_seconds if retry_after_seconds and retry_after_seconds > 0 else None
+        self.technical_message = technical_message
+        super().__init__(
+            f"arXiv 请求被限流（HTTP 429），已重试 {self.attempts} 次仍未成功。"
+            "请稍后重试，或在设置中调大 arXiv 请求间隔秒数。"
+        )
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "code": ARXIV_RATE_LIMITED,
+            "reason": ARXIV_RATE_LIMITED,
+            "error_type": ARXIV_RATE_LIMITED,
+            "status_code": 429,
+            "title": "arXiv 暂时限流",
+            "error": str(self),
+            "detail": "抓取 arXiv 时被限流，系统已按退避策略重试但仍未成功。",
+            "suggested_action": "稍后重新执行每日流程，或在设置中调大 arXiv 请求间隔秒数。",
+            "retry_after_seconds": self.retry_after_seconds,
+            "attempts": self.attempts,
+            "technical_message": self.technical_message,
+        }
+
+
+def _retry_after_seconds(headers: object) -> int | None:
+    retry_after = headers.get("Retry-After") if headers else ""
+    try:
+        parsed = int(str(retry_after or "").strip())
+    except ValueError:
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _parse_arxiv_id(entry_id: str) -> str:
@@ -100,13 +142,16 @@ def _fetch_page(search_query: str, start: int, max_results: int) -> str:
             with urllib.request.urlopen(request, timeout=45) as response:
                 return response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
-            if exc.code != 429 or attempt >= len(ARXIV_RETRY_BACKOFF_SECONDS):
+            if exc.code != 429:
                 raise
-            retry_after = exc.headers.get("Retry-After") if exc.headers else ""
-            try:
-                delay = int(str(retry_after or "").strip())
-            except ValueError:
-                delay = ARXIV_RETRY_BACKOFF_SECONDS[attempt]
+            retry_after = _retry_after_seconds(exc.headers)
+            if attempt >= len(ARXIV_RETRY_BACKOFF_SECONDS):
+                raise ArxivRateLimitError(
+                    attempts=attempt + 1,
+                    retry_after_seconds=retry_after,
+                    technical_message=str(exc),
+                ) from exc
+            delay = retry_after or ARXIV_RETRY_BACKOFF_SECONDS[attempt]
             time.sleep(max(1, min(delay, 300)))
         except (urllib.error.URLError, TimeoutError, OSError):
             if attempt >= len(ARXIV_RETRY_BACKOFF_SECONDS):

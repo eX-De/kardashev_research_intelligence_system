@@ -28,7 +28,7 @@ from worker.api import (
     update_paper_recommendation,
 )
 from worker.arxiv_archive import archive_zero_match_papers
-from worker.arxiv_client import _fetch_page, fetch_arxiv
+from worker.arxiv_client import ARXIV_RATE_LIMITED, ArxivRateLimitError, _fetch_page, fetch_arxiv
 from worker.arxiv_text import cache_arxiv_full_texts, download_pdf, extract_pdf_text_to_file, safe_arxiv_filename
 from worker.cli import (
     _daily_papers_for_run,
@@ -45,6 +45,7 @@ from worker.embeddings import (
     ensure_arxiv_paper_embeddings,
     ensure_missing_note_chunk_embeddings,
     ensure_missing_arxiv_chunk_embeddings,
+    _embedding_concurrency,
 )
 from worker.llm import _project_judgment_prompt, generate_missing_project_judgments
 from worker.obsidian import OBSIDIAN_NOT_CONFIGURED, ObsidianNotConfiguredError, parse_note
@@ -70,9 +71,9 @@ from worker.paper_reader import (
     save_reader_note_to_obsidian,
     retry_reader_report,
 )
-from worker.notifications import notifications
+from worker.notifications import _arxiv_rate_limited_notification, notifications
 from worker.recommendations import sync_project_paper_recommendations
-from worker.reports import generate_daily_report
+from worker.reports import _ensure_arxiv_links, generate_daily_report
 from worker.search import hybrid_search, rank_project_papers, rank_unmatched_papers
 from worker.settings_store import apply_stored_settings, get_app_settings, save_app_settings
 
@@ -207,6 +208,92 @@ def seed_paper_report_artifact(
 
 
 class WorkerTests(unittest.TestCase):
+    def test_fetch_page_raises_structured_arxiv_rate_limit_error(self) -> None:
+        http_429 = urllib.error.HTTPError(
+            "https://export.arxiv.org/api/query",
+            429,
+            "Too Many Requests",
+            {"Retry-After": "7"},
+            None,
+        )
+        with patch("worker.arxiv_client.urllib.request.urlopen", side_effect=[http_429, http_429, http_429, http_429]):
+            with patch("worker.arxiv_client.time.sleep") as sleep:
+                with self.assertRaises(ArxivRateLimitError) as caught:
+                    _fetch_page("cat:cs.AI", 0, 10)
+
+        payload = caught.exception.to_payload()
+        self.assertEqual(payload["code"], ARXIV_RATE_LIMITED)
+        self.assertEqual(payload["status_code"], 429)
+        self.assertEqual(payload["retry_after_seconds"], 7)
+        self.assertEqual(payload["attempts"], 4)
+        self.assertIn("arXiv 请求被限流", payload["error"])
+        self.assertEqual(sleep.call_count, 3)
+
+    def test_arxiv_rate_limit_notification_replaces_raw_429_message(self) -> None:
+        item = _arxiv_rate_limited_notification(
+            {
+                "id": 42,
+                "job_type": "run-daily",
+                "started_at": "2026-06-05T01:00:00+00:00",
+                "finished_at": "2026-06-05T01:02:00+00:00",
+                "message": "HTTP Error 429: Too Many Requests",
+                "meta": {
+                    "daily_progress": {
+                        "current_label": "抓取 arXiv",
+                        "error": {
+                            "type": ARXIV_RATE_LIMITED,
+                            "title": "arXiv 暂时限流",
+                            "message": "arXiv 请求被限流（HTTP 429），已重试 4 次仍未成功。",
+                            "retry_after_seconds": 7,
+                            "suggested_action": "稍后重新执行每日流程。",
+                            "technical_message": "HTTP Error 429: Too Many Requests",
+                        },
+                    }
+                },
+            }
+        )
+
+        self.assertIsNotNone(item)
+        assert item is not None
+        self.assertEqual(item["type"], ARXIV_RATE_LIMITED)
+        self.assertEqual(item["title"], "arXiv 暂时限流")
+        self.assertNotIn("HTTP Error 429", item["detail"])
+        self.assertIn("抓取 arXiv", item["detail"])
+        self.assertEqual(item["source"]["technical_message"], "HTTP Error 429: Too Many Requests")
+
+    def test_daily_report_postprocess_adds_missing_arxiv_links(self) -> None:
+        payload = {
+            "project_candidates": [
+                {
+                    "arxiv_id": "2605.22356v1",
+                    "title": "Modeling Pathology-Like Behavioral Patterns in Language Models Through Behavioral Fine-Tuning",
+                    "link": "https://arxiv.org/abs/2605.22356v1",
+                },
+                {
+                    "arxiv_id": "2605.27194v1",
+                    "title": "Not All Tokens Matter Equally",
+                    "link": "https://arxiv.org/abs/2605.27194v1",
+                },
+            ],
+            "global_recommendations": [],
+        }
+        body = "\n".join(
+            [
+                "# 今日科研情报日报",
+                "",
+                "## 按项目候选论文",
+                "",
+                "**Modeling Pathology-Like Behavioral Patterns in Language Models Through Behavioral Fine-Tuning** 可作为 LoRA 基线。",
+                "",
+                "下一步精读 arXiv:2605.27194v1 的方法部分。",
+            ]
+        )
+
+        fixed = _ensure_arxiv_links(body, payload)
+
+        self.assertIn("[2605.22356v1](https://arxiv.org/abs/2605.22356v1)", fixed)
+        self.assertIn("[2605.27194v1](https://arxiv.org/abs/2605.27194v1)", fixed)
+
     def test_init_db_is_idempotent_for_postgres_test_database(self) -> None:
         conn = connect_test_db()
         self.assertEqual(conn.dialect, "postgres")
@@ -2749,13 +2836,14 @@ class WorkerTests(unittest.TestCase):
         conn = connect_test_db()
         init_db(conn)
 
-        save_app_settings(conn, {"paper_report_queue_concurrency": 3, "embedding_concurrency": 4})
+        save_app_settings(conn, {"paper_report_queue_concurrency": 3, "embedding_concurrency": 12})
         payload = get_app_settings(conn, test_settings())["settings"]
         applied = apply_stored_settings(conn, test_settings())
 
         self.assertEqual(payload["paper_report_queue_concurrency"], 3)
-        self.assertEqual(payload["embedding_concurrency"], 4)
-        self.assertEqual(applied.embedding_concurrency, 4)
+        self.assertEqual(payload["embedding_concurrency"], 12)
+        self.assertEqual(applied.embedding_concurrency, 12)
+        self.assertEqual(_embedding_concurrency(applied), 12)
 
     def test_stored_path_settings_remain_paths(self) -> None:
         conn = connect_test_db()
@@ -3439,7 +3527,7 @@ class WorkerTests(unittest.TestCase):
                         "",
                         "### [[Agentic RAG]]",
                         "",
-                        "[2501.00003](https://arxiv.org/abs/2501.00003) Agentic Retrieval Planning 可用于项目的 evidence selection 设计。",
+                        "Agentic Retrieval Planning 可用于项目的 evidence selection 设计。",
                     ]
                 )
             },
@@ -3457,6 +3545,7 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("## 今日结论", report_text)
         self.assertIn("## 按项目候选论文", report_text)
         self.assertIn("Agentic Retrieval Planning", report_text)
+        self.assertIn("[2501.00003](https://arxiv.org/abs/2501.00003)", report_text)
         self.assertIn("Agentic RAG", report_text)
         artifact_count = conn.execute(
             "SELECT COUNT(*) AS count FROM artifacts WHERE artifact_type = 'paper_usefulness_report'"

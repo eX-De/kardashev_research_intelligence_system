@@ -145,6 +145,14 @@ def _bool(name: str, default: str = "false") -> bool:
     return env_bool(name, default)
 
 
+def _positive_int(name: str, default: int) -> int:
+    raw_value = env_value(name, str(default))
+    value = int(raw_value or default)
+    if value < 1:
+        raise RuntimeError(f"{name} must be at least 1")
+    return value
+
+
 def load_settings() -> Settings:
     _load_dotenv()
     vault = env_value("OBSIDIAN_VAULT_PATH", "").strip()
@@ -204,7 +212,7 @@ def load_settings() -> Settings:
             "Research Intelligence",
         ).strip().replace("\\", "/").strip("/") or "Research Intelligence",
         obsidian_remote_append_only=_bool("OBSIDIAN_REMOTE_APPEND_ONLY", "true"),
-        embedding_concurrency=max(1, min(8, int(env_value("EMBEDDING_CONCURRENCY", "2") or 2))),
+        embedding_concurrency=_positive_int("EMBEDDING_CONCURRENCY", 2),
         paper_reader_default_prompt=env_value("PAPER_READER_DEFAULT_PROMPT", ""),
         paper_report_provider_id=env_value("PAPER_REPORT_PROVIDER_ID", ""),
         paper_report_model=env_value("PAPER_REPORT_MODEL", ""),

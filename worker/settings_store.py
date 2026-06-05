@@ -113,6 +113,14 @@ def _bool(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 
+def _positive_int(value: Any, default: int, field: str) -> int:
+    raw_value = default if value is None or str(value).strip() == "" else value
+    parsed = int(raw_value)
+    if parsed < 1:
+        raise RuntimeError(f"{field} must be at least 1")
+    return parsed
+
+
 def _stored(conn: Any) -> dict[str, Any]:
     rows = conn.execute("SELECT key, value_json FROM app_settings").fetchall()
     return {row["key"]: from_json(row["value_json"], None) for row in rows}
@@ -237,12 +245,13 @@ def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, An
             stored.get("reader_question_provider_id", settings.reader_question_provider_id or "")
         ),
         "reader_question_model": str(stored.get("reader_question_model", settings.reader_question_model or "")),
-        "embedding_concurrency": max(
-            1,
-            min(
-                8,
-                int(stored.get("embedding_concurrency", env_value("EMBEDDING_CONCURRENCY", settings.embedding_concurrency)) or 2),
+        "embedding_concurrency": _positive_int(
+            stored.get(
+                "embedding_concurrency",
+                env_value("EMBEDDING_CONCURRENCY", str(settings.embedding_concurrency or 2)),
             ),
+            settings.embedding_concurrency or 2,
+            "embedding_concurrency",
         ),
         "scheduler_enabled": _bool(stored.get("scheduler_enabled", env_value("SCHEDULER_ENABLED", False))),
         "run_daily_on_startup_enabled": _bool(
@@ -298,7 +307,10 @@ def apply_stored_settings(conn: Any, settings: Settings) -> Settings:
         updates["llm_providers"] = _providers_from_value(stored["llm_providers"])
     for field in INT_FIELDS:
         if field in stored and hasattr(settings, field):
-            updates[field] = int(stored[field])
+            if field == "embedding_concurrency":
+                updates[field] = _positive_int(stored[field], settings.embedding_concurrency or 2, field)
+            else:
+                updates[field] = int(stored[field])
     for field in FLOAT_FIELDS:
         if field in stored:
             updates[field] = float(stored[field])
@@ -351,6 +363,8 @@ def save_app_settings(conn: Any, payload: dict[str, Any]) -> dict[str, Any]:
             value = [_provider_to_store(provider) for provider in _providers_from_value(raw_value, existing_providers)]
         elif key in INT_FIELDS:
             value = int(raw_value or 0)
+            if key == "embedding_concurrency" and value < 1:
+                raise RuntimeError("embedding_concurrency must be at least 1")
         elif key in FLOAT_FIELDS:
             value = float(raw_value or 0)
         elif key in BOOL_FIELDS:

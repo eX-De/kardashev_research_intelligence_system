@@ -5,6 +5,7 @@ import { cacheNamespace, useApiCacheClient } from "./apiCache.jsx";
 export const SERVER_EVENTS = Object.freeze({
   ARTIFACT_CREATED: "artifact.created",
   ARTIFACT_UPDATED: "artifact.updated",
+  APP_UPDATE_AVAILABLE: "app.update_available",
   DAILY_RUN_PROGRESS_UPDATED: "daily_run_progress.updated",
   EVENTS_CONNECTED: "events.connected",
   EXPERIMENT_REPORT_UPSERTED: "experiment_report.upserted",
@@ -170,6 +171,11 @@ function applyServerEvent(cache, event) {
   if (type === SERVER_EVENTS.EXPERIMENT_REPORT_UPSERTED) {
     markProjectChanged(cache, projectId);
     markArtifactChanged(cache, artifactId);
+    cache.markStale(["notifications"]);
+    return;
+  }
+
+  if (type === SERVER_EVENTS.APP_UPDATE_AVAILABLE) {
     cache.markStale(["notifications"]);
     return;
   }

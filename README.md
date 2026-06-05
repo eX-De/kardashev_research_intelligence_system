@@ -349,6 +349,13 @@ docker compose pull app
 docker compose up -d app
 ```
 
+Dashboard 会定期检查 GitHub 版本 tag/release。发现新版本时，首页“通知”会显示统一的更新提醒，并提供三个弹窗：查看更新说明、复制源码更新命令、复制 Docker 更新命令。默认检查仓库为 `exde1968/kardashev-research-intelligence-system`；如需关闭或改仓库，可在 `.env` 中设置：
+
+```env
+KRIS_UPDATE_CHECK_ENABLED=true
+KRIS_UPDATE_REPOSITORY=exde1968/kardashev-research-intelligence-system
+```
+
 如果需要固定部署某个版本或回滚，把 `.env` 里的 `KRIS_IMAGE` 改成对应 tag，例如：
 
 ```env
