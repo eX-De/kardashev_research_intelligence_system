@@ -19,6 +19,7 @@ export function ProjectsView({ onOpenProject, onNewProject, setStatusMessage }) 
 
   const projects = projectsQuery.data?.items || [];
   const loading = !projectsQuery.hasData;
+  const refreshBusy = projectsQuery.loading || projectsQuery.refreshing;
 
   async function refresh() {
     try {
@@ -46,7 +47,7 @@ export function ProjectsView({ onOpenProject, onNewProject, setStatusMessage }) 
           <p>{loading ? "正在读取项目..." : `${projects.length} 个项目正在跟踪`}</p>
         </div>
         <div className="header-actions">
-          <RefreshButton onClick={refresh} />
+          <RefreshButton busy={refreshBusy} onClick={refresh} />
           <button className="primary" onClick={onNewProject} type="button">
             新建项目
           </button>

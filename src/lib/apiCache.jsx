@@ -23,7 +23,7 @@ export const API_CACHE_TARGETS = {
   paperReports: cacheNamespace("paper-reports"),
   papers: cacheNamespace("paper"),
   projects: cacheNamespace("projects"),
-  readerPapers: cacheKey("reader", "papers"),
+  readerPapers: cacheNamespace("reader", "papers"),
   notifications: cacheNamespace("notifications"),
   settings: cacheKey("settings")
 };

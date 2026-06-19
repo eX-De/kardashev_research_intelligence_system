@@ -4,6 +4,7 @@ import { api, fmtDate } from "../lib/dashboard.js";
 import { cacheNamespace, useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { friendlyObsidianMessage, postObsidianJson, useObsidianCapability } from "../lib/obsidianCapability.js";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
+import { LoadingPanel } from "./Loading.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
 
 const TYPES = [
@@ -100,6 +101,15 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
     { enabled: Boolean(detailId), staleTime: 300000 }
   );
   const detail = detailQuery.data?.artifact || null;
+  const listLoading = !listQuery.hasData;
+  const detailMatchesActiveArtifact = Boolean(detail?.id) && Number(detail.id) === Number(detailId);
+  const detailLoading = Boolean(detailId) && (
+    detailQuery.loading ||
+    detailQuery.refreshing && !detailMatchesActiveArtifact ||
+    detailQuery.hasData && !detailMatchesActiveArtifact
+  );
+  const detailPanelLoading = listLoading || detailLoading;
+  const refreshBusy = listQuery.loading || listQuery.refreshing || detailQuery.refreshing;
   const latestUpdatedAt = items[0]?.updated_at || "";
   const selectedTypeLabel = artifactType ? labelFor(TYPE_LABELS, artifactType) : "全部类型";
   const selectedScopeLabel = scopeType ? labelFor(SCOPE_LABELS, scopeType) : "全部范围";
@@ -170,9 +180,9 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
           <div>
             <span className="artifact-eyebrow">系统产物</span>
             <h1>产物</h1>
-            <p>{items.length} 个产物{latestUpdatedAt ? ` · 最近更新 ${fmtDate(latestUpdatedAt)}` : ""}</p>
+            <p>{listLoading ? "正在读取系统产物" : `${items.length} 个产物${latestUpdatedAt ? ` · 最近更新 ${fmtDate(latestUpdatedAt)}` : ""}`}</p>
           </div>
-          <RefreshButton busy={listQuery.status === "loading"} onClick={refresh} />
+          <RefreshButton busy={refreshBusy} onClick={refresh} />
         </header>
         <div className="artifact-filter-stack">
           <div className="artifact-list-summary">
@@ -209,7 +219,9 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
           ) : null}
         </div>
         <div className="library-list artifacts-list">
-          {items.length ? items.map((item) => {
+          {listLoading ? (
+            <LoadingPanel compact rows={8} title="读取产物列表" />
+          ) : items.length ? items.map((item) => {
             const typeLabel = labelFor(TYPE_LABELS, item.artifact_type);
             const scopeLabel = labelFor(SCOPE_LABELS, item.scope_type);
             const statusLabel = labelFor(STATUS_LABELS, item.status, "未知状态");
@@ -237,7 +249,14 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
       </section>
 
       <section className="detail-panel artifact-detail-panel">
-        {detail ? (
+        {detailPanelLoading ? (
+          <LoadingPanel
+            className="artifact-detail-loading"
+            description={detailLoading ? "正在读取所选产物的正文、状态和同步信息。" : "正在读取产物列表和首个产物正文。"}
+            rows={8}
+            title={detailLoading ? "打开产物详情" : "读取产物详情"}
+          />
+        ) : detail ? (
           <article className="detail-card artifact-reader-card">
             <header className="artifact-reader-head">
               <div className="artifact-reader-title">

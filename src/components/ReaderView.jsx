@@ -9,7 +9,7 @@ import {
   postJson,
   readResponseJson
 } from "../lib/dashboard.js";
-import { useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
+import { cacheNamespace, useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { friendlyObsidianMessage, postObsidianJson, useObsidianCapability } from "../lib/obsidianCapability.js";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
@@ -34,6 +34,15 @@ const REPORT_FILTERS = [
 
 function reportStatusLabel(status) {
   return REPORT_STATUS_LABELS[status] || status || "Missing";
+}
+
+function useDebouncedValue(value, delay = 300) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebounced(value), delay);
+    return () => window.clearTimeout(timer);
+  }, [delay, value]);
+  return debounced;
 }
 
 function parseSseEvent(rawEvent) {
@@ -700,6 +709,10 @@ function ReaderDetail({
 
         {activeTab === "meta" ? (
           <section className="reader-meta-grid">
+            <div className="reader-meta-item wide">
+              <span>标题</span>
+              <strong>{paper.title || "未记录"}</strong>
+            </div>
             <div className="reader-meta-item">
               <span>arXiv</span>
               <strong>{paper.arxiv_id || "未记录"}</strong>
@@ -737,38 +750,56 @@ function ReaderDetail({
 
 export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, targetPaperKey }) {
   const cache = useApiCacheClient();
-  const [items, setItems] = useState([]);
-  const [stats, setStats] = useState({});
-  const [queueStatus, setQueueStatus] = useState({});
-  const [projects, setProjects] = useState([]);
   const [activePaperId, setActivePaperId] = useState(null);
-  const [detail, setDetail] = useState(null);
   const [activeTab, setActiveTab] = useState("analysis");
   const [message, setMessage] = useState("");
   const [urls, setUrls] = useState("");
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [busy, setBusy] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
-  const [loading, setLoading] = useState(true);
   const [importOpen, setImportOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState("all");
+  const [queueQuery, setQueueQuery] = useState("");
+  const [queueFiltersOpen, setQueueFiltersOpen] = useState(false);
   const [pendingUser, setPendingUser] = useState(null);
   const [streamingAssistant, setStreamingAssistant] = useState(null);
   const [deletingMessageId, setDeletingMessageId] = useState(null);
   const [deletingReportId, setDeletingReportId] = useState(null);
   const [linkingProjectPaperId, setLinkingProjectPaperId] = useState(null);
-  const [readerSettings, setReaderSettings] = useState(null);
   const [savingChatModel, setSavingChatModel] = useState(false);
-  const activePaperIdRef = useRef(null);
-  const detailRequestRef = useRef(0);
-  const readerListQuery = useCachedApi(["reader", "papers"], () => api("/api/reader/papers"), { staleTime: 60000 });
+  const debouncedQueueQuery = useDebouncedValue(queueQuery);
+  const queueSearchQuery = debouncedQueueQuery.trim();
+  const readerListQueryString = useMemo(() => {
+    const params = new URLSearchParams({ limit: "300" });
+    if (queueSearchQuery) params.set("q", queueSearchQuery);
+    return params.toString();
+  }, [queueSearchQuery]);
+  const readerListQuery = useCachedApi(
+    ["reader", "papers", readerListQueryString],
+    () => api(`/api/reader/papers?${readerListQueryString}`),
+    { staleTime: 60000 }
+  );
   const paperReportsSummaryQuery = useCachedApi(["paper-reports", "summary"], () => api("/api/paper-reports/summary"), { staleTime: 15000 });
   const jobStatusQuery = useCachedApi(["jobs", "status"], () => api("/api/jobs/status"), { staleTime: 5000 });
   const settingsQuery = useCachedApi(["settings"], () => api("/api/settings"), { staleTime: Infinity });
   const projectsQuery = useCachedApi(["projects"], () => api("/api/projects"), { staleTime: 60000 });
+  const detailQuery = useCachedApi(
+    ["reader", "paper", String(activePaperId || "")],
+    () => api(`/api/reader/papers/${activePaperId}`),
+    { enabled: Boolean(activePaperId), staleTime: 60000 }
+  );
   const handleCapabilityError = useCallback((error) => setStatusMessage(error.message), [setStatusMessage]);
+  const listData = readerListQuery.data || {};
+  const items = listData.items || [];
+  const stats = paperReportsSummaryQuery.data?.stats || listData.stats || {};
+  const queueStatus = jobStatusQuery.data?.scheduler?.paper_report_queue || {};
+  const projects = projectsQuery.data?.items || [];
+  const readerSettings = settingsQuery.data?.settings || null;
   const obsidianCapability = useObsidianCapability({ settings: readerSettings, onError: handleCapabilityError });
 
+  const detail = activePaperId ? detailQuery.data || null : null;
+  const loading = !readerListQuery.hasData || !paperReportsSummaryQuery.hasData || !jobStatusQuery.hasData || !settingsQuery.hasData || !projectsQuery.hasData;
+  const detailLoading = Boolean(activePaperId) && !detailQuery.hasData;
   const baseMessages = detail?.reader_messages || [];
   const detailPaperId = Number(detail?.paper?.id || 0);
   const displayedMessages = useMemo(() => {
@@ -788,127 +819,81 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
   const visibleItems = useMemo(() => (
     statusFilter === "all" ? items : items.filter((item) => item.status === statusFilter)
   ), [items, statusFilter]);
-
-  useEffect(() => {
-    activePaperIdRef.current = activePaperId;
-  }, [activePaperId]);
-
-  const loadPaper = useCallback(async (paperId, options = {}) => {
-    const numericPaperId = Number(paperId);
-    const setActive = options.setActive !== false;
-    const requestId = detailRequestRef.current + 1;
-    detailRequestRef.current = requestId;
-    if (setActive) {
-      activePaperIdRef.current = numericPaperId;
-      setActivePaperId(numericPaperId);
-    }
-    const data = await cache.get(
-      ["reader", "paper", String(numericPaperId)],
-      () => api(`/api/reader/papers/${paperId}`),
-      { force: options.force === true, staleTimeMs: 60000 }
-    );
-    if (requestId !== detailRequestRef.current) return null;
-    if (!setActive && activePaperIdRef.current !== numericPaperId) return null;
-    setDetail(data);
-    return data;
-  }, [cache]);
+  const hasQueueSearch = Boolean(queueSearchQuery);
+  const queueSearchPending = queueQuery.trim() !== queueSearchQuery;
+  const queueActiveFilterCount = queueQuery.trim() ? 1 : 0;
 
   const refresh = useCallback(async () => {
-    const [data, statusData, summaryData] = await Promise.all([
+    const [data] = await Promise.all([
       readerListQuery.refresh({ force: true }),
       jobStatusQuery.refresh({ force: true }),
-      paperReportsSummaryQuery.refresh({ force: true })
+      paperReportsSummaryQuery.refresh({ force: true }),
+      activePaperId ? detailQuery.refresh({ force: true }) : Promise.resolve(null)
     ]);
     const nextItems = data.items || [];
-    setItems(nextItems);
-    setStats(data.stats || summaryData.stats || {});
-    setQueueStatus(statusData.scheduler?.paper_report_queue || {});
     const routePaperId = Number(targetPaperId || 0);
-    if (routePaperId) {
-      await loadPaper(routePaperId, { force: true });
+    const routePaperVisible = routePaperId && nextItems.some((item) => item.paper_id === routePaperId);
+    if (routePaperId && (!queueSearchQuery || routePaperVisible)) {
+      setActivePaperId(routePaperId);
       return;
     }
-    const currentActiveId = activePaperIdRef.current;
+    const currentActiveId = Number(activePaperId || 0);
     const activeStillExists = currentActiveId && nextItems.some((item) => item.paper_id === currentActiveId);
     const nextId = activeStillExists
       ? currentActiveId
       : nextItems[0]?.paper_id;
     if (nextId) {
       onSelectPaper?.(nextId, { replace: true });
-      await loadPaper(nextId, { setActive: !activeStillExists });
+      setActivePaperId(Number(nextId));
     } else {
-      detailRequestRef.current += 1;
-      activePaperIdRef.current = null;
-      setDetail(null);
       setActivePaperId(null);
     }
   }, [
+    activePaperId,
+    detailQuery.refresh,
     jobStatusQuery.refresh,
-    loadPaper,
     onSelectPaper,
     paperReportsSummaryQuery.refresh,
     readerListQuery.refresh,
-    targetPaperId
+    targetPaperId,
+    queueSearchQuery
   ]);
 
   useEffect(() => {
     if (!readerListQuery.hasData) return;
     const data = readerListQuery.data || {};
     const nextItems = data.items || [];
-    setItems(nextItems);
-    if (data.stats) setStats(data.stats);
     const routePaperId = Number(targetPaperId || 0);
-    const currentActiveId = activePaperIdRef.current;
+    const currentActiveId = Number(activePaperId || 0);
     const activeStillExists = currentActiveId && nextItems.some((item) => item.paper_id === currentActiveId);
-    const nextId = routePaperId || (activeStillExists ? currentActiveId : nextItems[0]?.paper_id);
+    const routePaperVisible = routePaperId && nextItems.some((item) => item.paper_id === routePaperId);
+    const nextId = routePaperId && (!queueSearchQuery || routePaperVisible)
+      ? routePaperId
+      : (activeStillExists ? currentActiveId : nextItems[0]?.paper_id);
     if (nextId) {
       if (!routePaperId) onSelectPaper?.(nextId, { replace: true });
-      loadPaper(nextId, { setActive: !activeStillExists }).catch((error) => setStatusMessage(error.message));
+      setActivePaperId(Number(nextId));
       return;
     }
-    detailRequestRef.current += 1;
-    activePaperIdRef.current = null;
-    setDetail(null);
     setActivePaperId(null);
-  }, [loadPaper, onSelectPaper, readerListQuery.data, readerListQuery.hasData, setStatusMessage, targetPaperId]);
+  }, [activePaperId, onSelectPaper, queueSearchQuery, readerListQuery.data, readerListQuery.hasData, targetPaperId]);
 
   useEffect(() => {
-    if (paperReportsSummaryQuery.data?.stats) setStats(paperReportsSummaryQuery.data.stats);
-  }, [paperReportsSummaryQuery.data]);
-
-  useEffect(() => {
-    if (jobStatusQuery.data?.scheduler) {
-      setQueueStatus(jobStatusQuery.data.scheduler.paper_report_queue || {});
-    }
-  }, [jobStatusQuery.data]);
-
-  useEffect(() => {
-    if (settingsQuery.data?.settings) setReaderSettings(settingsQuery.data.settings);
-  }, [settingsQuery.data]);
-
-  useEffect(() => {
-    if (projectsQuery.data?.items) setProjects(projectsQuery.data.items);
-  }, [projectsQuery.data]);
-
-  useEffect(() => {
-    const error = readerListQuery.error || paperReportsSummaryQuery.error || jobStatusQuery.error || settingsQuery.error || projectsQuery.error;
+    const error = readerListQuery.error || detailQuery.error || paperReportsSummaryQuery.error || jobStatusQuery.error || settingsQuery.error || projectsQuery.error;
     if (error) setStatusMessage(error.message);
-  }, [jobStatusQuery.error, paperReportsSummaryQuery.error, projectsQuery.error, readerListQuery.error, setStatusMessage, settingsQuery.error]);
-
-  useEffect(() => {
-    setLoading(!readerListQuery.hasData || !paperReportsSummaryQuery.hasData || !jobStatusQuery.hasData || !settingsQuery.hasData || !projectsQuery.hasData);
-  }, [jobStatusQuery.hasData, paperReportsSummaryQuery.hasData, projectsQuery.hasData, readerListQuery.hasData, settingsQuery.hasData]);
+  }, [detailQuery.error, jobStatusQuery.error, paperReportsSummaryQuery.error, projectsQuery.error, readerListQuery.error, setStatusMessage, settingsQuery.error]);
 
   useEffect(() => {
     const numericPaperId = Number(targetPaperId || 0);
     if (!numericPaperId) return;
     setStatusFilter("all");
-    loadPaper(numericPaperId)
-      .then((data) => {
-        if (data) setStatusMessage("已打开对应全文报告");
-      })
-      .catch((error) => setStatusMessage(error.message));
-  }, [loadPaper, setStatusMessage, targetPaperId, targetPaperKey]);
+    setActivePaperId(numericPaperId);
+  }, [targetPaperId, targetPaperKey]);
+
+  useEffect(() => {
+    if (!targetPaperId || Number(detail?.paper?.id || 0) !== Number(targetPaperId)) return;
+    setStatusMessage("已打开对应全文报告");
+  }, [detail?.paper?.id, setStatusMessage, targetPaperId, targetPaperKey]);
 
   async function generateReport(paperId, force = false) {
     setBusy(true);
@@ -916,9 +901,8 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
     try {
       const data = await postJson(`/api/papers/${paperId}/report`, { force });
       cache.setCache(["reader", "paper", String(numericPaperId)], data);
-      cache.markStale(["reader", "papers"]);
+      cache.markStale(cacheNamespace("reader", "papers"));
       cache.markStale(["paper-reports", "summary"]);
-      if (activePaperIdRef.current === numericPaperId) setDetail(data);
       setStatusMessage(data.paper_report?.status === "done" ? "全文报告已生成" : reportStatusLabel(data.paper_report?.status));
       await refresh();
     } catch (error) {
@@ -934,9 +918,8 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
     try {
       const data = await postJson(`/api/reader/papers/${paperId}/cancel`, {});
       cache.setCache(["reader", "paper", String(numericPaperId)], data);
-      cache.markStale(["reader", "papers"]);
+      cache.markStale(cacheNamespace("reader", "papers"));
       cache.markStale(["paper-reports", "summary"]);
-      if (activePaperIdRef.current === numericPaperId) setDetail(data);
       setStatusMessage("报告排队已取消");
       await refresh();
     } catch (error) {
@@ -952,9 +935,8 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
     try {
       const data = await postJson(`/api/reader/papers/${paperId}/retry`, {});
       cache.setCache(["reader", "paper", String(numericPaperId)], data);
-      cache.markStale(["reader", "papers"]);
+      cache.markStale(cacheNamespace("reader", "papers"));
       cache.markStale(["paper-reports", "summary"]);
-      if (activePaperIdRef.current === numericPaperId) setDetail(data);
       setStatusMessage("报告已重新加入队列");
       await refresh();
     } catch (error) {
@@ -969,7 +951,7 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
     setDeletingReportId(numericPaperId);
     try {
       await api(`/api/reader/papers/${paperId}/report`, { method: "DELETE" });
-      cache.markStale(["reader", "papers"]);
+      cache.markStale(cacheNamespace("reader", "papers"));
       cache.markStale(["paper-reports", "summary"]);
       cache.markStale(["reader", "paper", String(numericPaperId)]);
       setStatusMessage("已从报告队列删除");
@@ -993,7 +975,7 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
         relation: "reading",
         note: "manual_from_report_queue"
       });
-      cache.markStale(["reader", "papers"]);
+      cache.markStale(cacheNamespace("reader", "papers"));
       cache.markStale(["reader", "paper", String(numericPaperId)]);
       cache.markStale(["project", String(numericProjectId)]);
       cache.markStale(["projects"]);
@@ -1061,20 +1043,17 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
           completed = true;
           if (data.detail) {
             cache.setCache(["reader", "paper", String(paperId)], data.detail);
-            if (activePaperIdRef.current === paperId) setDetail(data.detail);
           }
         }
       });
-      if (!completed && activePaperIdRef.current === paperId) {
-        await loadPaper(paperId, { setActive: false });
+      if (!completed) {
+        await detailQuery.refresh({ force: true });
       }
       setStatusMessage("阅读器回复已生成");
     } catch (error) {
       if (options.restoreOnFailure !== false) setMessage(nextMessage);
       setStatusMessage(error.message);
-      if (activePaperIdRef.current === paperId) {
-        await loadPaper(paperId, { setActive: false }).catch(() => {});
-      }
+      await detailQuery.refresh({ force: true }).catch(() => {});
     } finally {
       setPendingUser((current) => current && Number(current.paper_id) === paperId ? null : current);
       setStreamingAssistant((current) => current && Number(current.paper_id) === paperId ? null : current);
@@ -1092,11 +1071,6 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
         reader_chat_model: model
       });
       cache.setCache(["settings"], data);
-      setReaderSettings(data.settings || {
-        ...(readerSettings || {}),
-        reader_chat_provider_id: providerId,
-        reader_chat_model: model
-      });
       setStatusMessage(`Chat 模型已切换：${model}`);
     } catch (error) {
       setStatusMessage(error.message);
@@ -1119,7 +1093,6 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
     try {
       const data = await api(`/api/reader/papers/${paperId}/messages/${messageId}`, { method: "DELETE" });
       cache.setCache(["reader", "paper", String(paperId)], data);
-      if (activePaperIdRef.current === paperId) setDetail(data);
       setStatusMessage("消息已删除");
     } catch (error) {
       setStatusMessage(error.message);
@@ -1150,7 +1123,7 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
     setImportBusy(true);
     try {
       const data = await postJson("/api/reader/papers/urls", { urls });
-      cache.markStale(["reader", "papers"]);
+      cache.markStale(cacheNamespace("reader", "papers"));
       cache.markStale(["paper-reports", "summary"]);
       setUrls("");
       setImportOpen(false);
@@ -1159,7 +1132,7 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
       const firstId = data.imported?.[0]?.paper_id;
       if (firstId) {
         if (onSelectPaper) onSelectPaper(firstId);
-        else await loadPaper(firstId);
+        else setActivePaperId(Number(firstId));
       }
     } catch (error) {
       setStatusMessage(error.message);
@@ -1182,7 +1155,7 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
         });
       }
       const data = await postJson("/api/reader/papers/upload", { files });
-      cache.markStale(["reader", "papers"]);
+      cache.markStale(cacheNamespace("reader", "papers"));
       cache.markStale(["paper-reports", "summary"]);
       setSelectedFiles([]);
       setImportOpen(false);
@@ -1191,8 +1164,9 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
       await refresh();
       const firstId = data.imported?.[0]?.paper_id || data.last_detail?.paper?.id;
       if (firstId) {
+        if (data.last_detail) cache.setCache(["reader", "paper", String(firstId)], data.last_detail);
         if (onSelectPaper) onSelectPaper(firstId);
-        else await loadPaper(firstId);
+        else setActivePaperId(Number(firstId));
       }
     } catch (error) {
       setStatusMessage(error.message);
@@ -1268,10 +1242,38 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
           <header className="queue-list-header">
             <div>
               <h2>队列列表</h2>
-              <p className="muted">{loading ? "读取中" : `${visibleItems.length} / ${items.length} 篇`}</p>
+              <p className="muted">
+                {loading || queueSearchPending
+                  ? "读取中"
+                  : `${visibleItems.length} / ${items.length} 篇${hasQueueSearch ? "匹配" : ""}`}
+              </p>
             </div>
-            <span className="stat-pill">当前：{REPORT_FILTERS.find(([value]) => value === statusFilter)?.[1] || "全部"}</span>
+            <div className="paper-filter-summary reader-queue-filter-summary">
+              <button
+                aria-controls="reader-queue-filter-panel"
+                aria-expanded={queueFiltersOpen}
+                className="left-filter-toggle"
+                onClick={() => setQueueFiltersOpen((current) => !current)}
+                type="button"
+              >
+                {queueFiltersOpen ? "收起筛选" : `筛选${queueActiveFilterCount ? ` (${queueActiveFilterCount})` : ""}`}
+              </button>
+            </div>
           </header>
+          {queueFiltersOpen ? (
+            <div className="library-toolbar paper-library-toolbar reader-queue-filter-panel" id="reader-queue-filter-panel" aria-label="报告队列筛选">
+              <label className="library-filter-control paper-filter-control paper-search-control reader-queue-search-control">
+                <span>搜索</span>
+                <input
+                  disabled={loading && !items.length}
+                  onChange={(event) => setQueueQuery(event.target.value)}
+                  placeholder="标题、arXiv、正文或状态"
+                  type="search"
+                  value={queueQuery}
+                />
+              </label>
+            </div>
+          ) : null}
           <div className="report-list">
             {loading ? (
               <LoadingPanel compact rows={8} title="读取队列列表" />
@@ -1287,22 +1289,33 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
                     onSelectPaper(paperId);
                     return;
                   }
-                  loadPaper(paperId).catch((error) => setStatusMessage(error.message));
+                  setActivePaperId(Number(paperId));
                 }}
               />
             )) : (
               <div className="queue-empty-state">
-                <h2>{items.length ? "当前筛选下没有任务" : "暂无全文报告任务"}</h2>
-                <p>{items.length ? "切换状态筛选查看其它报告。" : "项目级推荐通过后会自动进入这里，也可以导入 URL 或 PDF。"}</p>
-                {!items.length ? <button type="button" onClick={() => setImportOpen(true)}>导入论文</button> : null}
+                <h2>{items.length ? "当前筛选下没有任务" : hasQueueSearch ? "没有匹配的报告" : "暂无全文报告任务"}</h2>
+                <p>
+                  {items.length
+                    ? "切换状态筛选查看其它报告。"
+                    : hasQueueSearch
+                      ? "换一个关键词或清空搜索。"
+                      : "项目级推荐通过后会自动进入这里，也可以导入 URL 或 PDF。"}
+                </p>
+                {!items.length && hasQueueSearch ? <button type="button" onClick={() => setQueueQuery("")}>清空搜索</button> : null}
+                {!items.length && !hasQueueSearch ? <button type="button" onClick={() => setImportOpen(true)}>导入论文</button> : null}
               </div>
             )}
           </div>
         </section>
 
         <section className="detail-panel" aria-label="报告队列详情">
-          {loading ? (
-            <LoadingPanel description="正在读取报告详情、阅读设置和项目关联。" rows={8} title="读取报告详情" />
+          {loading || detailLoading ? (
+            <LoadingPanel
+              description={detailLoading ? "正在读取所选论文的报告、Chat 记录和项目关联。" : "正在读取报告详情、阅读设置和项目关联。"}
+              rows={8}
+              title={detailLoading ? "打开报告详情" : "读取报告详情"}
+            />
           ) : (
             <ReaderDetail
               activeTab={activeTab}

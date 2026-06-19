@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 
-import { useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
+import { cacheNamespace, useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { api, fmtScore, postJson } from "../lib/dashboard.js";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
+import { LoadingPanel } from "./Loading.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
 
 const REPORT_STATUS_LABELS = {
@@ -233,6 +234,15 @@ export function InboxView({ onOpenReportQueue, onSelectPaper, selectedPaperId, s
     { enabled: Boolean(activePaperId), staleTime: 60000 }
   );
   const detail = detailQuery.data || null;
+  const inboxLoading = !inboxQuery.hasData;
+  const detailMatchesActivePaper = Boolean(detail?.paper?.id) && Number(detail.paper.id) === Number(activePaperId);
+  const detailLoading = Boolean(activePaperId) && (
+    detailQuery.loading ||
+    detailQuery.refreshing && !detailMatchesActivePaper ||
+    detailQuery.hasData && !detailMatchesActivePaper
+  );
+  const detailPanelLoading = inboxLoading || detailLoading;
+  const refreshBusy = inboxQuery.loading || inboxQuery.refreshing || detailQuery.refreshing;
 
   useEffect(() => {
     if (!inboxQuery.hasData) return;
@@ -291,7 +301,7 @@ export function InboxView({ onOpenReportQueue, onSelectPaper, selectedPaperId, s
         ))
       }));
       cache.markStale(["paper-reports", "summary"]);
-      cache.markStale(["reader", "papers"]);
+      cache.markStale(cacheNamespace("reader", "papers"));
       const nextReport = data.paper_report || {};
       setStatusMessage(nextReport.status === "done" ? "全文报告已生成" : reportStatusLabel(nextReport.status));
     } catch (error) {
@@ -306,27 +316,39 @@ export function InboxView({ onOpenReportQueue, onSelectPaper, selectedPaperId, s
         <header className="panel-header">
           <div>
             <h1>论文推荐</h1>
-            <p>{papers.length} 篇待判断论文</p>
+            <p>{inboxLoading ? "正在读取待判断论文" : `${papers.length} 篇待判断论文`}</p>
           </div>
-          <RefreshButton onClick={() => refresh().catch((error) => setStatusMessage(error.message))} />
+          <RefreshButton busy={refreshBusy} onClick={() => refresh().catch((error) => setStatusMessage(error.message))} />
         </header>
         <div className="paper-list">
-          <PaperList
-            papers={papers}
-            activePaperId={activePaperId}
-            onSelect={(id) => {
-              if (onSelectPaper) {
-                onSelectPaper(id);
-                return;
-              }
-              setActivePaperId(Number(id));
-            }}
-          />
+          {inboxLoading ? (
+            <LoadingPanel compact rows={8} title="读取待判断论文" />
+          ) : (
+            <PaperList
+              papers={papers}
+              activePaperId={activePaperId}
+              onSelect={(id) => {
+                if (onSelectPaper) {
+                  onSelectPaper(id);
+                  return;
+                }
+                setActivePaperId(Number(id));
+              }}
+            />
+          )}
         </div>
       </section>
 
       <section className="detail-panel" aria-label="论文详情">
-        <PaperDetail detail={detail} onGenerateReport={generateReport} onOpenReportQueue={onOpenReportQueue} onRecommendation={updateRecommendation} />
+        {detailPanelLoading ? (
+          <LoadingPanel
+            description={detailLoading ? "正在读取所选论文的摘要、项目判定和全文报告。" : "正在读取待判断论文列表和首篇论文详情。"}
+            rows={8}
+            title={detailLoading ? "打开论文详情" : "读取论文详情"}
+          />
+        ) : (
+          <PaperDetail detail={detail} onGenerateReport={generateReport} onOpenReportQueue={onOpenReportQueue} onRecommendation={updateRecommendation} />
+        )}
       </section>
     </section>
   );

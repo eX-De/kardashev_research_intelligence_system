@@ -2054,7 +2054,8 @@ async function routeApi(req, res, url) {
 
   if (req.method === "GET" && url.pathname === "/api/paper-reports") {
     const limit = url.searchParams.get("limit") || "300";
-    const data = await jsonFromWorker(["api-paper-reports", "--limit", limit]);
+    const query = url.searchParams.get("q") || "";
+    const data = await jsonFromWorker(["api-paper-reports", "--limit", limit, "--query", query]);
     sendJson(res, 200, data);
     return;
   }
@@ -2139,7 +2140,8 @@ async function routeApi(req, res, url) {
 
   if (req.method === "GET" && url.pathname === "/api/reader/papers") {
     const limit = url.searchParams.get("limit") || "300";
-    const data = await jsonFromWorker(["api-reader-papers", "--limit", limit]);
+    const query = url.searchParams.get("q") || "";
+    const data = await jsonFromWorker(["api-reader-papers", "--limit", limit, "--query", query]);
     sendJson(res, 200, data);
     return;
   }

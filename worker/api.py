@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from .db_types import DbConnection, DbRow
 from pathlib import Path
 
@@ -965,6 +966,16 @@ def _paper_report_legacy_paper_id(conn: DbConnection, row: DbRow) -> int:
     return int(source_row["id"]) if source_row else 0
 
 
+def _paper_report_search_tokens(query: str) -> list[str]:
+    normalized = unicodedata.normalize("NFKC", clean_unicode(str(query or "")))
+    normalized = re.sub(r"\s+", " ", normalized).strip().lower()
+    return [token for token in normalized.split(" ") if token][:8]
+
+
+def _like_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def paper_reports_summary(conn: DbConnection) -> dict[str, object]:
     latest_rows = conn.execute(
         """
@@ -997,38 +1008,71 @@ def paper_reports_summary(conn: DbConnection) -> dict[str, object]:
     }
 
 
-def paper_reports_queue(conn: DbConnection, limit: int = 300) -> dict[str, object]:
+def paper_reports_queue(conn: DbConnection, limit: int = 300, query: str = "") -> dict[str, object]:
     stats = _paper_report_stats(conn)
     row_limit = max(1, min(int(limit or 300), 1000))
+    tokens = _paper_report_search_tokens(query)
+    search_clauses: list[str] = []
+    search_params: list[object] = []
+    for token in tokens:
+        needle = f"%{_like_escape(token)}%"
+        search_clauses.append(
+            """
+            (
+              LOWER(a.title) LIKE ? ESCAPE '\\'
+              OR LOWER(a.status) LIKE ? ESCAPE '\\'
+              OR LOWER(a.content_markdown) LIKE ? ESCAPE '\\'
+              OR LOWER(a.content_json) LIKE ? ESCAPE '\\'
+              OR LOWER(a.source_json) LIKE ? ESCAPE '\\'
+              OR LOWER(COALESCE(ap.arxiv_id, '')) LIKE ? ESCAPE '\\'
+              OR LOWER(COALESCE(ap.title, '')) LIKE ? ESCAPE '\\'
+              OR LOWER(COALESCE(ap.link, '')) LIKE ? ESCAPE '\\'
+            )
+            """
+        )
+        search_params.extend([needle] * 8)
+    search_sql = f"AND {' AND '.join(search_clauses)}" if search_clauses else ""
     rows = conn.execute(
-        """
+        f"""
         SELECT
-          id, scope_id, status, model_provider_id, model, content_markdown,
-          content_json, source_json, created_at, updated_at
-        FROM artifacts
-        WHERE scope_type = 'paper'
-          AND artifact_type = ?
-          AND status != 'removed'
+          a.id, a.scope_id, a.status, a.model_provider_id, a.model, a.content_markdown,
+          a.content_json, a.source_json, a.created_at, a.updated_at,
+          ap.id AS arxiv_paper_id
+        FROM artifacts a
+        LEFT JOIN arxiv_papers ap ON ap.id = COALESCE(
+          CASE
+            WHEN (a.content_json::jsonb ->> 'legacy_arxiv_paper_id') ~ '^[0-9]+$'
+            THEN (a.content_json::jsonb ->> 'legacy_arxiv_paper_id')::integer
+          END,
+          CASE
+            WHEN (a.source_json::jsonb ->> 'legacy_arxiv_paper_id') ~ '^[0-9]+$'
+            THEN (a.source_json::jsonb ->> 'legacy_arxiv_paper_id')::integer
+          END
+        )
+        WHERE a.scope_type = 'paper'
+          AND a.artifact_type = ?
+          AND a.status != 'removed'
+          {search_sql}
         ORDER BY
-          CASE status
+          CASE a.status
             WHEN 'processing' THEN 0
             WHEN 'queued' THEN 1
             WHEN 'failed' THEN 2
             WHEN 'done' THEN 3
             ELSE 4
           END,
-          updated_at DESC,
-          id DESC
+          a.updated_at DESC,
+          a.id DESC
         LIMIT ?
         """,
-        (PAPER_REPORT_ARTIFACT_TYPE, row_limit),
+        (PAPER_REPORT_ARTIFACT_TYPE, *search_params, row_limit),
     ).fetchall()
     items = []
     for row in rows:
         content = from_json(row["content_json"], {})
         if not isinstance(content, dict):
             content = {}
-        paper_id = _paper_report_legacy_paper_id(conn, row)
+        paper_id = int(row["arxiv_paper_id"] or 0) or _paper_report_legacy_paper_id(conn, row)
         if not paper_id:
             continue
         paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()

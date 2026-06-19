@@ -1763,7 +1763,7 @@ def cmd_api_delete_paper_report(args: argparse.Namespace) -> None:
 
 
 def cmd_api_paper_reports(args: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: paper_reports_queue(conn, int(args.limit)))
+    result = _with_db(lambda conn, settings: paper_reports_queue(conn, int(args.limit), query=args.query or ""))
     _print_json(result)
 
 
@@ -1834,7 +1834,7 @@ def cmd_api_experiment_report(_: argparse.Namespace) -> None:
 
 
 def cmd_api_reader_papers(args: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: paper_reports_queue(conn, int(args.limit)))
+    result = _with_db(lambda conn, settings: paper_reports_queue(conn, int(args.limit), query=args.query or ""))
     _print_json(result)
 
 
@@ -2202,6 +2202,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     api_paper_reports = sub.add_parser("api-paper-reports")
     api_paper_reports.add_argument("--limit", default="300")
+    api_paper_reports.add_argument("--query", default="")
     api_paper_reports.set_defaults(func=cmd_api_paper_reports)
 
     api_paper_reports_summary = sub.add_parser("api-paper-reports-summary")
@@ -2247,6 +2248,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     api_reader_papers = sub.add_parser("api-reader-papers")
     api_reader_papers.add_argument("--limit", default="300")
+    api_reader_papers.add_argument("--query", default="")
     api_reader_papers.set_defaults(func=cmd_api_reader_papers)
 
     api_reader_paper = sub.add_parser("api-reader-paper")

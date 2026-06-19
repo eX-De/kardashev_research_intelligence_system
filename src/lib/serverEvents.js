@@ -110,7 +110,7 @@ function markArtifactChanged(cache, artifactId) {
 function markPaperChanged(cache, paperId) {
   cache.markStale(["inbox"]);
   cache.markStale(["library"]);
-  cache.markStale(["reader", "papers"]);
+  cache.markStale(cacheNamespace("reader", "papers"));
   cache.markStale(["paper-reports"]);
   cache.markStale(["paper-reports", "summary"]);
   if (paperId) {
@@ -125,7 +125,7 @@ function markPaperChanged(cache, paperId) {
 }
 
 function markReaderPapersChanged(cache, imported = []) {
-  cache.markStale(["reader", "papers"]);
+  cache.markStale(cacheNamespace("reader", "papers"));
   cache.markStale(["library"]);
   cache.markStale(["health"]);
   cache.markStale(["health", "summary"]);
@@ -147,7 +147,7 @@ function markGlobalStale(cache) {
   cache.markStale(["inbox"]);
   cache.markStale(["library"]);
   cache.markStale(cacheNamespace("library", "detail"));
-  cache.markStale(["reader", "papers"]);
+  cache.markStale(cacheNamespace("reader", "papers"));
   cache.markStale(cacheNamespace("reader", "paper"));
   cache.markStale(["projects"]);
   cache.markStale(cacheNamespace("project"));
@@ -249,7 +249,7 @@ function applyServerEvent(cache, event) {
     cache.markStale(["jobs", "history"]);
     cache.markStale(["paper-reports", "summary"]);
     cache.markStale(["paper-reports"]);
-    cache.markStale(["reader", "papers"]);
+    cache.markStale(cacheNamespace("reader", "papers"));
     cache.markStale(cacheNamespace("reader", "paper"));
     cache.markStale(["health"]);
     cache.markStale(["health", "summary"]);
