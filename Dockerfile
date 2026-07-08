@@ -32,7 +32,12 @@ RUN python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
     && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
-COPY --chown=node:node server.js package*.json ./
+COPY package*.json ./
+RUN npm ci --omit=dev \
+    && node --input-type=module -e "import 'pg'" \
+    && npm cache clean --force
+
+COPY --chown=node:node server.js ./
 COPY --chown=node:node server ./server
 COPY --chown=node:node worker ./worker
 COPY --from=frontend-build --chown=node:node /app/dist ./dist
