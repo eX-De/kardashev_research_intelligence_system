@@ -291,6 +291,22 @@ export function InboxView({ onOpenReportQueue, onSelectPaper, selectedPaperId, s
     if (!activePaperId) return;
     try {
       const data = await postJson(`/api/papers/${activePaperId}/report`, { force });
+      if (data?.queued) {
+        inboxQuery.patch((current) => ({
+          ...(current || {}),
+          items: (current?.items || []).map((paper) => (
+            Number(paper.id) === Number(activePaperId)
+              ? { ...paper, report_status: "queued" }
+              : paper
+          ))
+        }));
+        cache.markStale(["jobs", "summary"]);
+        cache.markStale(["jobs", "history"]);
+        cache.markStale(["paper-reports", "summary"]);
+        cache.markStale(cacheNamespace("reader", "papers"));
+        setStatusMessage("全文报告已加入生成队列");
+        return;
+      }
       cache.setCache(["paper", "detail", String(activePaperId)], data);
       inboxQuery.patch((current) => ({
         ...(current || {}),

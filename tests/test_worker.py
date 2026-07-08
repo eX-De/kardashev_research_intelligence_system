@@ -66,7 +66,6 @@ from worker.paper_reader import (
     import_reader_pdfs,
     import_reader_pdf,
     import_reader_urls,
-    paper_reader_chat,
     paper_reader_chat_stream,
     save_reader_note_to_obsidian,
     retry_reader_report,
@@ -322,6 +321,26 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(meta["arxiv_batch_id"], "batch-1")
         self.assertIn("stale", meta)
         self.assertTrue(row["finished_at"])
+
+    def test_mark_stale_job_runs_skips_worker_queue_runs(self) -> None:
+        conn = connect_test_db()
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO job_runs(job_type, status, started_at, message, meta_json)
+            VALUES ('generate-reports', 'running', '2000-01-01T00:00:00+00:00', 'Claimed by worker', ?)
+            """,
+            (to_json({"worker_job": True, "queued": True}),),
+        )
+        conn.commit()
+
+        result = mark_stale_job_runs(conn, legacy_stale_after_seconds=1)
+        row = conn.execute("SELECT status, finished_at, message, meta_json FROM job_runs").fetchone()
+
+        self.assertEqual(result["stale_jobs_marked"], 0)
+        self.assertEqual(row["status"], "running")
+        self.assertIsNone(row["finished_at"])
+        self.assertNotIn("stale", json.loads(row["meta_json"]))
 
     def test_delete_run_record_removes_snapshot_only(self) -> None:
         conn = connect_test_db()
@@ -1558,7 +1577,7 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("--- page 1 ---\nFull paper body for report.", messages[1]["content"])
         self.assertTrue(messages[1]["content"].endswith(PAPER_READER_DEFAULT_PROMPT))
 
-    def test_paper_reader_chat_uses_original_prompt_and_persists_messages(self) -> None:
+    def test_paper_reader_chat_stream_uses_original_prompt_and_persists_messages(self) -> None:
         conn = connect_test_db()
         init_db(conn)
         text_dir = Path.cwd() / ".test-tmp" / "paper-reader-chat"
@@ -1592,19 +1611,14 @@ class WorkerTests(unittest.TestCase):
         conn.commit()
         captured: dict[str, object] = {}
 
-        def fake_chat(
-            _: Settings,
-            messages: list[dict[str, str]],
-            response_format: dict[str, object] | None = None,
-            **kwargs,
-        ) -> str:
+        def fake_chunks(_: Settings, messages: list[dict[str, str]], **kwargs):
             captured["messages"] = messages
-            captured["response_format"] = response_format
             captured["kwargs"] = kwargs
-            return "基于全文的回答"
+            yield "基于全文的回答"
 
-        with patch("worker.paper_reader._call_chat_text", side_effect=fake_chat):
-            result = paper_reader_chat(
+        events: list[tuple[str, dict[str, object]]] = []
+        with patch("worker.paper_reader._iter_chat_text_chunks", side_effect=fake_chunks):
+            paper_reader_chat_stream(
                 conn,
                 Settings(
                     **{
@@ -1615,8 +1629,12 @@ class WorkerTests(unittest.TestCase):
                 ),
                 int(paper_id),
                 {"message": "这篇论文的方法是什么？"},
+                lambda event, data: events.append((event, data)),
             )
 
+        self.assertEqual([event for event, _ in events], ["start", "chunk", "done"])
+        self.assertEqual(events[1][1]["text"], "基于全文的回答")
+        result = events[-1][1]["detail"]
         self.assertEqual(len(result["reader_messages"]), 4)
         self.assertEqual(result["reader_messages"][0]["role"], "user")
         self.assertEqual(result["reader_messages"][0]["source"], "analysis_prompt")
@@ -1628,7 +1646,6 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(result["reader_messages"][3]["role"], "assistant")
         self.assertEqual(result["reader_messages"][3]["model"], "reader-chat-dedicated")
         messages = captured["messages"]
-        self.assertIsNone(captured["response_format"])
         self.assertEqual(captured["kwargs"]["provider_id"], "test-chat")
         self.assertEqual(captured["kwargs"]["model"], "reader-chat-dedicated")
         self.assertEqual(
@@ -2458,6 +2475,150 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(item_types[0], "paper_report_completed")
         self.assertIn("daily_run_completed", item_types)
         self.assertNotIn("job_failed", item_types)
+
+    def test_notifications_empty_fallback_shape(self) -> None:
+        conn = connect_test_db()
+        init_db(conn)
+
+        result = notifications(conn, limit=5)
+
+        self.assertEqual(len(result["items"]), 1)
+        self.assertEqual(result["items"][0]["id"], "empty")
+        self.assertEqual(result["items"][0]["type"], "empty")
+        self.assertEqual(result["items"][0]["severity"], "neutral")
+        self.assertEqual(result["items"][0]["channels"], ["list"])
+        self.assertFalse(result["items"][0]["requires_action"])
+        self.assertTrue(result["registered_builders"])
+
+    def test_notifications_surface_running_daily_progress_and_hide_job_running(self) -> None:
+        conn = connect_test_db()
+        init_db(conn)
+        progress = {
+            "status": "running",
+            "total": 3,
+            "current": 2,
+            "completed": 1,
+            "current_key": "fetch_arxiv",
+            "current_label": "抓取 arXiv",
+            "steps": [
+                {"key": "sync_context_sources", "label": "同步上下文来源", "status": "completed"},
+                {"key": "fetch_arxiv", "label": "抓取 arXiv", "status": "running"},
+            ],
+        }
+        conn.execute(
+            """
+            INSERT INTO job_runs(job_type, status, started_at, message, meta_json)
+            VALUES ('run-daily', 'running', ?, 'Daily run 2/3', ?)
+            """,
+            ("2026-06-06T01:00:00+00:00", to_json({"daily_progress": progress})),
+        )
+        conn.commit()
+
+        result = notifications(conn, limit=5)
+        item_types = [item["type"] for item in result["items"]]
+        progress_item = result["items"][0]
+
+        self.assertEqual(progress_item["type"], "daily_run_progress")
+        self.assertEqual(progress_item["progress"], progress)
+        self.assertEqual(progress_item["source"]["job_type"], "run-daily")
+        self.assertNotIn("job_running", item_types)
+
+    def test_notifications_surface_arxiv_rate_limit_and_hide_generic_failure(self) -> None:
+        conn = connect_test_db()
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO job_runs(job_type, status, started_at, finished_at, message, meta_json)
+            VALUES ('fetch-arxiv', 'failed', ?, ?, ?, '{}')
+            """,
+            (
+                "2026-06-06T02:00:00+00:00",
+                "2026-06-06T02:03:00+00:00",
+                "HTTP Error 429: Too Many Requests",
+            ),
+        )
+        conn.commit()
+
+        result = notifications(conn, limit=5)
+        item_types = [item["type"] for item in result["items"]]
+        rate_limited = result["items"][0]
+
+        self.assertEqual(rate_limited["type"], "arxiv_rate_limited")
+        self.assertEqual(rate_limited["severity"], "warn")
+        self.assertTrue(rate_limited["requires_action"])
+        self.assertEqual(rate_limited["source"]["error_type"], ARXIV_RATE_LIMITED)
+        self.assertIn("HTTP Error 429", rate_limited["source"]["technical_message"])
+        self.assertNotIn("job_failed", item_types)
+
+    def test_notifications_surface_update_available_from_app_settings(self) -> None:
+        conn = connect_test_db()
+        init_db(conn)
+        conn.execute(
+            """
+            INSERT INTO app_settings(key, value_json, updated_at)
+            VALUES ('app_update_status', ?, '2026-06-06T03:00:00+00:00')
+            """,
+            (
+                to_json(
+                    {
+                        "ok": True,
+                        "available": True,
+                        "current_version": "0.2.3",
+                        "latest_version": "0.2.4",
+                        "latest_tag": "v0.2.4",
+                        "release_name": "v0.2.4",
+                        "release_notes": "Release notes",
+                        "release_url": "https://example.test/release",
+                        "published_at": "2026-06-06T02:00:00+00:00",
+                        "checked_at": "2026-06-06T03:00:00+00:00",
+                        "repository": "owner/repo",
+                        "source": "github_release",
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+
+        result = notifications(conn, limit=5)
+        update = result["items"][0]
+
+        self.assertEqual(update["type"], "app_update_available")
+        self.assertEqual(update["channels"], ["list", "toast"])
+        self.assertTrue(update["requires_action"])
+        self.assertEqual(update["created_at"], "2026-06-06T03:00:00+00:00")
+        self.assertEqual(update["source"]["update"]["latest_tag"], "v0.2.4")
+        self.assertEqual(update["source"]["update"]["release_url"], "https://example.test/release")
+
+    def test_notifications_surface_paper_report_processing_and_failed_queue_states(self) -> None:
+        conn = connect_test_db()
+        init_db(conn)
+        for index, status in enumerate(("processing", "failed"), start=1):
+            conn.execute(
+                """
+                INSERT INTO arxiv_papers(
+                  arxiv_id, title, authors_json, summary, categories_json, published_at,
+                  updated_at, link, pdf_link, text_status, fetched_batch_id, created_at
+                )
+                VALUES (?, ?, '[]', 'Abstract', '["cs.AI"]',
+                  '2026-06-01T00:00:00Z', '2026-06-01T00:00:00Z',
+                  ?, ?, 'complete', 'batch', 'now')
+                """,
+                (
+                    f"2606.0000{index}",
+                    f"Queue State Paper {index}",
+                    f"https://arxiv.org/abs/2606.0000{index}",
+                    f"https://arxiv.org/pdf/2606.0000{index}",
+                ),
+            )
+            paper_id = conn.execute("SELECT id FROM arxiv_papers WHERE arxiv_id = ?", (f"2606.0000{index}",)).fetchone()["id"]
+            seed_paper_report_artifact(conn, paper_id, status=status, prompt=PAPER_READER_DEFAULT_PROMPT)
+        conn.commit()
+
+        result = notifications(conn, limit=10)
+        item_types = {item["type"] for item in result["items"]}
+
+        self.assertIn("paper_report_queue_processing", item_types)
+        self.assertIn("paper_report_queue_failed", item_types)
 
     def test_notifications_recommend_resuming_recoverable_daily_run(self) -> None:
         conn = connect_test_db()

@@ -900,6 +900,15 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
     const numericPaperId = Number(paperId);
     try {
       const data = await postJson(`/api/papers/${paperId}/report`, { force });
+      if (data?.queued) {
+        cache.markStale(["jobs", "summary"]);
+        cache.markStale(["jobs", "history"]);
+        cache.markStale(cacheNamespace("reader", "papers"));
+        cache.markStale(["paper-reports", "summary"]);
+        setStatusMessage("全文报告已加入生成队列");
+        await refresh();
+        return;
+      }
       cache.setCache(["reader", "paper", String(numericPaperId)], data);
       cache.markStale(cacheNamespace("reader", "papers"));
       cache.markStale(["paper-reports", "summary"]);
@@ -1109,6 +1118,12 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
     setBusy(true);
     try {
       const data = await postObsidianJson(`/api/reader/papers/${paperId}/save`, {});
+      if (data?.queued) {
+        cache.markStale(["jobs", "summary"]);
+        cache.markStale(["jobs", "history"]);
+        setStatusMessage("保存任务已加入队列");
+        return;
+      }
       setStatusMessage(`已保存到 Obsidian：${data.obsidian_path || ""}`);
     } catch (error) {
       setStatusMessage(friendlyObsidianMessage(error));
@@ -1123,6 +1138,15 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
     setImportBusy(true);
     try {
       const data = await postJson("/api/reader/papers/urls", { urls });
+      if (data?.queued) {
+        cache.markStale(["jobs", "summary"]);
+        cache.markStale(["jobs", "history"]);
+        cache.markStale(cacheNamespace("reader", "papers"));
+        setUrls("");
+        setImportOpen(false);
+        setStatusMessage("URL 导入已加入队列");
+        return;
+      }
       cache.markStale(cacheNamespace("reader", "papers"));
       cache.markStale(["paper-reports", "summary"]);
       setUrls("");
@@ -1155,6 +1179,16 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
         });
       }
       const data = await postJson("/api/reader/papers/upload", { files });
+      if (data?.queued) {
+        cache.markStale(["jobs", "summary"]);
+        cache.markStale(["jobs", "history"]);
+        cache.markStale(cacheNamespace("reader", "papers"));
+        setSelectedFiles([]);
+        setImportOpen(false);
+        event.currentTarget.reset();
+        setStatusMessage("PDF 导入已加入队列");
+        return;
+      }
       cache.markStale(cacheNamespace("reader", "papers"));
       cache.markStale(["paper-reports", "summary"]);
       setSelectedFiles([]);

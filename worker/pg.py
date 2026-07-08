@@ -18,6 +18,8 @@ IDENTITY_TABLES = {
     "matches",
     "user_feedback",
     "job_runs",
+    "worker_jobs",
+    "app_events",
     "research_projects",
     "paper_reader_messages",
     "artifacts",
@@ -43,6 +45,8 @@ TABLE_ORDER = [
     "matches",
     "user_feedback",
     "job_runs",
+    "worker_jobs",
+    "app_events",
     "daily_run_meta",
     "daily_run_steps",
     "daily_run_papers",
@@ -122,11 +126,13 @@ class PgConnection:
 
     def execute(self, sql: str, params: Iterable[Any] | None = None) -> PgCursor:
         translated = translate_sql(sql)
+        before_auto_returning = translated
         translated = _append_returning_id(translated)
+        auto_returning_id = translated != before_auto_returning and _returns_generated_id(translated)
         cursor = self._conn.cursor()
         cursor.execute(translated, tuple(params or ()))
         lastrowid = None
-        if _returns_generated_id(translated) and cursor.description:
+        if auto_returning_id and cursor.description:
             row = cursor.fetchone()
             if row is not None:
                 lastrowid = int(row[0])

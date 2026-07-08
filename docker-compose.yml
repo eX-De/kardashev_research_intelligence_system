@@ -43,6 +43,10 @@ services:
       PANEL_SESSION_SECRET_FILE: /run/secrets/panel_session_secret
       PANEL_COOKIE_SECURE: ${PANEL_COOKIE_SECURE:-}
       KRIS_AGENT_TOKEN_FILE: /run/secrets/kris_agent_token
+      KRIS_JOB_BACKEND: ${KRIS_JOB_BACKEND:-queue}
+      KRIS_OUTBOX_POLLER_ENABLED: ${KRIS_OUTBOX_POLLER_ENABLED:-true}
+      KRIS_OUTBOX_POLL_INTERVAL_MS: ${KRIS_OUTBOX_POLL_INTERVAL_MS:-1000}
+      KRIS_WORKER_JOB_STALE_AFTER_SECONDS: ${KRIS_WORKER_JOB_STALE_AFTER_SECONDS:-1800}
       ARXIV_PDF_DIR: /data/arxiv_pdfs
       ARXIV_TEXT_DIR: /data/arxiv_text
       # Set OBSIDIAN_VAULT_PATH to /vault if you mount a vault below.
@@ -52,6 +56,38 @@ services:
       - panel_password
       - panel_session_secret
       - kris_agent_token
+    volumes:
+      - ./data:/data
+      # Mount your Obsidian vault when needed, then set OBSIDIAN_VAULT_PATH=/vault.
+      # - D:/path/to/YourVault:/vault
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  worker:
+    image: ${KRIS_IMAGE:-exde1968/kardashev-research-intelligence-system:latest}
+    command: ["python", "-m", "worker.service"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONUTF8: "1"
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-research_intelligence}
+      POSTGRES_USER: ${POSTGRES_USER:-research_app}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      ARXIV_PDF_DIR: /data/arxiv_pdfs
+      ARXIV_TEXT_DIR: /data/arxiv_text
+      KRIS_WORKER_POLL_INTERVAL_MS: ${KRIS_WORKER_POLL_INTERVAL_MS:-1000}
+      KRIS_WORKER_INIT_DB_ON_START: ${KRIS_WORKER_INIT_DB_ON_START:-true}
+      KRIS_WORKER_JOB_STALE_AFTER_SECONDS: ${KRIS_WORKER_JOB_STALE_AFTER_SECONDS:-1800}
+      KRIS_WORKER_OUTBOX_EVENTS: "1"
+      # Set OBSIDIAN_VAULT_PATH to /vault if you mount a vault below.
+      # OBSIDIAN_VAULT_PATH: /vault
+    secrets:
+      - postgres_password
     volumes:
       - ./data:/data
       # Mount your Obsidian vault when needed, then set OBSIDIAN_VAULT_PATH=/vault.

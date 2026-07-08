@@ -9,6 +9,7 @@ dist/
 *.log
 *.tar
 /AGENTS.md
+/plans/
 secrets/*
 !secrets/.gitkeep
 !secrets/README.md

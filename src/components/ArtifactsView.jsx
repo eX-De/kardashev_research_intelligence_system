@@ -156,6 +156,12 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
     setBusy(true);
     try {
       const data = await postObsidianJson(`/api/artifacts/${detail.id}/export-obsidian`, {});
+      if (data?.queued) {
+        cache.markStale(["jobs", "summary"]);
+        cache.markStale(["jobs", "history"]);
+        setStatusMessage("Artifact export queued");
+        return;
+      }
       if (data.artifact?.id) {
         cache.setCache(["artifact", String(data.artifact.id)], { artifact: data.artifact });
         cache.patch(cacheNamespace("artifacts", "list"), (current) => ({

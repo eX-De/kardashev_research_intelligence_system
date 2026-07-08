@@ -33,6 +33,7 @@ RUN python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
 COPY --chown=node:node server.js package*.json ./
+COPY --chown=node:node server ./server
 COPY --chown=node:node worker ./worker
 COPY --from=frontend-build --chown=node:node /app/dist ./dist
 

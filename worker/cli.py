@@ -12,35 +12,14 @@ from dataclasses import replace
 from typing import Any, Callable
 
 from .api import (
-    artifact_detail,
-    artifacts_index,
     export_artifact,
     export_project_to_obsidian,
     generate_paper_reading_report,
     generate_project_index,
     health,
-    health_summary,
-    inbox,
-    job_summary,
     job_history,
-    library_paper_detail,
-    link_project_note,
-    link_project_paper,
-    paper_detail,
-    paper_library,
-    remove_paper_report,
-    paper_reports_queue,
-    paper_reports_summary,
-    project_detail,
-    projects,
     receive_experiment_report,
-    notifications,
-    save_feedback,
-    save_project,
-    update_library_paper_status,
     update_paper_recommendation,
-    unlink_project_note,
-    unlink_project_paper,
 )
 from .arxiv_archive import archive_zero_match_papers
 from .arxiv_client import ARXIV_RATE_LIMITED, ArxivRateLimitError, fetch_arxiv
@@ -50,6 +29,7 @@ from .db import (
     clean_unicode,
     connect,
     database_target,
+    existing_job_run,
     from_json,
     init_db,
     job_run,
@@ -65,22 +45,18 @@ from .obsidian_remote import obsidian_remote_enabled
 from .paper_reports import ensure_paper_reports_for_recommendations, process_paper_report_queue
 from .project_status import run_daily_project_status_sql
 from .paper_reader import (
-    cancel_reader_report,
-    delete_reader_message,
     generate_reader_followup_questions,
     import_reader_pdfs,
     import_reader_urls,
-    paper_reader_chat,
     paper_reader_chat_stream,
-    paper_reader_detail,
-    retry_reader_report,
     save_reader_note_to_obsidian,
 )
 from .recommendations import sync_project_paper_recommendations
 from .reports import generate_daily_report
 from .search import prefilter_papers, rank_project_papers, rank_unmatched_papers
-from .settings_store import apply_stored_settings, get_app_settings, save_app_settings
+from .settings_store import apply_stored_settings
 from .update_check import check_for_updates, read_update_status, update_notification
+from .queue import insert_app_event
 
 
 def _print_json(payload: dict[str, object]) -> None:
@@ -89,6 +65,11 @@ def _print_json(payload: dict[str, object]) -> None:
 
 
 WORKER_PROGRESS_EVENT_PREFIX = "KRIS_PROGRESS_EVENT "
+WORKER_TIMING_LOG_PREFIX = "KRIS_WORKER_TIMING "
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 
 def _progress_events_enabled() -> bool:
@@ -108,6 +89,40 @@ def _emit_worker_progress_event(event: str, data: dict[str, Any]) -> None:
     sys.stderr.buffer.flush()
 
 
+def _outbox_events_enabled() -> bool:
+    return os.environ.get("KRIS_WORKER_OUTBOX_EVENTS") == "1"
+
+
+def _emit_worker_outbox_event(conn: DbConnection, event: str, data: dict[str, Any]) -> None:
+    if not _outbox_events_enabled():
+        return
+    payload = {"progress": data} if event == "daily_run_progress.updated" else data
+    insert_app_event(conn, event, payload)
+
+
+def _worker_timing_enabled() -> bool:
+    return _env_flag("KRIS_WORKER_TIMING_LOG")
+
+
+def _elapsed_ms(start: float) -> float:
+    return round((time.perf_counter() - start) * 1000, 3)
+
+
+def _current_command_name() -> str:
+    return sys.argv[1] if len(sys.argv) > 1 else ""
+
+
+def _emit_worker_timing(command: str, timings: dict[str, object]) -> None:
+    if not _worker_timing_enabled():
+        return
+    payload = json.dumps(
+        clean_unicode({"command": command or _current_command_name(), **timings}),
+        ensure_ascii=False,
+    )
+    sys.stderr.buffer.write(f"{WORKER_TIMING_LOG_PREFIX}{payload}\n".encode("utf-8", "replace"))
+    sys.stderr.buffer.flush()
+
+
 def _read_json_stdin(context: str) -> dict[str, object]:
     raw = sys.stdin.buffer.read()
     if not raw:
@@ -120,17 +135,52 @@ def _read_json_stdin(context: str) -> dict[str, object]:
         raise RuntimeError(f"Invalid UTF-8 {context} payload: {exc}") from exc
 
 
-def _with_db(handler: Callable, cleanup_stale: bool = True):
-    settings = load_settings()
-    conn = connect()
-    init_db(conn)
-    if cleanup_stale:
-        mark_stale_job_runs(conn)
-    settings = apply_stored_settings(conn, settings)
+def _with_db(
+    handler: Callable,
+    cleanup_stale: bool = False,
+    init_schema: bool = False,
+    command: str | None = None,
+):
+    command_name = command or _current_command_name()
+    total_start = time.perf_counter()
+    timings: dict[str, object] = {
+        "connect_ms": 0.0,
+        "init_db_ms": 0.0,
+        "stale_job_scan_ms": 0.0,
+        "handler_ms": 0.0,
+    }
+    conn = None
+    ok = False
     try:
-        return handler(conn, settings)
+        settings = load_settings()
+        connect_start = time.perf_counter()
+        conn = connect()
+        timings["connect_ms"] = _elapsed_ms(connect_start)
+
+        if init_schema:
+            init_start = time.perf_counter()
+            init_db(conn)
+            timings["init_db_ms"] = _elapsed_ms(init_start)
+
+        if cleanup_stale:
+            stale_start = time.perf_counter()
+            mark_stale_job_runs(conn)
+            timings["stale_job_scan_ms"] = _elapsed_ms(stale_start)
+
+        settings = apply_stored_settings(conn, settings)
+        handler_start = time.perf_counter()
+        try:
+            result = handler(conn, settings)
+            ok = True
+            return result
+        finally:
+            timings["handler_ms"] = _elapsed_ms(handler_start)
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
+        timings["total_ms"] = _elapsed_ms(total_start)
+        timings["ok"] = ok
+        _emit_worker_timing(command_name, timings)
 
 
 def _is_postgres_deadlock(exc: Exception) -> bool:
@@ -258,6 +308,21 @@ def _update_daily_progress(
         message = f"Daily run failed at {progress['current_label']}"
     update_job_meta(conn, job_id, message, {**accumulated, "daily_progress": progress})
     _emit_worker_progress_event(
+        "daily_run_progress.updated",
+        {
+            "job_id": job_id,
+            "job_type": str(accumulated.get("daily_mode") or "run-daily"),
+            "status": progress.get("status"),
+            "current": progress.get("current"),
+            "total": progress.get("total"),
+            "completed": progress.get("completed"),
+            "current_key": progress.get("current_key"),
+            "current_label": progress.get("current_label"),
+            "updated_at": utc_now(),
+        },
+    )
+    _emit_worker_outbox_event(
+        conn,
         "daily_run_progress.updated",
         {
             "job_id": job_id,
@@ -1405,340 +1470,377 @@ def sync_context_sources(conn: DbConnection, settings) -> dict[str, Any]:
 
 
 def cmd_init_db(_: argparse.Namespace) -> None:
-    settings = load_settings()
-    conn = connect()
-    init_db(conn)
-    database = database_target()
-    conn.close()
-    _print_json({"ok": True, "message": f"Initialized {database['target']}", "database": database})
+    total_start = time.perf_counter()
+    timings: dict[str, object] = {
+        "connect_ms": 0.0,
+        "init_db_ms": 0.0,
+        "stale_job_scan_ms": 0.0,
+        "handler_ms": 0.0,
+    }
+    conn = None
+    ok = False
+    try:
+        load_settings()
+        connect_start = time.perf_counter()
+        conn = connect()
+        timings["connect_ms"] = _elapsed_ms(connect_start)
+        init_start = time.perf_counter()
+        init_db(conn)
+        timings["init_db_ms"] = _elapsed_ms(init_start)
+        database = database_target()
+        ok = True
+        _print_json({"ok": True, "message": f"Initialized {database['target']}", "database": database})
+    finally:
+        if conn is not None:
+            conn.close()
+        timings["total_ms"] = _elapsed_ms(total_start)
+        timings["ok"] = ok
+        _emit_worker_timing("init-db", timings)
+
+
+def _job_context(conn: DbConnection, job_type: str, job_id: int | None = None):
+    return existing_job_run(conn, job_type, int(job_id)) if job_id else job_run(conn, job_type)
+
+
+def run_sync_obsidian_job(conn: DbConnection, settings, *, job_id: int | None = None) -> dict[str, Any]:
+    with _job_context(conn, "sync-obsidian", job_id) as active_job_id:
+        result = sync_obsidian(conn, settings)
+        message = str(result.get("message") or "Obsidian sync completed")
+        update_job_meta(conn, active_job_id, message, result)
+    return {"message": message, **result}
 
 
 def cmd_sync_obsidian(_: argparse.Namespace) -> None:
-    def run(conn, settings):
-        with job_run(conn, "sync-obsidian") as job_id:
-            result = sync_obsidian(conn, settings)
-            message = str(result.get("message") or "Obsidian sync completed")
-            update_job_meta(conn, job_id, message, result)
-        return {"message": message, **result}
-
-    result = _with_db(run)
+    result = _with_db(lambda conn, settings: run_sync_obsidian_job(conn, settings))
     _print_json({"ok": True, **result})
 
 
-def cmd_fetch_arxiv(_: argparse.Namespace) -> None:
-    def run(conn, settings):
-        with job_run(conn, "fetch-arxiv") as job_id:
-            result = fetch_arxiv(conn, settings)
-            selected_papers: list[Any] = []
-            prefilter_result = _prefilter_daily_papers(
-                conn,
-                settings,
-                str(result.get("batch_id") or ""),
-                selected_papers,
-            )
-            result.update(prefilter_result)
-            result.update(
-                {
-                    f"text_{key}": value
-                    for key, value in cache_arxiv_full_texts(
-                        conn,
-                        settings,
-                        paper_ids=[int(paper["id"]) for paper in selected_papers],
-                    ).items()
-                }
-            )
-            update_job_meta(conn, job_id, "arXiv fetch and filtered text cache completed", result)
-        return result
+def run_fetch_arxiv_job(conn: DbConnection, settings, *, job_id: int | None = None) -> dict[str, Any]:
+    with _job_context(conn, "fetch-arxiv", job_id) as active_job_id:
+        result = fetch_arxiv(conn, settings)
+        selected_papers: list[Any] = []
+        prefilter_result = _prefilter_daily_papers(
+            conn,
+            settings,
+            str(result.get("batch_id") or ""),
+            selected_papers,
+        )
+        result.update(prefilter_result)
+        result.update(
+            {
+                f"text_{key}": value
+                for key, value in cache_arxiv_full_texts(
+                    conn,
+                    settings,
+                    paper_ids=[int(paper["id"]) for paper in selected_papers],
+                ).items()
+            }
+        )
+        update_job_meta(conn, active_job_id, "arXiv fetch and filtered text cache completed", result)
+    return result
 
-    result = _with_db(run)
+
+def cmd_fetch_arxiv(_: argparse.Namespace) -> None:
+    result = _with_db(lambda conn, settings: run_fetch_arxiv_job(conn, settings))
     _print_json({"ok": True, "message": "arXiv fetch and filtered text cache completed", **result})
 
 
-def cmd_cache_arxiv_text(_: argparse.Namespace) -> None:
-    def run(conn, settings):
-        with job_run(conn, "cache-arxiv-text") as job_id:
-            result = cache_arxiv_full_texts(conn, settings)
-            update_job_meta(conn, job_id, "arXiv PDF text cache completed", result)
-        return result
+def run_cache_arxiv_text_job(conn: DbConnection, settings, *, job_id: int | None = None) -> dict[str, Any]:
+    with _job_context(conn, "cache-arxiv-text", job_id) as active_job_id:
+        result = cache_arxiv_full_texts(conn, settings)
+        update_job_meta(conn, active_job_id, "arXiv PDF text cache completed", result)
+    return result
 
-    result = _with_db(run)
+
+def cmd_cache_arxiv_text(_: argparse.Namespace) -> None:
+    result = _with_db(lambda conn, settings: run_cache_arxiv_text_job(conn, settings))
     _print_json({"ok": True, "message": "arXiv PDF text cache completed", **result})
 
 
-def cmd_rank(_: argparse.Namespace) -> None:
-    def run(conn, settings):
-        with job_run(conn, "rank-papers") as job_id:
-            result = rank_unmatched_papers(conn, settings)
-            result.update(rank_project_papers(conn, settings))
-            result.update(generate_missing_project_judgments(conn, settings))
-            result.update(sync_project_paper_recommendations(conn))
-            result.update(ensure_paper_reports_for_recommendations(conn))
-            result.update(process_paper_report_queue(conn, settings))
-            update_job_meta(conn, job_id, "Ranking completed", result)
-        return result
+def run_rank_job(conn: DbConnection, settings, *, job_id: int | None = None) -> dict[str, Any]:
+    with _job_context(conn, "rank-papers", job_id) as active_job_id:
+        result = rank_unmatched_papers(conn, settings)
+        result.update(rank_project_papers(conn, settings))
+        result.update(generate_missing_project_judgments(conn, settings))
+        result.update(sync_project_paper_recommendations(conn))
+        result.update(ensure_paper_reports_for_recommendations(conn))
+        result.update(process_paper_report_queue(conn, settings))
+        update_job_meta(conn, active_job_id, "Ranking completed", result)
+    return result
 
-    result = _with_db(run)
+
+def cmd_rank(_: argparse.Namespace) -> None:
+    result = _with_db(lambda conn, settings: run_rank_job(conn, settings))
     _print_json({"ok": True, "message": "Ranking completed", **result})
 
 
-def cmd_generate_reports(_: argparse.Namespace) -> None:
-    def run(conn, settings):
-        with job_run(conn, "generate-reports") as job_id:
-            result = generate_daily_report(conn, settings)
-            update_job_meta(conn, job_id, "Daily research report generated", result)
-        return result
+def run_generate_reports_job(conn: DbConnection, settings, *, job_id: int | None = None) -> dict[str, Any]:
+    with _job_context(conn, "generate-reports", job_id) as active_job_id:
+        result = generate_daily_report(conn, settings)
+        update_job_meta(conn, active_job_id, "Daily research report generated", result)
+    return result
 
-    result = _with_db(run)
+
+def cmd_generate_reports(_: argparse.Namespace) -> None:
+    result = _with_db(lambda conn, settings: run_generate_reports_job(conn, settings))
     _print_json({"ok": True, "message": "Daily research report generated", **result})
+
+
+def run_generate_paper_reports_job(
+    conn: DbConnection,
+    settings,
+    *,
+    limit: int | None = None,
+    job_id: int | None = None,
+) -> dict[str, Any]:
+    with _job_context(conn, "generate-paper-reports", job_id) as active_job_id:
+        result = ensure_paper_reports_for_recommendations(conn)
+        result.update(process_paper_report_queue(conn, settings, limit=limit))
+        update_job_meta(conn, active_job_id, "Full paper reports generated", result)
+    return result
 
 
 def cmd_generate_paper_reports(args: argparse.Namespace) -> None:
     limit = int(args.limit) if str(args.limit or "").strip() else None
-
-    def run(conn, settings):
-        with job_run(conn, "generate-paper-reports") as job_id:
-            result = ensure_paper_reports_for_recommendations(conn)
-            result.update(process_paper_report_queue(conn, settings, limit=limit))
-            update_job_meta(conn, job_id, "Full paper reports generated", result)
-        return result
-
-    result = _with_db(run)
+    result = _with_db(lambda conn, settings: run_generate_paper_reports_job(conn, settings, limit=limit))
     _print_json({"ok": True, "message": "Full paper reports generated", **result})
+
+
+def run_daily_job(
+    conn: DbConnection,
+    settings,
+    *,
+    requested_mode: str = "run-daily",
+    resume: bool = False,
+    requested_job_id: int = 0,
+    job_id: int | None = None,
+) -> dict[str, Any]:
+    requested_mode = str(requested_mode or "run-daily")
+    if resume:
+        requested_mode = "resume-daily"
+
+    resume_context = None
+    if requested_mode == "resume-daily":
+        resume_context = _daily_run_context(conn, requested_job_id) if requested_job_id else _latest_resumable_daily_run(conn)
+        if not resume_context:
+            raise RuntimeError("No resumable daily job with a persisted snapshot was found")
+
+    job_type = requested_mode if requested_mode in DAILY_JOB_TYPES else "run-daily"
+    with _job_context(conn, job_type, job_id) as job_id:
+        steps = [
+            {"key": key, "label": label, "status": "pending"}
+            for key, label in DAILY_STEPS
+        ]
+        accumulated: dict[str, Any] = {"daily_mode": requested_mode}
+        source_job_id = int(resume_context["id"]) if resume_context else None
+        if source_job_id:
+            accumulated["resumed_from_job_id"] = source_job_id
+        _upsert_daily_meta(
+            conn,
+            job_id,
+            requested_mode,
+            settings,
+            source_job_id=source_job_id,
+            arxiv_batch_id=str((resume_context or {}).get("meta", {}).get("arxiv_batch_id") or ""),
+        )
+        _update_daily_progress(conn, job_id, steps, 0, "running", accumulated)
+
+        if requested_mode == "resume-daily":
+            snapshot_result = _clone_daily_snapshot(conn, int(source_job_id or 0), job_id)
+            _mark_daily_step_resumed(conn, job_id, steps, 0, accumulated, int(source_job_id or 0))
+            _mark_daily_step_resumed(conn, job_id, steps, 1, accumulated, int(source_job_id or 0))
+            _mark_daily_step_resumed(conn, job_id, steps, 2, accumulated, int(source_job_id or 0))
+            accumulated.update(snapshot_result)
+        else:
+            sync_result = _run_daily_step(
+                conn,
+                job_id,
+                steps,
+                0,
+                accumulated,
+                lambda: sync_context_sources(conn, settings),
+            )
+            accumulated.update({f"context_{key}": value for key, value in sync_result.items()})
+
+            if requested_mode == "run-daily":
+                arxiv_result = _run_daily_step(
+                    conn,
+                    job_id,
+                    steps,
+                    1,
+                    accumulated,
+                    lambda: fetch_arxiv(conn, settings),
+                )
+                accumulated.update({f"arxiv_{key}": value for key, value in arxiv_result.items()})
+                arxiv_batch_id = str(arxiv_result.get("batch_id") or "")
+                _upsert_daily_meta(
+                    conn,
+                    job_id,
+                    requested_mode,
+                    settings,
+                    arxiv_batch_id=arxiv_batch_id,
+                )
+
+                selected_holder: list[DbRow] = []
+
+                def build_new_snapshot() -> dict[str, int]:
+                    papers, source_stats = _daily_papers_for_run(conn, settings, arxiv_batch_id)
+                    selected, snapshot_stats = _snapshot_daily_papers(conn, settings, job_id, papers)
+                    selected_holder[:] = selected
+                    return {**source_stats, **snapshot_stats}
+
+                snapshot_result = _run_daily_step(
+                    conn,
+                    job_id,
+                    steps,
+                    2,
+                    accumulated,
+                    build_new_snapshot,
+                )
+                accumulated.update(snapshot_result)
+            else:
+                _mark_daily_step_skipped(conn, job_id, steps, 1, accumulated, "retry-daily does not fetch arXiv")
+
+                selected_holder: list[DbRow] = []
+
+                def build_retry_snapshot() -> dict[str, int]:
+                    papers, source_info, retry_stats = _retry_papers_for_run(conn, settings)
+                    selected, snapshot_stats = _snapshot_daily_papers(
+                        conn,
+                        settings,
+                        job_id,
+                        papers,
+                        source_info,
+                        selected_limit=max(1, int(settings.retry_daily_max_results or 100)),
+                    )
+                    selected_holder[:] = selected
+                    return {**retry_stats, **snapshot_stats}
+
+                snapshot_result = _run_daily_step(
+                    conn,
+                    job_id,
+                    steps,
+                    2,
+                    accumulated,
+                    build_retry_snapshot,
+                )
+                accumulated.update(snapshot_result)
+
+        selected_papers = _selected_snapshot_papers(conn, job_id)
+        selected_paper_ids = [int(paper["id"]) for paper in selected_papers]
+        prefilter_result = {
+            "prefilter_considered": int(accumulated.get("prefilter_considered") or accumulated.get("daily_candidate_papers") or len(selected_papers)),
+            "prefilter_passed": int(accumulated.get("prefilter_passed") or len(selected_papers)),
+            "prefilter_skipped": int(accumulated.get("prefilter_skipped") or 0),
+            "prefilter_fallback": int(accumulated.get("prefilter_fallback") or 0),
+            "prefilter_capped": int(accumulated.get("prefilter_capped") or 0),
+        }
+        status_map = _daily_step_status_map(conn, job_id)
+
+        def run_or_resume(index: int, handler: Callable[[], dict[str, Any]], prefix: str = "") -> dict[str, Any]:
+            key = steps[index]["key"]
+            if status_map.get(key) in {"completed", "skipped"}:
+                _mark_daily_step_resumed(conn, job_id, steps, index, accumulated, int(source_job_id or job_id))
+                return {}
+            result = _run_daily_step(conn, job_id, steps, index, accumulated, handler)
+            return {f"{prefix}{name}": value for name, value in result.items()} if prefix else result
+
+        text_result = run_or_resume(
+            3,
+            lambda: cache_arxiv_full_texts(
+                conn,
+                settings,
+                paper_ids=selected_paper_ids,
+                progress_callback=_cache_text_progress_callback(
+                    conn,
+                    job_id,
+                    steps,
+                    accumulated,
+                ),
+            ),
+            "text_",
+        )
+        accumulated.update(text_result)
+
+        rank_result = run_or_resume(
+            4,
+            lambda: rank_unmatched_papers(
+                conn,
+                settings,
+                papers=selected_papers,
+                prefilter_result=prefilter_result,
+            ),
+        )
+        accumulated.update(rank_result)
+
+        project_rank_result = run_or_resume(
+            5,
+            lambda: rank_project_papers(conn, settings, papers=selected_papers),
+        )
+        accumulated.update(project_rank_result)
+
+        explain_result = run_or_resume(
+            6,
+            lambda: generate_missing_project_judgments(
+                conn,
+                settings,
+                paper_ids=selected_paper_ids,
+            ),
+        )
+        accumulated.update(explain_result)
+
+        recommendation_result = run_or_resume(
+            7,
+            lambda: sync_project_paper_recommendations(conn, selected_paper_ids),
+        )
+        accumulated.update(recommendation_result)
+
+        paper_report_result = run_or_resume(
+            8,
+            lambda: ensure_paper_reports_for_recommendations(conn, selected_paper_ids),
+        )
+        accumulated.update(paper_report_result)
+
+        archive_result = run_or_resume(
+            9,
+            lambda: _archive_daily_filtered_papers(conn, settings, job_id, selected_paper_ids),
+        )
+        accumulated.update(archive_result)
+
+        report_result = run_or_resume(
+            10,
+            lambda: generate_daily_report(
+                conn,
+                settings,
+                stats=accumulated,
+                paper_ids=selected_paper_ids,
+            ),
+        )
+        accumulated.update(report_result)
+
+        result = {
+            **accumulated,
+            **_snapshot_stats(conn, job_id),
+            "daily_progress": _daily_progress(steps, len(steps) - 1, "completed"),
+        }
+        update_job_meta(conn, job_id, "Daily run completed", result)
+    return result
 
 
 def cmd_run_daily(args: argparse.Namespace) -> None:
     requested_mode = str(getattr(args, "daily_mode", "run-daily") or "run-daily")
-    if bool(getattr(args, "resume", False)):
-        requested_mode = "resume-daily"
-
-    def run(conn, settings):
-        resume_context = None
-        if requested_mode == "resume-daily":
-            requested_job_id = int(getattr(args, "job_id", 0) or 0)
-            resume_context = _daily_run_context(conn, requested_job_id) if requested_job_id else _latest_resumable_daily_run(conn)
-            if not resume_context:
-                raise RuntimeError("No resumable daily job with a persisted snapshot was found")
-
-        job_type = requested_mode if requested_mode in DAILY_JOB_TYPES else "run-daily"
-        with job_run(conn, job_type) as job_id:
-            steps = [
-                {"key": key, "label": label, "status": "pending"}
-                for key, label in DAILY_STEPS
-            ]
-            accumulated: dict[str, Any] = {"daily_mode": requested_mode}
-            source_job_id = int(resume_context["id"]) if resume_context else None
-            if source_job_id:
-                accumulated["resumed_from_job_id"] = source_job_id
-            _upsert_daily_meta(
-                conn,
-                job_id,
-                requested_mode,
-                settings,
-                source_job_id=source_job_id,
-                arxiv_batch_id=str((resume_context or {}).get("meta", {}).get("arxiv_batch_id") or ""),
-            )
-            _update_daily_progress(conn, job_id, steps, 0, "running", accumulated)
-
-            if requested_mode == "resume-daily":
-                snapshot_result = _clone_daily_snapshot(conn, int(source_job_id or 0), job_id)
-                _mark_daily_step_resumed(conn, job_id, steps, 0, accumulated, int(source_job_id or 0))
-                _mark_daily_step_resumed(conn, job_id, steps, 1, accumulated, int(source_job_id or 0))
-                _mark_daily_step_resumed(conn, job_id, steps, 2, accumulated, int(source_job_id or 0))
-                accumulated.update(snapshot_result)
-            else:
-                sync_result = _run_daily_step(
-                    conn,
-                    job_id,
-                    steps,
-                    0,
-                    accumulated,
-                    lambda: sync_context_sources(conn, settings),
-                )
-                accumulated.update({f"context_{key}": value for key, value in sync_result.items()})
-
-                if requested_mode == "run-daily":
-                    arxiv_result = _run_daily_step(
-                        conn,
-                        job_id,
-                        steps,
-                        1,
-                        accumulated,
-                        lambda: fetch_arxiv(conn, settings),
-                    )
-                    accumulated.update({f"arxiv_{key}": value for key, value in arxiv_result.items()})
-                    arxiv_batch_id = str(arxiv_result.get("batch_id") or "")
-                    _upsert_daily_meta(
-                        conn,
-                        job_id,
-                        requested_mode,
-                        settings,
-                        arxiv_batch_id=arxiv_batch_id,
-                    )
-
-                    selected_holder: list[DbRow] = []
-
-                    def build_new_snapshot() -> dict[str, int]:
-                        papers, source_stats = _daily_papers_for_run(conn, settings, arxiv_batch_id)
-                        selected, snapshot_stats = _snapshot_daily_papers(conn, settings, job_id, papers)
-                        selected_holder[:] = selected
-                        return {**source_stats, **snapshot_stats}
-
-                    snapshot_result = _run_daily_step(
-                        conn,
-                        job_id,
-                        steps,
-                        2,
-                        accumulated,
-                        build_new_snapshot,
-                    )
-                    accumulated.update(snapshot_result)
-                else:
-                    _mark_daily_step_skipped(conn, job_id, steps, 1, accumulated, "retry-daily does not fetch arXiv")
-
-                    selected_holder: list[DbRow] = []
-
-                    def build_retry_snapshot() -> dict[str, int]:
-                        papers, source_info, retry_stats = _retry_papers_for_run(conn, settings)
-                        selected, snapshot_stats = _snapshot_daily_papers(
-                            conn,
-                            settings,
-                            job_id,
-                            papers,
-                            source_info,
-                            selected_limit=max(1, int(settings.retry_daily_max_results or 100)),
-                        )
-                        selected_holder[:] = selected
-                        return {**retry_stats, **snapshot_stats}
-
-                    snapshot_result = _run_daily_step(
-                        conn,
-                        job_id,
-                        steps,
-                        2,
-                        accumulated,
-                        build_retry_snapshot,
-                    )
-                    accumulated.update(snapshot_result)
-
-            selected_papers = _selected_snapshot_papers(conn, job_id)
-            selected_paper_ids = [int(paper["id"]) for paper in selected_papers]
-            prefilter_result = {
-                "prefilter_considered": int(accumulated.get("prefilter_considered") or accumulated.get("daily_candidate_papers") or len(selected_papers)),
-                "prefilter_passed": int(accumulated.get("prefilter_passed") or len(selected_papers)),
-                "prefilter_skipped": int(accumulated.get("prefilter_skipped") or 0),
-                "prefilter_fallback": int(accumulated.get("prefilter_fallback") or 0),
-                "prefilter_capped": int(accumulated.get("prefilter_capped") or 0),
-            }
-            status_map = _daily_step_status_map(conn, job_id)
-
-            def run_or_resume(index: int, handler: Callable[[], dict[str, Any]], prefix: str = "") -> dict[str, Any]:
-                key = steps[index]["key"]
-                if status_map.get(key) in {"completed", "skipped"}:
-                    _mark_daily_step_resumed(conn, job_id, steps, index, accumulated, int(source_job_id or job_id))
-                    return {}
-                result = _run_daily_step(conn, job_id, steps, index, accumulated, handler)
-                return {f"{prefix}{name}": value for name, value in result.items()} if prefix else result
-
-            text_result = run_or_resume(
-                3,
-                lambda: cache_arxiv_full_texts(
-                    conn,
-                    settings,
-                    paper_ids=selected_paper_ids,
-                    progress_callback=_cache_text_progress_callback(
-                        conn,
-                        job_id,
-                        steps,
-                        accumulated,
-                    ),
-                ),
-                "text_",
-            )
-            accumulated.update(text_result)
-
-            rank_result = run_or_resume(
-                4,
-                lambda: rank_unmatched_papers(
-                    conn,
-                    settings,
-                    papers=selected_papers,
-                    prefilter_result=prefilter_result,
-                ),
-            )
-            accumulated.update(rank_result)
-
-            project_rank_result = run_or_resume(
-                5,
-                lambda: rank_project_papers(conn, settings, papers=selected_papers),
-            )
-            accumulated.update(project_rank_result)
-
-            explain_result = run_or_resume(
-                6,
-                lambda: generate_missing_project_judgments(
-                    conn,
-                    settings,
-                    paper_ids=selected_paper_ids,
-                ),
-            )
-            accumulated.update(explain_result)
-
-            recommendation_result = run_or_resume(
-                7,
-                lambda: sync_project_paper_recommendations(conn, selected_paper_ids),
-            )
-            accumulated.update(recommendation_result)
-
-            paper_report_result = run_or_resume(
-                8,
-                lambda: ensure_paper_reports_for_recommendations(conn, selected_paper_ids),
-            )
-            accumulated.update(paper_report_result)
-
-            archive_result = run_or_resume(
-                9,
-                lambda: _archive_daily_filtered_papers(conn, settings, job_id, selected_paper_ids),
-            )
-            accumulated.update(archive_result)
-
-            report_result = run_or_resume(
-                10,
-                lambda: generate_daily_report(
-                    conn,
-                    settings,
-                    stats=accumulated,
-                    paper_ids=selected_paper_ids,
-                ),
-            )
-            accumulated.update(report_result)
-
-            result = {
-                **accumulated,
-                **_snapshot_stats(conn, job_id),
-                "daily_progress": _daily_progress(steps, len(steps) - 1, "completed"),
-            }
-            update_job_meta(conn, job_id, "Daily run completed", result)
-        return result
-
-    result = _with_db(run)
-    _print_json({"ok": True, "message": "Daily run completed", **result})
-
-
-def cmd_api_inbox(_: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: inbox(conn))
-    _print_json(result)
-
-
-def cmd_api_paper(args: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: paper_detail(conn, int(args.paper_id)))
-    _print_json(result)
-
-
-def cmd_api_feedback(args: argparse.Namespace) -> None:
+    resume = bool(getattr(args, "resume", False))
+    requested_job_id = int(getattr(args, "job_id", 0) or 0)
     result = _with_db(
-        lambda conn, settings: save_feedback(conn, int(args.paper_id), args.status, args.note)
+        lambda conn, settings: run_daily_job(
+            conn,
+            settings,
+            requested_mode=requested_mode,
+            resume=resume,
+            requested_job_id=requested_job_id,
+        )
     )
-    _print_json(result)
+    _print_json({"ok": True, "message": "Daily run completed", **result})
 
 
 def cmd_api_paper_recommendation(args: argparse.Namespace) -> None:
@@ -1757,70 +1859,6 @@ def cmd_api_paper_report(args: argparse.Namespace) -> None:
     _print_json(result)
 
 
-def cmd_api_delete_paper_report(args: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: remove_paper_report(conn, int(args.paper_id)))
-    _print_json(result)
-
-
-def cmd_api_paper_reports(args: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: paper_reports_queue(conn, int(args.limit), query=args.query or ""))
-    _print_json(result)
-
-
-def cmd_api_paper_reports_summary(_: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: paper_reports_summary(conn))
-    _print_json(result)
-
-
-def cmd_api_paper_library(args: argparse.Namespace) -> None:
-    project_id = int(args.project_id) if str(args.project_id or "").strip() else None
-    result = _with_db(
-        lambda conn, settings: paper_library(
-            conn,
-            library_status=args.status or None,
-            source_type=args.source_type or None,
-            project_id=project_id,
-            query=args.query or "",
-            date_from=args.date_from or "",
-            date_to=args.date_to or "",
-            limit=int(args.limit),
-            offset=int(args.offset),
-        )
-    )
-    _print_json(result)
-
-
-def cmd_api_paper_library_detail(args: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: library_paper_detail(conn, int(args.paper_id)))
-    _print_json(result)
-
-
-def cmd_api_paper_library_status(args: argparse.Namespace) -> None:
-    payload = _read_json_stdin("paper library status")
-    result = _with_db(lambda conn, settings: update_library_paper_status(conn, int(args.paper_id), payload))
-    _print_json(result)
-
-
-def cmd_api_artifacts(args: argparse.Namespace) -> None:
-    scope_id = int(args.scope_id) if str(args.scope_id or "").strip() else None
-    result = _with_db(
-        lambda conn, settings: artifacts_index(
-            conn,
-            scope_type=args.scope_type or None,
-            scope_id=scope_id,
-            artifact_type=args.artifact_type or None,
-            status=args.status or None,
-            limit=int(args.limit),
-        )
-    )
-    _print_json(result)
-
-
-def cmd_api_artifact(args: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: artifact_detail(conn, int(args.artifact_id)))
-    _print_json(result)
-
-
 def cmd_api_artifact_export(args: argparse.Namespace) -> None:
     payload = _read_json_stdin("artifact export")
     result = _with_db(lambda conn, settings: export_artifact(conn, settings, int(args.artifact_id), payload))
@@ -1833,24 +1871,6 @@ def cmd_api_experiment_report(_: argparse.Namespace) -> None:
     _print_json(result)
 
 
-def cmd_api_reader_papers(args: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: paper_reports_queue(conn, int(args.limit), query=args.query or ""))
-    _print_json(result)
-
-
-def cmd_api_reader_paper(args: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: paper_reader_detail(conn, int(args.paper_id)))
-    _print_json(result)
-
-
-def cmd_api_reader_chat(args: argparse.Namespace) -> None:
-    payload = _read_json_stdin("paper reader chat")
-    result = _with_db(
-        lambda conn, settings: paper_reader_chat(conn, settings, int(args.paper_id), payload)
-    )
-    _print_json(result)
-
-
 def _print_json_event(event: str, data: dict[str, object]) -> None:
     payload = json.dumps(clean_unicode({"event": event, "data": data}), ensure_ascii=False)
     sys.stdout.buffer.write(payload.encode("utf-8", "replace") + b"\n")
@@ -1859,21 +1879,17 @@ def _print_json_event(event: str, data: dict[str, object]) -> None:
 
 def cmd_api_reader_chat_stream(args: argparse.Namespace) -> None:
     payload = _read_json_stdin("paper reader streaming chat")
-    settings = load_settings()
-    conn = connect()
-    init_db(conn)
-    mark_stale_job_runs(conn)
-    settings = apply_stored_settings(conn, settings)
 
     def emit(event: str, data: dict[str, object]) -> None:
         _print_json_event(event, data)
 
-    try:
+    def run(conn, settings):
         paper_reader_chat_stream(conn, settings, int(args.paper_id), payload, emit)
+
+    try:
+        _with_db(run)
     except Exception as exc:
         emit("error", {"error": str(exc)})
-    finally:
-        conn.close()
 
 
 def cmd_api_reader_upload(_: argparse.Namespace) -> None:
@@ -1903,39 +1919,6 @@ def cmd_api_reader_followups(args: argparse.Namespace) -> None:
     _print_json(result)
 
 
-def cmd_api_reader_delete_message(args: argparse.Namespace) -> None:
-    result = _with_db(
-        lambda conn, settings: delete_reader_message(conn, int(args.paper_id), int(args.message_id))
-    )
-    _print_json(result)
-
-
-def cmd_api_reader_cancel(args: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: cancel_reader_report(conn, int(args.paper_id)))
-    _print_json(result)
-
-
-def cmd_api_reader_retry(args: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: retry_reader_report(conn, settings, int(args.paper_id)))
-    _print_json(result)
-
-
-def cmd_api_projects(_: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: projects(conn))
-    _print_json(result)
-
-
-def cmd_api_project(args: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: project_detail(conn, int(args.project_id)))
-    _print_json(result)
-
-
-def cmd_api_project_save(_: argparse.Namespace) -> None:
-    payload = _read_json_stdin("project")
-    result = _with_db(lambda conn, settings: save_project(conn, payload, settings))
-    _print_json(result)
-
-
 def cmd_api_project_export(args: argparse.Namespace) -> None:
     result = _with_db(
         lambda conn, settings: export_project_to_obsidian(conn, settings, int(args.project_id))
@@ -1949,61 +1932,8 @@ def cmd_api_project_index(args: argparse.Namespace) -> None:
     _print_json(result)
 
 
-def cmd_api_project_link_paper(args: argparse.Namespace) -> None:
-    payload = _read_json_stdin("project paper")
-    result = _with_db(lambda conn, settings: link_project_paper(conn, int(args.project_id), payload))
-    _print_json(result)
-
-
-def cmd_api_project_unlink_paper(args: argparse.Namespace) -> None:
-    result = _with_db(
-        lambda conn, settings: unlink_project_paper(conn, int(args.project_id), int(args.paper_id))
-    )
-    _print_json(result)
-
-
-def cmd_api_project_link_note(args: argparse.Namespace) -> None:
-    payload = _read_json_stdin("project note")
-    result = _with_db(lambda conn, settings: link_project_note(conn, int(args.project_id), payload))
-    _print_json(result)
-
-
-def cmd_api_project_unlink_note(args: argparse.Namespace) -> None:
-    result = _with_db(
-        lambda conn, settings: unlink_project_note(conn, int(args.project_id), int(args.note_id))
-    )
-    _print_json(result)
-
-
-def cmd_api_settings(_: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: get_app_settings(conn, settings))
-    _print_json(result)
-
-
-def cmd_api_settings_save(_: argparse.Namespace) -> None:
-    payload = _read_json_stdin("settings")
-
-    def run(conn, settings):
-        save_app_settings(conn, payload)
-        updated_settings = apply_stored_settings(conn, settings)
-        return get_app_settings(conn, updated_settings)
-
-    result = _with_db(run)
-    _print_json(result)
-
-
 def cmd_api_health(_: argparse.Namespace) -> None:
     result = _with_db(lambda conn, settings: health(conn, settings))
-    _print_json(result)
-
-
-def cmd_api_health_summary(_: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: health_summary(conn, settings))
-    _print_json(result)
-
-
-def cmd_api_jobs_summary(_: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: job_summary(conn))
     _print_json(result)
 
 
@@ -2109,11 +2039,6 @@ def cmd_delete_run(args: argparse.Namespace) -> None:
     _print_json(result)
 
 
-def cmd_api_notifications(args: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: notifications(conn, int(args.limit)))
-    _print_json(result)
-
-
 def _update_status_payload(status: dict[str, Any]) -> dict[str, Any]:
     notification = update_notification(status)
     result = dict(status)
@@ -2175,19 +2100,6 @@ def build_parser() -> argparse.ArgumentParser:
     delete_run.add_argument("--force", action="store_true")
     delete_run.set_defaults(func=cmd_delete_run)
 
-    api_inbox = sub.add_parser("api-inbox")
-    api_inbox.set_defaults(func=cmd_api_inbox)
-
-    api_paper = sub.add_parser("api-paper")
-    api_paper.add_argument("paper_id")
-    api_paper.set_defaults(func=cmd_api_paper)
-
-    api_feedback = sub.add_parser("api-feedback")
-    api_feedback.add_argument("paper_id")
-    api_feedback.add_argument("--status", required=True)
-    api_feedback.add_argument("--note", default="")
-    api_feedback.set_defaults(func=cmd_api_feedback)
-
     api_paper_recommendation = sub.add_parser("api-paper-recommendation")
     api_paper_recommendation.add_argument("paper_id")
     api_paper_recommendation.set_defaults(func=cmd_api_paper_recommendation)
@@ -2196,68 +2108,12 @@ def build_parser() -> argparse.ArgumentParser:
     api_paper_report.add_argument("paper_id")
     api_paper_report.set_defaults(func=cmd_api_paper_report)
 
-    api_delete_paper_report = sub.add_parser("api-delete-paper-report")
-    api_delete_paper_report.add_argument("paper_id")
-    api_delete_paper_report.set_defaults(func=cmd_api_delete_paper_report)
-
-    api_paper_reports = sub.add_parser("api-paper-reports")
-    api_paper_reports.add_argument("--limit", default="300")
-    api_paper_reports.add_argument("--query", default="")
-    api_paper_reports.set_defaults(func=cmd_api_paper_reports)
-
-    api_paper_reports_summary = sub.add_parser("api-paper-reports-summary")
-    api_paper_reports_summary.set_defaults(func=cmd_api_paper_reports_summary)
-
-    api_paper_library = sub.add_parser("api-paper-library")
-    api_paper_library.add_argument("--status", default="")
-    api_paper_library.add_argument("--source-type", default="")
-    api_paper_library.add_argument("--project-id", default="")
-    api_paper_library.add_argument("--query", default="")
-    api_paper_library.add_argument("--date-from", default="")
-    api_paper_library.add_argument("--date-to", default="")
-    api_paper_library.add_argument("--limit", default="100")
-    api_paper_library.add_argument("--offset", default="0")
-    api_paper_library.set_defaults(func=cmd_api_paper_library)
-
-    api_paper_library_detail = sub.add_parser("api-paper-library-detail")
-    api_paper_library_detail.add_argument("paper_id")
-    api_paper_library_detail.set_defaults(func=cmd_api_paper_library_detail)
-
-    api_paper_library_status = sub.add_parser("api-paper-library-status")
-    api_paper_library_status.add_argument("paper_id")
-    api_paper_library_status.set_defaults(func=cmd_api_paper_library_status)
-
-    api_artifacts = sub.add_parser("api-artifacts")
-    api_artifacts.add_argument("--scope-type", default="")
-    api_artifacts.add_argument("--scope-id", default="")
-    api_artifacts.add_argument("--artifact-type", default="")
-    api_artifacts.add_argument("--status", default="")
-    api_artifacts.add_argument("--limit", default="100")
-    api_artifacts.set_defaults(func=cmd_api_artifacts)
-
-    api_artifact = sub.add_parser("api-artifact")
-    api_artifact.add_argument("artifact_id")
-    api_artifact.set_defaults(func=cmd_api_artifact)
-
     api_artifact_export = sub.add_parser("api-artifact-export")
     api_artifact_export.add_argument("artifact_id")
     api_artifact_export.set_defaults(func=cmd_api_artifact_export)
 
     api_experiment_report = sub.add_parser("api-experiment-report")
     api_experiment_report.set_defaults(func=cmd_api_experiment_report)
-
-    api_reader_papers = sub.add_parser("api-reader-papers")
-    api_reader_papers.add_argument("--limit", default="300")
-    api_reader_papers.add_argument("--query", default="")
-    api_reader_papers.set_defaults(func=cmd_api_reader_papers)
-
-    api_reader_paper = sub.add_parser("api-reader-paper")
-    api_reader_paper.add_argument("paper_id")
-    api_reader_paper.set_defaults(func=cmd_api_reader_paper)
-
-    api_reader_chat = sub.add_parser("api-reader-chat")
-    api_reader_chat.add_argument("paper_id")
-    api_reader_chat.set_defaults(func=cmd_api_reader_chat)
 
     api_reader_chat_stream = sub.add_parser("api-reader-chat-stream")
     api_reader_chat_stream.add_argument("paper_id")
@@ -2277,29 +2133,6 @@ def build_parser() -> argparse.ArgumentParser:
     api_reader_followups.add_argument("paper_id")
     api_reader_followups.set_defaults(func=cmd_api_reader_followups)
 
-    api_reader_delete_message = sub.add_parser("api-reader-delete-message")
-    api_reader_delete_message.add_argument("paper_id")
-    api_reader_delete_message.add_argument("message_id")
-    api_reader_delete_message.set_defaults(func=cmd_api_reader_delete_message)
-
-    api_reader_cancel = sub.add_parser("api-reader-cancel")
-    api_reader_cancel.add_argument("paper_id")
-    api_reader_cancel.set_defaults(func=cmd_api_reader_cancel)
-
-    api_reader_retry = sub.add_parser("api-reader-retry")
-    api_reader_retry.add_argument("paper_id")
-    api_reader_retry.set_defaults(func=cmd_api_reader_retry)
-
-    api_projects = sub.add_parser("api-projects")
-    api_projects.set_defaults(func=cmd_api_projects)
-
-    api_project = sub.add_parser("api-project")
-    api_project.add_argument("project_id")
-    api_project.set_defaults(func=cmd_api_project)
-
-    api_project_save = sub.add_parser("api-project-save")
-    api_project_save.set_defaults(func=cmd_api_project_save)
-
     api_project_export = sub.add_parser("api-project-export")
     api_project_export.add_argument("project_id")
     api_project_export.set_defaults(func=cmd_api_project_export)
@@ -2308,38 +2141,8 @@ def build_parser() -> argparse.ArgumentParser:
     api_project_index.add_argument("project_id")
     api_project_index.set_defaults(func=cmd_api_project_index)
 
-    api_project_link_paper = sub.add_parser("api-project-link-paper")
-    api_project_link_paper.add_argument("project_id")
-    api_project_link_paper.set_defaults(func=cmd_api_project_link_paper)
-
-    api_project_unlink_paper = sub.add_parser("api-project-unlink-paper")
-    api_project_unlink_paper.add_argument("project_id")
-    api_project_unlink_paper.add_argument("paper_id")
-    api_project_unlink_paper.set_defaults(func=cmd_api_project_unlink_paper)
-
-    api_project_link_note = sub.add_parser("api-project-link-note")
-    api_project_link_note.add_argument("project_id")
-    api_project_link_note.set_defaults(func=cmd_api_project_link_note)
-
-    api_project_unlink_note = sub.add_parser("api-project-unlink-note")
-    api_project_unlink_note.add_argument("project_id")
-    api_project_unlink_note.add_argument("note_id")
-    api_project_unlink_note.set_defaults(func=cmd_api_project_unlink_note)
-
-    api_settings = sub.add_parser("api-settings")
-    api_settings.set_defaults(func=cmd_api_settings)
-
-    api_settings_save = sub.add_parser("api-settings-save")
-    api_settings_save.set_defaults(func=cmd_api_settings_save)
-
     api_health = sub.add_parser("api-health")
     api_health.set_defaults(func=cmd_api_health)
-
-    api_health_summary = sub.add_parser("api-health-summary")
-    api_health_summary.set_defaults(func=cmd_api_health_summary)
-
-    api_jobs_summary = sub.add_parser("api-jobs-summary")
-    api_jobs_summary.set_defaults(func=cmd_api_jobs_summary)
 
     api_jobs_history = sub.add_parser("api-jobs-history")
     api_jobs_history.add_argument("--limit", default="20")
@@ -2347,10 +2150,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     api_jobs_cleanup = sub.add_parser("api-jobs-cleanup")
     api_jobs_cleanup.set_defaults(func=cmd_api_jobs_cleanup)
-
-    api_notifications = sub.add_parser("api-notifications")
-    api_notifications.add_argument("--limit", default="5")
-    api_notifications.set_defaults(func=cmd_api_notifications)
 
     api_update_status = sub.add_parser("api-update-status")
     api_update_status.set_defaults(func=cmd_api_update_status)

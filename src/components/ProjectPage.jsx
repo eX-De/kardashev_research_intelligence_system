@@ -454,7 +454,7 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
       };
       const data = await postJson(projectId ? `/api/projects/${projectId}` : "/api/projects", payload);
       applyProjectDetail(data, { updateForm: true });
-      setStatusMessage("Project saved");
+      setStatusMessage(data.context_job?.queued ? "Project saved; context queued" : "Project saved");
       if (!projectId) onSavedProject(data.project.id);
     } catch (error) {
       setStatusMessage(error.message);
@@ -469,6 +469,12 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
     }
     try {
       const data = await postObsidianJson(`/api/projects/${projectId}/export-obsidian`);
+      if (data?.queued) {
+        cache.markStale(["jobs", "summary"]);
+        cache.markStale(["jobs", "history"]);
+        setStatusMessage("Project export queued");
+        return;
+      }
       applyProjectDetail(data);
       cache.markStale(["artifacts"]);
       setStatusMessage(`Synced ${data.export?.obsidian_path || "project index"}`);
@@ -485,6 +491,12 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
     }
     try {
       const data = await postObsidianJson(`/api/artifacts/${artifactId}/export-obsidian`, {});
+      if (data?.queued) {
+        cache.markStale(["jobs", "summary"]);
+        cache.markStale(["jobs", "history"]);
+        setStatusMessage("Artifact export queued");
+        return;
+      }
       cache.markStale(["artifact", String(artifactId)]);
       cache.markStale(["artifacts"]);
       await refreshProject();

@@ -528,66 +528,6 @@ def paper_reader_detail(conn: DbConnection, paper_id: int) -> dict[str, object]:
     return detail
 
 
-def paper_reader_chat(
-    conn: DbConnection,
-    settings: Settings,
-    paper_id: int,
-    payload: dict[str, object],
-) -> dict[str, object]:
-    message = clean_unicode(str(payload.get("message") or "")).strip()
-    if not message:
-        raise RuntimeError("Chat message is required")
-
-    paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
-    if not paper:
-        raise RuntimeError(f"Paper not found: {paper_id}")
-
-    history = paper_reader_messages(conn, paper_id)
-    paper_text = _ensure_full_text(conn, settings, paper_id)
-    if not paper_text:
-        raise RuntimeError("Full paper text is missing")
-
-    now = utc_now()
-    conn.execute(
-        """
-        INSERT INTO paper_reader_messages(
-          paper_id, role, content, source, model_provider_id, model, created_at
-        )
-        VALUES (?, 'user', ?, 'chat', '', '', ?)
-        """,
-        (paper_id, message, now),
-    )
-    conn.commit()
-
-    model_messages = _build_chat_messages(paper_text, history, message, _report_seed_messages(conn, paper_id))
-    provider_id, model = _reader_chat_model(settings)
-    answer = _call_chat_text(
-        settings,
-        model_messages,
-        provider_id=provider_id,
-        model=model,
-        purpose="Paper reader chat",
-    )
-    created_at = utc_now()
-    conn.execute(
-        """
-        INSERT INTO paper_reader_messages(
-          paper_id, role, content, source, model_provider_id, model, created_at
-        )
-        VALUES (?, 'assistant', ?, 'chat', ?, ?, ?)
-        """,
-        (
-            paper_id,
-            answer,
-            provider_id,
-            model,
-            created_at,
-        ),
-    )
-    conn.commit()
-    return paper_reader_detail(conn, paper_id)
-
-
 def paper_reader_chat_stream(
     conn: DbConnection,
     settings: Settings,

@@ -21,6 +21,9 @@ JOB_TITLES = {
     "generate-reports": "每日总报告生成",
     "sync-obsidian": "Obsidian 同步",
     "rank-papers": "论文匹配",
+    "project-index": "项目索引生成",
+    "project-export-obsidian": "项目导出",
+    "project-context": "项目上下文入库",
 }
 DAILY_JOB_TYPES = {"run-daily", "resume-daily", "retry-daily"}
 ARXIV_RATE_LIMITED = "arxiv_rate_limited"

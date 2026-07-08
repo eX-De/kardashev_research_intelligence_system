@@ -10,9 +10,10 @@ import {
 } from "react";
 
 import { api } from "./dashboard.js";
+import { CACHE_KEY_SEPARATOR, cacheKey, cacheNamespace } from "./cacheKeys.js";
 
 export const DEFAULT_API_CACHE_STALE_TIME_MS = 30000;
-export const CACHE_KEY_SEPARATOR = "|";
+export { CACHE_KEY_SEPARATOR, cacheKey, cacheNamespace };
 
 export const API_CACHE_TARGETS = {
   artifacts: cacheNamespace("artifacts"),
@@ -93,19 +94,6 @@ function normalizeCacheKey(key) {
   const normalizedKey = String(key ?? "").trim();
   if (!normalizedKey) throw new Error("Api cache key is required.");
   return normalizedKey;
-}
-
-export function cacheKey(...parts) {
-  const values = parts.length === 1 && Array.isArray(parts[0]) ? parts[0] : parts;
-  const cacheKey = values
-    .map((part) => encodeURIComponent(String(part ?? "")))
-    .join(CACHE_KEY_SEPARATOR);
-  if (!cacheKey) throw new Error("Api cache key is required.");
-  return cacheKey;
-}
-
-export function cacheNamespace(...parts) {
-  return { namespace: cacheKey(...parts) };
 }
 
 function stableBody(value) {
