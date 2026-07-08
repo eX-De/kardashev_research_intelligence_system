@@ -60,6 +60,30 @@ test("paper library status events mark library, reader, reports, notifications, 
   assert.ok(cache.stale.some((target) => Array.isArray(target) && target.join("/") === "project/7"));
 });
 
+test("papers.changed marks paper list namespaces without a single paper id", () => {
+  const cache = createCacheRecorder();
+  applyServerEvent(cache, {
+    type: SERVER_EVENTS.PAPERS_CHANGED,
+    data: { result: { arxiv_papers_inserted: 5 } }
+  });
+
+  assert.ok(cache.stale.some((target) => Array.isArray(target) && target.join("/") === "inbox"));
+  assert.ok(cache.stale.some((target) => Array.isArray(target) && target.join("/") === "library"));
+  assert.ok(cache.stale.some((target) => Array.isArray(target) && target.join("/") === "paper-reports"));
+  assert.ok(cache.stale.some((target) => Array.isArray(target) && target.join("/") === "notifications"));
+});
+
+test("paper report aggregate events also mark artifacts", () => {
+  const cache = createCacheRecorder();
+  applyServerEvent(cache, {
+    type: SERVER_EVENTS.PAPER_REPORT_UPDATED,
+    data: { artifact_id: null, result: { paper_reports_queued: 2 } }
+  });
+
+  assert.ok(cache.stale.some((target) => Array.isArray(target) && target.join("/") === "paper-reports"));
+  assert.ok(cache.stale.some((target) => Array.isArray(target) && target.join("/") === "artifacts"));
+});
+
 test("task events mark job, report, reader, health, and notification namespaces", () => {
   const cache = createCacheRecorder();
   applyServerEvent(cache, {

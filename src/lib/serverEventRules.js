@@ -10,6 +10,7 @@ export const SERVER_EVENTS = Object.freeze({
   JOB_FAILED: "job.failed",
   JOB_FINISHED: "job.finished",
   JOB_STARTED: "job.started",
+  PAPERS_CHANGED: "papers.changed",
   PAPER_FEEDBACK_UPDATED: "paper.feedback.updated",
   PAPER_LIBRARY_STATUS_UPDATED: "paper.library_status.updated",
   PAPER_RECOMMENDATION_UPDATED: "paper.recommendation.updated",
@@ -35,6 +36,7 @@ const PROJECT_EVENTS = new Set([SERVER_EVENTS.PROJECT_CREATED, SERVER_EVENTS.PRO
 const PROJECT_PAPER_EVENTS = new Set([SERVER_EVENTS.PROJECT_PAPER_LINKED, SERVER_EVENTS.PROJECT_PAPER_UNLINKED]);
 const PROJECT_NOTE_EVENTS = new Set([SERVER_EVENTS.PROJECT_NOTE_LINKED, SERVER_EVENTS.PROJECT_NOTE_UNLINKED]);
 const PAPER_EVENTS = new Set([
+  SERVER_EVENTS.PAPERS_CHANGED,
   SERVER_EVENTS.PAPER_FEEDBACK_UPDATED,
   SERVER_EVENTS.PAPER_LIBRARY_STATUS_UPDATED,
   SERVER_EVENTS.PAPER_RECOMMENDATION_UPDATED
@@ -177,9 +179,7 @@ export function applyServerEvent(cache, event) {
 
   if (PAPER_REPORT_EVENTS.has(type)) {
     markPaperChanged(cache, paperId);
-    if (type === SERVER_EVENTS.PAPER_REPORT_DELETED || artifactId) {
-      markArtifactChanged(cache, artifactId);
-    }
+    markArtifactChanged(cache, artifactId);
     return;
   }
 

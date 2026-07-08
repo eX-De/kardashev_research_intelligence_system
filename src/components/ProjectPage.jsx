@@ -23,6 +23,10 @@ function relationOptions(options) {
   return options.map(([value, label]) => <option key={value} value={value}>{label}</option>);
 }
 
+const PROJECT_STATUS_LABELS = Object.fromEntries(PROJECT_STATUSES);
+const PROJECT_PAPER_RELATION_LABELS = Object.fromEntries(PROJECT_PAPER_RELATIONS);
+const PROJECT_NOTE_RELATION_LABELS = Object.fromEntries(PROJECT_NOTE_RELATIONS);
+
 function projectToForm(project = {}) {
   return {
     name: project.name || "",
@@ -73,11 +77,11 @@ function ProjectForm({ project, form, setForm, obsidianCapability, onPickPath, o
   const obsidianDisabled = !obsidianCapability?.available;
   const obsidianHint = obsidianCapability?.disabledReason || "请先配置可选 Obsidian 集成。";
   return (
-    <div className="detail-card">
+    <div className="detail-card project-settings-card">
       <form className="project-form" onSubmit={onSubmit}>
         <div className="detail-title">
-          <h2>{project?.id ? "项目配置" : "新建项目"}</h2>
-          <p className="muted">{project?.id ? `Updated ${fmtDate(project.updated_at)}` : "只保留当前会影响流程的配置项。"}</p>
+          <h2>{project?.id ? "项目设置" : "新建项目"}</h2>
+          <p className="muted">{project?.id ? `项目元数据和上下文输入 · Updated ${fmtDate(project.updated_at)}` : "先创建项目；论文判断、关联和实验进展会在保存后进入工作台。"}</p>
         </div>
         <label>
           <span>项目名称</span>
@@ -119,100 +123,86 @@ function ProjectForm({ project, form, setForm, obsidianCapability, onPickPath, o
           {obsidianDisabled ? <small className="capability-hint">{obsidianHint}</small> : null}
         </label>
         <div className="form-actions">
-          <button type="submit" className="primary">保存配置</button>
+          <button type="submit" className="primary">保存项目</button>
         </div>
       </form>
     </div>
   );
 }
 
-function ObsidianPanel({ project, artifacts, contextDocuments, obsidianCapability, onExport }) {
-  const exportDisabled = !obsidianCapability?.available;
-  const obsidianHint = obsidianCapability?.disabledReason || "请先配置可选 Obsidian 集成。";
-  const disabledValue = obsidianCapability?.configured ? obsidianCapability.label : "可选：未启用";
+function ProjectSummaryStrip({ project, pendingCount, linkedPaperCount, reportCount, contextCount, artifactCount }) {
+  const statusLabel = PROJECT_STATUS_LABELS[project?.status] || project?.status || "未设置";
   return (
-    <section className="panel automation-panel">
-      <div className="panel-title">
-        <h2>集成/导出</h2>
-        {project?.id ? <button disabled={exportDisabled} title={exportDisabled ? obsidianHint : undefined} type="button" onClick={onExport}>同步索引到 Obsidian</button> : null}
+    <div className="project-summary-strip" aria-label="项目状态摘要">
+      <div className="project-summary-item primary">
+        <span>待判断论文</span>
+        <strong>{pendingCount}</strong>
       </div>
-      {exportDisabled ? <p className="capability-hint">{obsidianHint}</p> : null}
-      <div className="project-health-grid">
-        <div className={`health-item ${project?.obsidian_project_path ? "ok" : "neutral"}`}>
-          <span>项目主页</span>
-          <strong>{project?.obsidian_project_path || (obsidianCapability?.available ? "默认 Projects/<项目名>.md" : disabledValue)}</strong>
-        </div>
-        <div className={`health-item ${project?.obsidian_folder || project?.obsidian_output_dir ? "ok" : "neutral"}`}>
-          <span>项目文件夹</span>
-          <strong>{project?.obsidian_folder || project?.obsidian_output_dir || (obsidianCapability?.available ? "使用默认输出目录" : disabledValue)}</strong>
-        </div>
-        <div className="health-item neutral">
-          <span>来源</span>
-          <strong>{project?.discovery_source || "manual"}</strong>
-        </div>
-        <div className="health-item neutral">
-          <span>状态标签</span>
-          <strong>{project?.obsidian_status_tag || "—"}</strong>
-        </div>
+      <div className="project-summary-item">
+        <span>已关联论文</span>
+        <strong>{linkedPaperCount}</strong>
       </div>
-      <div>
-        <h3>上下文来源</h3>
-        <div className="linked-list">
-          {contextDocuments.length ? contextDocuments.map((document) => (
-            <div className="linked-item" key={`${document.document_id}-${document.relation}`}>
-              <div>
-                <strong>{document.title}</strong>
-                <p className="muted">{document.source_type} · {document.relation} · {document.chunk_count} chunks</p>
-                {document.excerpt ? <p className="muted">{snippet(document.excerpt, 160)}</p> : null}
-              </div>
-            </div>
-          )) : <p className="muted">暂无系统内上下文文档。</p>}
-        </div>
+      <div className="project-summary-item">
+        <span>实验进展</span>
+        <strong>{reportCount}</strong>
       </div>
-      <div>
-        <h3>生成产物</h3>
-        <div className="linked-list">
-          {artifacts.length ? artifacts.map((artifact) => (
-            <div className="linked-item" key={artifact.id}>
-              <div>
-                <strong>{artifact.title}</strong>
-                <p className="muted">{artifact.status}{artifact.obsidian_path ? ` · ${artifact.obsidian_path}` : ""}</p>
-              </div>
-            </div>
-          )) : <p className="muted">暂无生成产物。</p>}
-        </div>
+      <div className="project-summary-item">
+        <span>Context</span>
+        <strong>{contextCount}</strong>
       </div>
-    </section>
+      <div className="project-summary-item">
+        <span>项目状态</span>
+        <strong>{statusLabel}</strong>
+        <p>{artifactCount} outputs</p>
+      </div>
+    </div>
   );
 }
 
-function ProjectMatchesPanel({ matches }) {
+function PendingPaperQueuePanel({ papers, evidenceByPaperId, onAcceptRecommendation }) {
   return (
-    <section className="panel project-match-panel">
+    <section className="panel project-match-panel pending-paper-panel">
       <div className="panel-title">
-        <h2>项目候选论文</h2>
-        <p>{matches.length} matches</p>
+        <div>
+          <h2>待判断论文</h2>
+          <p>来自论文 inbox 的项目级 pending 推荐；相似度匹配只作为解释证据。</p>
+        </div>
+        <p>{papers.length} pending</p>
       </div>
       <div className="project-match-list">
-        {matches.length ? matches.map((match) => {
-          const relationType = match.judgment?.relation_type || "matched";
+        {papers.length ? papers.map((paper) => {
+          const relationType = paper.relation_type || "recommended";
+          const evidence = evidenceByPaperId.get(Number(paper.id)) || [];
+          const primaryEvidence = evidence[0] || null;
           return (
-            <article className="project-match-item" key={`${match.paper_id}-${match.updated_at}`}>
+            <article className="project-match-item" key={`${paper.id}-${paper.recommendation_updated_at || ""}`}>
               <div className="project-match-head">
                 <div>
-                  <strong>{match.title}</strong>
-                  <p className="muted">{match.arxiv_id} · {relationType} · score {fmtScore(match.score)} · {(match.searchers || []).join(", ") || "matched"}</p>
+                  <strong>{paper.title}</strong>
+                  <p className="muted">{paper.arxiv_id} · {relationType} · usefulness {fmtScore(paper.score)}{paper.confidence ? ` · confidence ${fmtScore(paper.confidence)}` : ""}</p>
                 </div>
-                <a href={match.link || "#"} target="_blank" rel="noreferrer">打开</a>
+                <div className="project-match-actions">
+                  {paper.link ? <a href={paper.link} target="_blank" rel="noreferrer">arXiv</a> : null}
+                  <a href={`/papers/inbox/${paper.id}`}>打开待判断</a>
+                  <div className="recommendation-quick-actions" aria-label="保存重要性">
+                    <span>保存</span>
+                    <button type="button" onClick={() => onAcceptRecommendation(paper.id, "high")}>高</button>
+                    <button type="button" onClick={() => onAcceptRecommendation(paper.id, "medium")}>中</button>
+                    <button type="button" onClick={() => onAcceptRecommendation(paper.id, "low")}>低</button>
+                  </div>
+                </div>
               </div>
-              <div className="project-match-evidence">
-                <p><span>论文</span>{snippet(match.arxiv_text || match.evidence?.arxiv_text)}</p>
-                <p><span>项目</span>{snippet(`${match.note_title || ""} ${match.obsidian_heading || ""} ${match.obsidian_text || ""}`)}</p>
-                <p className="muted">{match.note_path || "项目上下文"} · chunk {match.best_obsidian_chunk_id || ""}</p>
-              </div>
+              <p className="project-recommendation-reason"><span>推荐理由</span>{paper.reason || "暂无推荐理由。"}</p>
+              {primaryEvidence ? (
+                <div className="project-match-evidence">
+                  <p><span>论文匹配片段</span>{snippet(primaryEvidence.arxiv_text || primaryEvidence.evidence?.arxiv_text)}</p>
+                  <p><span>项目上下文片段</span>{snippet(`${primaryEvidence.note_title || ""} ${primaryEvidence.obsidian_heading || ""} ${primaryEvidence.obsidian_text || ""}`)}</p>
+                  <p className="muted">{primaryEvidence.note_path || "项目上下文"} · chunk {primaryEvidence.best_obsidian_chunk_id || ""}</p>
+                </div>
+              ) : null}
             </article>
           );
-        }) : <p className="muted">暂无基于项目上下文匹配到的论文。</p>}
+        }) : <p className="muted">暂无来自论文 inbox 的待判断推荐。运行每日任务或同步上下文后，这里会出现新的 pending 推荐。</p>}
       </div>
     </section>
   );
@@ -259,31 +249,58 @@ function ExperimentProgressPanel({ reports, obsidianCapability, onExport }) {
   );
 }
 
-function LinkedResourcesPanel({ detail, onLinkPaper, onLinkNote, onUnlinkPaper, onUnlinkNote }) {
-  const linkedPapers = detail.papers || [];
-  const linkedNotes = detail.notes || [];
-  const candidatePapers = detail.candidate_papers || [];
-  const candidateNotes = detail.candidate_notes || [];
+function LinkedPapersPanel({ linkedPapers, onUnlinkPaper }) {
   return (
-    <section className="panel resource-panel">
+    <section className="panel linked-papers-panel resource-panel">
       <div className="panel-title">
-        <h2>关联信息</h2>
-        <p>{detail.project?.paper_count || 0} papers · {detail.project?.note_count || 0} notes</p>
+        <div>
+          <h2>已关联论文</h2>
+          <p>已经进入这个项目知识资产的论文。</p>
+        </div>
+        <p>{linkedPapers.length} papers</p>
       </div>
-      <div className="link-grid">
-        <form className="link-form" onSubmit={onLinkPaper}>
-          <label>
-            <span>加入论文</span>
-            <select name="paper_id" disabled={!candidatePapers.length}>
-              {candidatePapers.length ? candidatePapers.map((paper) => <option key={paper.id} value={paper.id}>{compactLabel(`${paper.arxiv_id} · ${paper.title}`)}</option>) : <option value="">无可选论文</option>}
-            </select>
-          </label>
-          <label>
-            <span>关系</span>
-            <select name="relation" defaultValue="candidate">{relationOptions(PROJECT_PAPER_RELATIONS)}</select>
-          </label>
-          <button type="submit" disabled={!candidatePapers.length}>加入</button>
-        </form>
+      <div className="linked-list">
+        {linkedPapers.length ? linkedPapers.map((paper) => (
+          <div className="linked-item" key={paper.id}>
+            <div>
+              <strong>{paper.title}</strong>
+              <p className="muted">{PROJECT_PAPER_RELATION_LABELS[paper.relation] || paper.relation} · {paper.arxiv_id}{paper.project_score ? ` · score ${fmtScore(paper.project_score)}` : ""}</p>
+              {paper.note ? <p className="muted">{paper.note}</p> : null}
+            </div>
+            <button type="button" onClick={() => onUnlinkPaper(paper.id)}>移除</button>
+          </div>
+        )) : <p className="muted">暂无关联论文。先在待判断论文里按重要性保存，或进入 /papers/inbox 完成处理。</p>}
+      </div>
+    </section>
+  );
+}
+
+function ProjectContextPanel({ contextDocuments, linkedNotes, candidateNotes, onLinkNote, onUnlinkNote }) {
+  return (
+    <section className="panel project-context-panel resource-panel">
+      <div className="panel-title">
+        <div>
+          <h2>Context</h2>
+          <p>推荐和判断用到的项目上下文，作为论文工作流的输入层。</p>
+        </div>
+        <p>{contextDocuments.length} docs · {linkedNotes.length} notes</p>
+      </div>
+      <div className="project-context-section">
+        <h3>系统内上下文</h3>
+        <div className="linked-list">
+          {contextDocuments.length ? contextDocuments.map((document) => (
+            <div className="linked-item" key={`${document.document_id}-${document.relation}`}>
+              <div>
+                <strong>{document.title}</strong>
+                <p className="muted">{document.source_type} · {document.relation} · {document.chunk_count} chunks</p>
+                {document.excerpt ? <p className="muted">{snippet(document.excerpt, 160)}</p> : null}
+              </div>
+            </div>
+          )) : <p className="muted">暂无系统内上下文文档。</p>}
+        </div>
+      </div>
+      <div className="project-context-section">
+        <h3>项目笔记</h3>
         <form className="link-form" onSubmit={onLinkNote}>
           <label>
             <span>加入笔记</span>
@@ -297,37 +314,17 @@ function LinkedResourcesPanel({ detail, onLinkPaper, onLinkNote, onUnlinkPaper, 
           </label>
           <button type="submit" disabled={!candidateNotes.length}>加入</button>
         </form>
-      </div>
-      <div className="resource-columns">
-        <div>
-          <h3>项目论文</h3>
-          <div className="linked-list">
-            {linkedPapers.length ? linkedPapers.map((paper) => (
-              <div className="linked-item" key={paper.id}>
-                <div>
-                  <strong>{paper.title}</strong>
-                  <p className="muted">{paper.relation} · {paper.arxiv_id}{paper.project_score ? ` · score ${fmtScore(paper.project_score)}` : ""}</p>
-                  {paper.note ? <p className="muted">{paper.note}</p> : null}
-                </div>
-                <button type="button" onClick={() => onUnlinkPaper(paper.id)}>移除</button>
+        <div className="linked-list">
+          {linkedNotes.length ? linkedNotes.map((note) => (
+            <div className="linked-item" key={note.id}>
+              <div>
+                <strong>{note.title}</strong>
+                <p className="muted">{PROJECT_NOTE_RELATION_LABELS[note.relation] || note.relation} · {note.path}</p>
+                {note.note ? <p className="muted">{note.note}</p> : null}
               </div>
-            )) : <p className="muted">暂无关联论文。</p>}
-          </div>
-        </div>
-        <div>
-          <h3>项目笔记</h3>
-          <div className="linked-list">
-            {linkedNotes.length ? linkedNotes.map((note) => (
-              <div className="linked-item" key={note.id}>
-                <div>
-                  <strong>{note.title}</strong>
-                  <p className="muted">{note.relation} · {note.path}</p>
-                  {note.note ? <p className="muted">{note.note}</p> : null}
-                </div>
-                <button type="button" onClick={() => onUnlinkNote(note.id)}>移除</button>
-              </div>
-            )) : <p className="muted">暂无关联笔记。</p>}
-          </div>
+              <button type="button" onClick={() => onUnlinkNote(note.id)}>移除</button>
+            </div>
+          )) : <p className="muted">暂无关联笔记。</p>}
         </div>
       </div>
     </section>
@@ -408,7 +405,29 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
     [artifacts]
   );
   const contextDocuments = detail?.context_documents || [];
+  const linkedPapers = detail?.papers || [];
+  const linkedNotes = detail?.notes || [];
+  const candidatePapers = detail?.candidate_papers || [];
+  const candidateNotes = detail?.candidate_notes || [];
   const matches = detail?.retrieval_hits || detail?.project_matches || [];
+  const pendingPapers = useMemo(
+    () => candidatePapers.filter((paper) => (paper.recommendation_state || "pending") === "pending"),
+    [candidatePapers]
+  );
+  const evidenceByPaperId = useMemo(
+    () => {
+      const grouped = new Map();
+      for (const match of matches) {
+        const paperId = Number(match.paper_id);
+        if (!paperId) continue;
+        const current = grouped.get(paperId) || [];
+        current.push(match);
+        grouped.set(paperId, current);
+      }
+      return grouped;
+    },
+    [matches]
+  );
 
   const payloadBase = useMemo(() => ({
     summary: project.summary || "",
@@ -461,28 +480,6 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
     }
   }
 
-  async function exportProject() {
-    if (!projectId) return;
-    if (!obsidianCapability.available) {
-      setStatusMessage(obsidianCapability.disabledReason);
-      return;
-    }
-    try {
-      const data = await postObsidianJson(`/api/projects/${projectId}/export-obsidian`);
-      if (data?.queued) {
-        cache.markStale(["jobs", "summary"]);
-        cache.markStale(["jobs", "history"]);
-        setStatusMessage("Project export queued");
-        return;
-      }
-      applyProjectDetail(data);
-      cache.markStale(["artifacts"]);
-      setStatusMessage(`Synced ${data.export?.obsidian_path || "project index"}`);
-    } catch (error) {
-      setStatusMessage(friendlyObsidianMessage(error));
-    }
-  }
-
   async function exportArtifact(artifactId) {
     if (!artifactId) return;
     if (!obsidianCapability.available) {
@@ -506,21 +503,39 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
     }
   }
 
-  async function submitLink(event, type) {
-    event.preventDefault();
-    if (!projectId) return;
-    const formData = new FormData(event.currentTarget);
-    const payload = type === "paper"
-      ? { paper_id: formData.get("paper_id"), relation: formData.get("relation") }
-      : { note_id: formData.get("note_id"), relation: formData.get("relation") };
+  async function acceptProjectRecommendation(paperId, importance) {
+    if (!projectId || !paperId) return;
     try {
-      const data = await postJson(`/api/projects/${projectId}/${type === "paper" ? "papers" : "notes"}`, payload);
-      applyProjectDetail(data);
-      if (type === "paper") cache.markStale(["library"]);
-      setStatusMessage(type === "paper" ? "Paper linked" : "Note linked");
+      await postJson(`/api/papers/${paperId}/recommendation`, {
+        action: "accept",
+        importance,
+        project_ids: [Number(projectId)]
+      });
+      cache.markStale(["inbox"]);
+      cache.markStale(["library"]);
+      cache.markStale(["projects"]);
+      await refreshProject();
+      setStatusMessage("已从待判断保存到当前项目");
     } catch (error) {
       setStatusMessage(error.message);
     }
+  }
+
+  async function linkNoteById(noteId, relation = "source") {
+    if (!projectId || !noteId) return;
+    try {
+      const data = await postJson(`/api/projects/${projectId}/notes`, { note_id: noteId, relation });
+      applyProjectDetail(data);
+      setStatusMessage("Note linked");
+    } catch (error) {
+      setStatusMessage(error.message);
+    }
+  }
+
+  async function submitNoteLink(event) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    await linkNoteById(formData.get("note_id"), formData.get("relation") || "source");
   }
 
   async function unlink(type, id) {
@@ -541,7 +556,7 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
         <div>
           <button type="button" onClick={onBack}>← 返回项目中心</button>
           <h1>{title}</h1>
-          <p>{projectLoading ? "正在读取项目详情" : isNew ? "创建系统内项目配置；也可以稍后接入可选 Obsidian 同步。" : `${project.paper_count || 0} papers · ${project.note_count || 0} notes · ${artifacts.length} outputs`}</p>
+          <p>{projectLoading ? "正在读取项目详情" : isNew ? "创建系统内项目配置；保存后进入论文工作台。" : `论文判断工作台 · ${linkedPapers.length} papers · ${linkedNotes.length} notes · ${artifacts.length} outputs`}</p>
         </div>
         {!isNew ? <RefreshButton busy={projectQuery.loading || projectQuery.refreshing} onClick={() => refreshProject().catch((error) => setStatusMessage(error.message))} /> : null}
       </header>
@@ -554,22 +569,45 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
           title="读取项目详情"
         />
       ) : (
-        <div className="project-page-grid">
-          <ProjectForm project={project} form={form} setForm={setForm} obsidianCapability={obsidianCapability} onPickPath={pickPath} onSubmit={saveProject} />
-          {!isNew ? (
+        <div className={`project-page-grid ${isNew ? "project-new-layout" : ""}`}>
+          {isNew ? (
+            <ProjectForm project={project} form={form} setForm={setForm} obsidianCapability={obsidianCapability} onPickPath={pickPath} onSubmit={saveProject} />
+          ) : (
             <>
-              <ObsidianPanel project={project} artifacts={artifacts} contextDocuments={contextDocuments} obsidianCapability={obsidianCapability} onExport={exportProject} />
-              <ExperimentProgressPanel reports={experimentReports} obsidianCapability={obsidianCapability} onExport={exportArtifact} />
-              <ProjectMatchesPanel matches={matches} />
-              <LinkedResourcesPanel
-                detail={detail || {}}
-                onLinkPaper={(event) => submitLink(event, "paper")}
-                onLinkNote={(event) => submitLink(event, "note")}
-                onUnlinkPaper={(id) => unlink("paper", id)}
-                onUnlinkNote={(id) => unlink("note", id)}
+              <ProjectSummaryStrip
+                artifactCount={artifacts.length}
+                contextCount={contextDocuments.length + linkedNotes.length}
+                linkedPaperCount={linkedPapers.length}
+                pendingCount={pendingPapers.length}
+                project={project}
+                reportCount={experimentReports.length}
               />
+              <div className="project-workbench-grid">
+                <PendingPaperQueuePanel
+                  evidenceByPaperId={evidenceByPaperId}
+                  onAcceptRecommendation={acceptProjectRecommendation}
+                  papers={pendingPapers}
+                />
+                <div className="project-workbench-side">
+                  <LinkedPapersPanel
+                    linkedPapers={linkedPapers}
+                    onUnlinkPaper={(id) => unlink("paper", id)}
+                  />
+                  <ExperimentProgressPanel reports={experimentReports} obsidianCapability={obsidianCapability} onExport={exportArtifact} />
+                </div>
+              </div>
+              <div className="project-secondary-grid">
+                <ProjectForm project={project} form={form} setForm={setForm} obsidianCapability={obsidianCapability} onPickPath={pickPath} onSubmit={saveProject} />
+                <ProjectContextPanel
+                  candidateNotes={candidateNotes}
+                  contextDocuments={contextDocuments}
+                  linkedNotes={linkedNotes}
+                  onLinkNote={submitNoteLink}
+                  onUnlinkNote={(id) => unlink("note", id)}
+                />
+              </div>
             </>
-          ) : null}
+          )}
         </div>
       )}
     </section>

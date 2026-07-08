@@ -41,6 +41,40 @@ DISPATCHERS = {
     "generate-reports": run_generate_reports_job,
 }
 
+PROJECT_RESULT_CHANGE_KEYS = (
+    "projects_synced",
+    "project_notes_synced",
+    "project_context_documents_synced",
+    "project_paper_matches_created",
+    "project_judgments_created",
+    "paper_recommendations_created",
+    "paper_recommendations_refreshed",
+)
+PAPER_RESULT_CHANGE_KEYS = (
+    "papers_inserted",
+    "papers_updated",
+    "arxiv_papers_inserted",
+    "arxiv_papers_updated",
+    "daily_filtered_papers_archived",
+    "prefilter_rejected_papers_archived",
+    "zero_match_papers_archived",
+    "matched_papers",
+    "project_paper_matches_created",
+    "project_judgments_created",
+    "paper_recommendations_created",
+    "paper_recommendations_refreshed",
+)
+PAPER_REPORT_RESULT_CHANGE_KEYS = (
+    "paper_reports_queued",
+    "paper_reports_requeued",
+    "paper_reports_refreshed",
+    "paper_reports_done",
+    "paper_reports_failed",
+    "paper_reports_deleted",
+    "paper_reports_removed",
+    "paper_reports_cancelled",
+)
+
 
 def _env_flag(name: str, default: bool = False) -> bool:
     value = os.environ.get(name)
@@ -97,6 +131,17 @@ def _required_int(value: Any, name: str) -> int:
     return parsed
 
 
+def _result_count(result: dict[str, Any], key: str) -> int:
+    try:
+        return int(result.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _result_summary(result: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+    return {key: result.get(key) for key in keys if _result_count(result, key)}
+
+
 def _compact_project_payload(result: dict[str, Any], fallback_id: int | None = None) -> dict[str, Any]:
     project = result.get("project") if isinstance(result, dict) else {}
     project = project if isinstance(project, dict) else {}
@@ -130,6 +175,8 @@ def _compact_artifact_payload(result: dict[str, Any], key: str = "generated_arti
 
 
 def _publish_project_domain_events(conn: Any, worker_job: dict[str, Any], result: dict[str, Any]) -> None:
+    if not isinstance(result, dict):
+        return
     job_type = str(worker_job.get("job_type") or "")
     payload = _payload(worker_job)
     project_id = _optional_int(payload.get("project_id"))
@@ -155,10 +202,51 @@ def _publish_project_domain_events(conn: Any, worker_job: dict[str, Any], result
     if job_type == "project-context":
         project = _compact_project_payload(result, project_id)
         insert_app_event(conn, "project.updated", {"project": project, "project_id": project["project_id"], "reason": "project_context"})
+        return
+
+    result_summary = _result_summary(result, PROJECT_RESULT_CHANGE_KEYS)
+    if not result_summary:
+        return
+    project = _compact_project_payload(result, project_id)
+    insert_app_event(
+        conn,
+        "project.updated",
+        {
+            "project": project,
+            "project_id": project["project_id"],
+            "reason": "worker_result",
+            "job_type": job_type,
+            "result": result_summary,
+        },
+    )
 
 
 def _publish_artifact_domain_events(conn: Any, worker_job: dict[str, Any], result: dict[str, Any]) -> None:
+    if not isinstance(result, dict):
+        return
     job_type = str(worker_job.get("job_type") or "")
+    daily_report_artifact_id = _optional_int(result.get("daily_report_artifact_id"))
+    if daily_report_artifact_id:
+        insert_app_event(
+            conn,
+            "artifact.updated",
+            {
+                "artifact": {
+                    "artifact_id": daily_report_artifact_id,
+                    "id": daily_report_artifact_id,
+                    "artifact_type": "daily_report",
+                    "title": result.get("daily_report_title"),
+                    "scope_type": "system",
+                    "scope_id": None,
+                    "status": result.get("daily_report_status") or "ready",
+                    "updated_at": result.get("updated_at"),
+                },
+                "artifact_id": daily_report_artifact_id,
+                "project_id": None,
+                "reason": "daily_report",
+                "job_type": job_type,
+            },
+        )
     if job_type != "artifact-export-obsidian":
         return
     payload = _payload(worker_job)
@@ -177,6 +265,8 @@ def _publish_artifact_domain_events(conn: Any, worker_job: dict[str, Any], resul
 
 
 def _publish_reader_domain_events(conn: Any, worker_job: dict[str, Any], result: dict[str, Any]) -> None:
+    if not isinstance(result, dict):
+        return
     job_type = str(worker_job.get("job_type") or "")
     payload = _payload(worker_job)
     if job_type in {"reader-import-upload", "reader-import-url"}:
@@ -217,6 +307,8 @@ def _publish_reader_domain_events(conn: Any, worker_job: dict[str, Any], result:
 
 
 def _publish_paper_report_domain_events(conn: Any, worker_job: dict[str, Any], result: dict[str, Any]) -> None:
+    if not isinstance(result, dict):
+        return
     job_type = str(worker_job.get("job_type") or "")
     if job_type == "paper-report":
         payload = _payload(worker_job)
@@ -240,15 +332,16 @@ def _publish_paper_report_domain_events(conn: Any, worker_job: dict[str, Any], r
             },
         )
         return
-    if job_type != "generate-paper-reports":
-        return
     report_keys = [key for key in result if str(key).startswith("paper_reports_")]
-    if not report_keys:
+    result_summary = _result_summary(result, PAPER_REPORT_RESULT_CHANGE_KEYS)
+    if not report_keys or not result_summary:
         return
     done = int(result.get("paper_reports_done") or 0)
     failed = int(result.get("paper_reports_failed") or 0)
     queued = int(result.get("paper_reports_queued") or 0) + int(result.get("paper_reports_requeued") or 0)
-    status = "done" if done else "failed" if failed else "queued" if queued else "updated"
+    deleted = int(result.get("paper_reports_deleted") or 0) + int(result.get("paper_reports_removed") or 0)
+    cancelled = int(result.get("paper_reports_cancelled") or 0)
+    status = "done" if done else "failed" if failed else "queued" if queued else "removed" if deleted else "cancelled" if cancelled else "updated"
     insert_app_event(
         conn,
         "paper_report.updated",
@@ -263,7 +356,27 @@ def _publish_paper_report_domain_events(conn: Any, worker_job: dict[str, Any], r
             "artifact_id": None,
             "status": status,
             "project_ids": [],
+            "job_type": job_type,
             "result": {key: result.get(key) for key in sorted(report_keys)},
+        },
+    )
+
+
+def _publish_paper_domain_events(conn: Any, worker_job: dict[str, Any], result: dict[str, Any]) -> None:
+    if not isinstance(result, dict):
+        return
+    result_summary = _result_summary(result, PAPER_RESULT_CHANGE_KEYS)
+    if not result_summary:
+        return
+    insert_app_event(
+        conn,
+        "papers.changed",
+        {
+            "paper": {"paper_id": None, "id": None, "updated_at": result.get("updated_at")},
+            "paper_id": None,
+            "project_ids": [],
+            "job_type": str(worker_job.get("job_type") or ""),
+            "result": result_summary,
         },
     )
 
@@ -379,6 +492,7 @@ def run_once(worker_id: str) -> dict[str, Any]:
         _publish_artifact_domain_events(conn, worker_job, result)
         _publish_reader_domain_events(conn, worker_job, result)
         _publish_paper_report_domain_events(conn, worker_job, result)
+        _publish_paper_domain_events(conn, worker_job, result)
         return {"claimed": True, "worker_job": completed_job, "result": result}
     finally:
         conn.close()

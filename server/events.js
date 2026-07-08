@@ -8,6 +8,7 @@ export const SERVER_EVENTS = Object.freeze({
   JOB_FAILED: "job.failed",
   JOB_FINISHED: "job.finished",
   JOB_STARTED: "job.started",
+  PAPERS_CHANGED: "papers.changed",
   PAPER_FEEDBACK_UPDATED: "paper.feedback.updated",
   PAPER_LIBRARY_STATUS_UPDATED: "paper.library_status.updated",
   PAPER_RECOMMENDATION_UPDATED: "paper.recommendation.updated",

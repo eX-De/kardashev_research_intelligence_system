@@ -294,6 +294,57 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         self.assertEqual(payload["status"], "done")
         self.assertEqual(payload["result"]["paper_reports_done"], 2)
 
+    def test_run_once_publishes_daily_result_domain_events(self) -> None:
+        conn = Mock()
+        worker_job = {
+            "id": 18,
+            "job_run_id": 53,
+            "job_type": "run-daily",
+            "payload": {"command": "run-daily", "source": "manual", "args": []},
+            "started_at": "2026-07-08T10:00:00+00:00",
+            "finished_at": None,
+        }
+        result_payload = {
+            "arxiv_papers_inserted": 5,
+            "daily_filtered_papers_archived": 2,
+            "project_paper_matches_created": 3,
+            "paper_recommendations_created": 1,
+            "paper_reports_candidates": 3,
+            "paper_reports_queued": 2,
+            "daily_reports_created": 1,
+            "daily_report_artifact_id": 36,
+        }
+        with patch("worker.service.connect", return_value=conn), \
+            patch("worker.service.claim_next_worker_job", return_value={"worker_job": worker_job, "job_run": {}}), \
+            patch("worker.service.insert_app_event") as insert_event, \
+            patch("worker.service.load_settings", return_value=object()), \
+            patch("worker.service.apply_stored_settings", return_value=object()), \
+            patch("worker.service.dispatch_worker_job", return_value=result_payload), \
+            patch("worker.service.complete_worker_job", return_value={"worker_job": {**worker_job, "status": "completed"}, "job_run": {}}):
+            service.run_once("worker-test")
+
+        event_names = [call.args[1] for call in insert_event.call_args_list]
+        self.assertIn("task.finished", event_names)
+        self.assertIn("artifact.updated", event_names)
+        self.assertIn("paper_report.updated", event_names)
+        self.assertIn("papers.changed", event_names)
+        self.assertIn("project.updated", event_names)
+
+        artifact_event = next(call for call in insert_event.call_args_list if call.args[1] == "artifact.updated")
+        self.assertEqual(artifact_event.args[2]["artifact_id"], 36)
+        self.assertEqual(artifact_event.args[2]["artifact"]["artifact_type"], "daily_report")
+
+        report_event = next(call for call in insert_event.call_args_list if call.args[1] == "paper_report.updated")
+        self.assertEqual(report_event.args[2]["status"], "queued")
+        self.assertEqual(report_event.args[2]["result"]["paper_reports_queued"], 2)
+
+        papers_event = next(call for call in insert_event.call_args_list if call.args[1] == "papers.changed")
+        self.assertEqual(papers_event.args[2]["result"]["arxiv_papers_inserted"], 5)
+
+        project_event = next(call for call in insert_event.call_args_list if call.args[1] == "project.updated")
+        self.assertEqual(project_event.args[2]["reason"], "worker_result")
+        self.assertEqual(project_event.args[2]["result"]["project_paper_matches_created"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()
