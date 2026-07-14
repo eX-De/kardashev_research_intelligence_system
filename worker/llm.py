@@ -92,17 +92,21 @@ def call_chat_json(
     response_format: dict[str, object] | None = None,
     timeout_seconds: float = 60,
     raise_errors: bool = False,
+    provider_id: str = "",
+    model: str = "",
 ) -> dict[str, object] | None:
     def fail(message: str) -> None:
         if raise_errors:
             raise ChatJsonError(message)
         return None
 
-    provider = settings.chat_provider()
-    if not provider or not provider.api_key or not provider.base_url or not settings.llm_chat_model:
+    selected_provider_id = clean_unicode(str(provider_id or settings.llm_chat_provider_id)).strip()
+    selected_model = clean_unicode(str(model or settings.llm_chat_model)).strip()
+    provider = settings.provider(selected_provider_id)
+    if not provider or not provider.api_key or not provider.base_url or not selected_model:
         return fail("chat provider is not fully configured")
     payload = {
-        "model": settings.llm_chat_model,
+        "model": selected_model,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": prompt},

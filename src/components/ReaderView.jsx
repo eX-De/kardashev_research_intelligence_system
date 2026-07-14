@@ -292,6 +292,9 @@ function ChatMessage({ deleting, message, onDelete }) {
         {message.model ? <span>{message.model}</span> : null}
         {message.created_at ? <span>{fmtDate(message.created_at)}</span> : null}
         {message.streaming ? <span>streaming</span> : null}
+        {message.context?.reference_paper_ids?.length ? (
+          <span>参考论文 {message.context.reference_paper_ids.length}</span>
+        ) : null}
         {canDelete ? (
           <button disabled={deleting} onClick={() => onDelete(persistedId)} type="button">
             {deleting ? "删除中" : "删除"}
@@ -334,18 +337,6 @@ function ProjectLinkControl({ linkedProjects, linking, onLink, paperId, projects
   );
 }
 
-function readFileAsBase64(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error("PDF 读取失败"));
-    reader.onload = () => {
-      const value = String(reader.result || "");
-      resolve(value.includes(",") ? value.split(",", 2)[1] : value);
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
 function ReaderDetail({
   activeTab,
   busy,
@@ -360,13 +351,18 @@ function ReaderDetail({
   onCancel,
   onDeleteMessage,
   onGenerate,
+  onProjectContextChange,
   onProjectLink,
+  onReferencePapersSave,
   onRetry,
   onSave,
   onSendMessage,
   onSendQuestion,
   onTabChange,
   projects,
+  projectContextEnabled,
+  referenceCandidates,
+  savingReferencePapers,
   savingChatModel,
   setMessage
 }) {
@@ -376,6 +372,9 @@ function ReaderDetail({
   const [questionError, setQuestionError] = useState("");
   const [generatingQuestions, setGeneratingQuestions] = useState(false);
   const [followUpPanelPosition, setFollowUpPanelPosition] = useState(null);
+  const [referenceDialogOpen, setReferenceDialogOpen] = useState(false);
+  const [referenceQuery, setReferenceQuery] = useState("");
+  const [draftReferenceIds, setDraftReferenceIds] = useState([]);
   const messagesRef = useRef(null);
 
   useEffect(() => {
@@ -434,6 +433,26 @@ function ReaderDetail({
   const canRetry = ["done", "failed", "cancelled"].includes(report.status);
   const linkedProjects = detail.linked_projects || [];
   const recommendations = detail.project_recommendations || [];
+  const activeRecommendations = recommendations.filter(
+    (recommendation) => ["pending", "accepted"].includes(recommendation.state)
+  );
+  const contextProjectNames = [...new Set([
+    ...linkedProjects.map((project) => project.project_name),
+    ...activeRecommendations.map((recommendation) => recommendation.project_name)
+  ].filter(Boolean))];
+  const hasProjectContext = contextProjectNames.length > 0;
+  const referencePapers = detail.reference_papers || [];
+  const referencePaperMap = new Map([
+    ...referencePapers.map((item) => [Number(item.paper_id), item]),
+    ...(referenceCandidates || []).map((item) => [Number(item.paper_id), item])
+  ]);
+  const normalizedReferenceQuery = referenceQuery.trim().toLocaleLowerCase();
+  const visibleReferenceCandidates = [...referencePaperMap.values()]
+    .filter((item) => Number(item.paper_id) !== Number(paper.id))
+    .filter((item) => {
+      if (!normalizedReferenceQuery) return true;
+      return `${item.title || ""} ${item.arxiv_id || ""}`.toLocaleLowerCase().includes(normalizedReferenceQuery);
+    });
   const chatModelOptions = chatModelList(chatSettings || {});
   const chatModelValue = currentChatModelValue(chatSettings || {});
   const smartSaveDisabled = busy || !obsidianCapability?.available;
@@ -448,6 +467,26 @@ function ReaderDetail({
     setQuestionSuggestions([]);
     setQuestionError("");
     setFollowUpPanelPosition(null);
+  }
+
+  function openReferenceDialog() {
+    setDraftReferenceIds(referencePapers.map((item) => Number(item.paper_id)));
+    setReferenceQuery("");
+    setReferenceDialogOpen(true);
+  }
+
+  function toggleReferencePaper(referencePaperId) {
+    const id = Number(referencePaperId);
+    setDraftReferenceIds((current) => {
+      if (current.includes(id)) return current.filter((item) => item !== id);
+      if (current.length >= 3) return current;
+      return [...current, id];
+    });
+  }
+
+  async function saveReferencePapers() {
+    const saved = await onReferencePapersSave(paper.id, draftReferenceIds);
+    if (saved) setReferenceDialogOpen(false);
   }
 
   function clearSelection() {
@@ -690,7 +729,49 @@ function ReaderDetail({
                     ) : <option value="">未配置模型</option>}
                   </select>
                 </label>
+                <label
+                  className={`reader-project-context-control ${hasProjectContext ? "" : "is-disabled"}`}
+                  title={hasProjectContext
+                    ? `注入正式关联以及 pending/accepted 推荐项目：${contextProjectNames.join("、")}`
+                    : "当前论文没有正式关联或 pending/accepted 推荐项目"}
+                >
+                  <input
+                    checked={hasProjectContext && projectContextEnabled}
+                    disabled={!hasProjectContext || busy}
+                    onChange={(event) => onProjectContextChange(event.target.checked)}
+                    type="checkbox"
+                  />
+                  <span>
+                    使用项目上下文
+                    <small>{hasProjectContext ? `${contextProjectNames.length} 个项目` : "没有项目"}</small>
+                  </span>
+                </label>
+                <button className="reader-reference-button" onClick={openReferenceDialog} type="button">
+                  添加参考论文
+                </button>
               </div>
+              {referencePapers.length ? (
+                <div className="reader-reference-tags">
+                  <span>参考论文</span>
+                  {referencePapers.map((reference) => (
+                    <button
+                      disabled={savingReferencePapers || busy}
+                      key={reference.paper_id}
+                      onClick={() => onReferencePapersSave(
+                        paper.id,
+                        referencePapers
+                          .filter((item) => Number(item.paper_id) !== Number(reference.paper_id))
+                          .map((item) => Number(item.paper_id))
+                      )}
+                      title="移除参考论文"
+                      type="button"
+                    >
+                      <span>{reference.title || reference.arxiv_id}</span>
+                      <strong aria-hidden="true" className="reader-reference-remove">×</strong>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
               <form className="reader-composer" onSubmit={onSendMessage}>
                 <textarea
                   disabled={busy}
@@ -703,6 +784,56 @@ function ReaderDetail({
                   {busy ? <InlineLoader compact label="发送中" /> : "发送"}
                 </button>
               </form>
+              {referenceDialogOpen ? (
+                <div className="modal-backdrop" role="presentation">
+                  <article aria-modal="true" className="modal-dialog reader-reference-dialog" role="dialog">
+                    <header className="modal-header">
+                      <div>
+                        <h2>参考论文上下文</h2>
+                        <p>选择最多 3 篇全文可用论文；发送问题时会注入完整 TXT。</p>
+                      </div>
+                      <button className="modal-close" onClick={() => setReferenceDialogOpen(false)} type="button">×</button>
+                    </header>
+                    <div className="modal-body reader-reference-body">
+                      <input
+                        autoFocus
+                        onChange={(event) => setReferenceQuery(event.target.value)}
+                        placeholder="搜索标题或 arXiv ID"
+                        type="search"
+                        value={referenceQuery}
+                      />
+                      <p className="muted">已选择 {draftReferenceIds.length}/3</p>
+                      <div className="reader-reference-list">
+                        {visibleReferenceCandidates.length ? visibleReferenceCandidates.map((candidate) => {
+                          const candidateId = Number(candidate.paper_id);
+                          const selected = draftReferenceIds.includes(candidateId);
+                          const available = candidate.text_status === "complete";
+                          return (
+                            <label className={!available ? "is-disabled" : ""} key={candidateId}>
+                              <input
+                                checked={selected}
+                                disabled={!available || (!selected && draftReferenceIds.length >= 3)}
+                                onChange={() => toggleReferencePaper(candidateId)}
+                                type="checkbox"
+                              />
+                              <span>
+                                <strong>{candidate.title || "未命名论文"}</strong>
+                                <small>{candidate.arxiv_id || `Paper ${candidateId}`} · {available ? "全文可用" : "尚未提取全文"}</small>
+                              </span>
+                            </label>
+                          );
+                        }) : <p className="muted">没有匹配的论文。</p>}
+                      </div>
+                    </div>
+                    <div className="modal-actions">
+                      <button onClick={() => setReferenceDialogOpen(false)} type="button">取消</button>
+                      <button className="primary" disabled={savingReferencePapers} onClick={saveReferencePapers} type="button">
+                        {savingReferencePapers ? "保存中..." : "完成"}
+                      </button>
+                    </div>
+                  </article>
+                </div>
+              ) : null}
             </div>
           </section>
         ) : null}
@@ -767,6 +898,8 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
   const [deletingReportId, setDeletingReportId] = useState(null);
   const [linkingProjectPaperId, setLinkingProjectPaperId] = useState(null);
   const [savingChatModel, setSavingChatModel] = useState(false);
+  const [projectContextPreferences, setProjectContextPreferences] = useState({});
+  const [savingReferencePapers, setSavingReferencePapers] = useState(false);
   const debouncedQueueQuery = useDebouncedValue(queueQuery);
   const queueSearchQuery = debouncedQueueQuery.trim();
   const readerListQueryString = useMemo(() => {
@@ -802,6 +935,11 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
   const detailLoading = Boolean(activePaperId) && !detailQuery.hasData;
   const baseMessages = detail?.reader_messages || [];
   const detailPaperId = Number(detail?.paper?.id || 0);
+  const hasProjectContext = Boolean(
+    detail?.linked_projects?.length ||
+    detail?.project_recommendations?.some((recommendation) => ["pending", "accepted"].includes(recommendation.state))
+  );
+  const projectContextEnabled = hasProjectContext && projectContextPreferences[detailPaperId] !== false;
   const displayedMessages = useMemo(() => {
     const messages = [...baseMessages];
     if (
@@ -1029,7 +1167,11 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
         method: "POST",
         credentials: "same-origin",
         headers: { accept: "text/event-stream", "content-type": "application/json" },
-        body: JSON.stringify({ message: nextMessage, stream: true })
+        body: JSON.stringify({
+          message: nextMessage,
+          stream: true,
+          include_project_context: projectContextEnabled
+        })
       });
       if (!response.ok) throw await readErrorResponse(response, chatPath);
       let completed = false;
@@ -1085,6 +1227,25 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
       setStatusMessage(error.message);
     } finally {
       setSavingChatModel(false);
+    }
+  }
+
+  async function saveReferencePapers(paperId, paperIds) {
+    setSavingReferencePapers(true);
+    try {
+      const data = await api(`/api/reader/papers/${paperId}/reference-papers`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ paper_ids: paperIds })
+      });
+      cache.setCache(["reader", "paper", String(paperId)], data);
+      setStatusMessage("参考论文上下文已更新，将从下一条消息开始生效");
+      return true;
+    } catch (error) {
+      setStatusMessage(error.message);
+      return false;
+    } finally {
+      setSavingReferencePapers(false);
     }
   }
 
@@ -1170,15 +1331,11 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
     if (!selectedFiles.length) return;
     setImportBusy(true);
     try {
-      const files = [];
+      const formData = new FormData();
       for (const file of selectedFiles) {
-        files.push({
-          filename: file.name,
-          title: file.name.replace(/\.pdf$/i, ""),
-          content_base64: await readFileAsBase64(file)
-        });
+        formData.append("files", file, file.name);
       }
-      const data = await postJson("/api/reader/papers/upload", { files });
+      const data = await api("/api/reader/papers/upload", { method: "POST", body: formData });
       if (data?.queued) {
         cache.markStale(["jobs", "summary"]);
         cache.markStale(["jobs", "history"]);
@@ -1365,14 +1522,22 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
               onCancel={cancelReport}
               onDeleteMessage={deleteMessage}
               onGenerate={generateReport}
+              onProjectContextChange={(enabled) => {
+                if (!detailPaperId) return;
+                setProjectContextPreferences((current) => ({ ...current, [detailPaperId]: enabled }));
+              }}
               onProjectLink={linkPaperToProject}
+              onReferencePapersSave={saveReferencePapers}
               onRetry={retryReport}
               onSave={saveToObsidian}
               onSendQuestion={(question) => sendReaderMessage(question, { restoreOnFailure: false })}
               onSendMessage={sendMessage}
               onTabChange={setActiveTab}
               projects={projects}
+              projectContextEnabled={projectContextEnabled}
+              referenceCandidates={items}
               savingChatModel={savingChatModel}
+              savingReferencePapers={savingReferencePapers}
               setMessage={setMessage}
             />
           )}

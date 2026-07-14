@@ -276,9 +276,15 @@ LLM_EMBEDDING_PROVIDER_ID=provider-id
 LLM_EMBEDDING_MODEL=embedding-model-name
 PAPER_REPORT_PROVIDER_ID=provider-id
 PAPER_REPORT_MODEL=chat-model-name
+PROJECT_CHAT_PROFILE_PROVIDER_ID=provider-id
+PROJECT_CHAT_PROFILE_MODEL=chat-model-name
 READER_CHAT_PROVIDER_ID=provider-id
 READER_CHAT_MODEL=chat-model-name
 ```
+
+每日流程会在同步项目上下文后，按输入哈希增量生成完整的项目 Chat 摘要；只有项目资料或模型配置发生变化时才会再次请求模型。论文 Reader Chat 可由用户逐篇选择是否注入项目上下文；注入范围包含正式关联项目及 `pending` / `accepted` 推荐项目的完整摘要，不会另外生成短版 Chat 上下文。存在其中任意一种项目关系时开关即可用，全部不存在时开关保持禁用，后端也不会注入。`PROJECT_CHAT_PROFILE_*` 可指定该步骤使用的 provider 和模型；留空时会回退到默认 `LLM_CHAT_*`，未配置可用模型时该步骤只会跳过，不会阻断论文抓取和匹配。
+
+Reader Chat 还支持为当前论文持久化选择最多 3 篇参考论文。选择器只允许加入已经完成 TXT 提取的论文，不展示 token 估算，也不对组合后的总输入做额外裁剪。消息按 `当前论文全文 → 参考论文全文 → 已有报告 → 项目摘要 → 历史对话` 组织，并在助手消息中记录实际使用的参考论文 ID。
 
 未配置 LLM provider 时，系统仍可初始化数据库、同步 Obsidian、抓取 arXiv、缓存全文和保存反馈；embedding、LLM 判定、报告生成或对话会跳过、失败或使用有限的本地说明，取决于具体功能。
 

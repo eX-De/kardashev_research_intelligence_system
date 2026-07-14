@@ -72,6 +72,8 @@ STRING_FIELDS = {
     "paper_reader_default_prompt",
     "paper_report_provider_id",
     "paper_report_model",
+    "project_chat_profile_provider_id",
+    "project_chat_profile_model",
     "reader_chat_provider_id",
     "reader_chat_model",
     "reader_smart_save_provider_id",
@@ -231,6 +233,12 @@ def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, An
             stored.get("paper_report_provider_id", settings.paper_report_provider_id or "")
         ),
         "paper_report_model": str(stored.get("paper_report_model", settings.paper_report_model or "")),
+        "project_chat_profile_provider_id": str(
+            stored.get("project_chat_profile_provider_id", settings.project_chat_profile_provider_id or "")
+        ),
+        "project_chat_profile_model": str(
+            stored.get("project_chat_profile_model", settings.project_chat_profile_model or "")
+        ),
         "reader_chat_provider_id": str(
             stored.get("reader_chat_provider_id", settings.reader_chat_provider_id or "")
         ),

@@ -54,6 +54,8 @@ const SETTINGS_ENV_KEYS = [
   "PAPER_READER_DEFAULT_PROMPT",
   "PAPER_REPORT_PROVIDER_ID",
   "PAPER_REPORT_MODEL",
+  "PROJECT_CHAT_PROFILE_PROVIDER_ID",
+  "PROJECT_CHAT_PROFILE_MODEL",
   "READER_CHAT_PROVIDER_ID",
   "READER_CHAT_MODEL",
   "READER_SMART_SAVE_PROVIDER_ID",
@@ -246,6 +248,25 @@ test("saveAppSettings keeps scheduler modes mutually exclusive", async () => {
   });
 });
 
+test("saveAppSettings preserves project Chat profile model routing", async () => {
+  await withCleanSettingsEnv(async () => {
+    const fake = createSettingsPool();
+    setPoolForTesting(fake.pool);
+    try {
+      const result = await saveAppSettings({
+        project_chat_profile_provider_id: "openai",
+        project_chat_profile_model: "gpt-4.1-mini"
+      });
+      assert.equal(fake.value("project_chat_profile_provider_id"), "openai");
+      assert.equal(fake.value("project_chat_profile_model"), "gpt-4.1-mini");
+      assert.equal(result.settings.project_chat_profile_provider_id, "openai");
+      assert.equal(result.settings.project_chat_profile_model, "gpt-4.1-mini");
+    } finally {
+      setPoolForTesting(null);
+    }
+  });
+});
+
 test("normalizeSettingsPayload matches csv tags, validation, and provider URL rules", () => {
   assert.equal(normalizeProviderBaseUrl("https://example.test/v1/chat/completions/"), "https://example.test/v1");
   assert.deepEqual(
@@ -274,4 +295,5 @@ test("SETTING_SCHEMA describes secret and worker-visible fields centrally", () =
   assert.equal(SETTING_SCHEMA.obsidian_remote_secret_access_key.type, "string");
   assert.equal(SETTING_SCHEMA.paper_report_queue_concurrency.type, "int");
   assert.equal(SETTING_SCHEMA.paper_report_provider_id.worker_visible, true);
+  assert.equal(SETTING_SCHEMA.project_chat_profile_model.worker_visible, true);
 });

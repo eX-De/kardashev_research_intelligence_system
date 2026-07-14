@@ -47,6 +47,8 @@ services:
       KRIS_OUTBOX_POLLER_ENABLED: ${KRIS_OUTBOX_POLLER_ENABLED:-true}
       KRIS_OUTBOX_POLL_INTERVAL_MS: ${KRIS_OUTBOX_POLL_INTERVAL_MS:-1000}
       KRIS_WORKER_JOB_STALE_AFTER_SECONDS: ${KRIS_WORKER_JOB_STALE_AFTER_SECONDS:-1800}
+      READER_UPLOAD_MAX_FILE_BYTES: ${READER_UPLOAD_MAX_FILE_BYTES:-134217728}
+      READER_UPLOAD_MAX_FILES: ${READER_UPLOAD_MAX_FILES:-10}
       ARXIV_PDF_DIR: /data/arxiv_pdfs
       ARXIV_TEXT_DIR: /data/arxiv_text
       # Set OBSIDIAN_VAULT_PATH to /vault if you mount a vault below.
@@ -110,7 +112,7 @@ services:
       NGINX_SERVER_NAME: ${NGINX_SERVER_NAME:-localhost}
       NGINX_CERTIFICATE: ${NGINX_CERTIFICATE:-/etc/nginx/certs/fullchain.pem}
       NGINX_CERTIFICATE_KEY: ${NGINX_CERTIFICATE_KEY:-/etc/nginx/certs/privkey.pem}
-      NGINX_CLIENT_MAX_BODY_SIZE: ${NGINX_CLIENT_MAX_BODY_SIZE:-64m}
+      NGINX_CLIENT_MAX_BODY_SIZE: ${NGINX_CLIENT_MAX_BODY_SIZE:-130m}
     volumes:
       - ./deploy/nginx/templates:/etc/nginx/templates:ro
       - ${NGINX_CERT_DIR:-./deploy/nginx/certs}:/etc/nginx/certs:ro

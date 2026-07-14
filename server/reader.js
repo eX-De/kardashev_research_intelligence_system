@@ -121,6 +121,7 @@ function messagePayload(row) {
     source: row.source || "",
     model_provider_id: row.model_provider_id || "",
     model: row.model || "",
+    context: parseJson(row.context_json, {}),
     created_at: row.created_at || ""
   };
 }
@@ -783,6 +784,7 @@ export async function getReaderPaperDetail(paperId, db = { query }) {
     linkedProjectRows,
     feedbackRows,
     messageRows,
+    referenceRows,
     report
   ] = await Promise.all([
     db.query(
@@ -894,10 +896,27 @@ export async function getReaderPaperDetail(paperId, db = { query }) {
     ),
     db.query(
       `
-        SELECT id, paper_id, role, content, source, model_provider_id, model, created_at
+        SELECT id, paper_id, role, content, source, model_provider_id, model, context_json, created_at
         FROM paper_reader_messages
         WHERE paper_id = $1
         ORDER BY id
+      `,
+      [id]
+    ),
+    db.query(
+      `
+        SELECT
+          p.id AS paper_id,
+          p.arxiv_id,
+          p.title,
+          p.text_status,
+          p.text_char_count,
+          r.position,
+          r.updated_at
+        FROM paper_reader_reference_papers r
+        JOIN arxiv_papers p ON p.id = r.reference_paper_id
+        WHERE r.paper_id = $1
+        ORDER BY r.position, p.id
       `,
       [id]
     ),
@@ -970,8 +989,56 @@ export async function getReaderPaperDetail(paperId, db = { query }) {
       note: row.note || "",
       updated_at: row.updated_at || ""
     })),
+    reference_papers: (referenceRows.rows || []).map((row) => ({
+      paper_id: Number(row.paper_id),
+      arxiv_id: row.arxiv_id || "",
+      title: row.title || "",
+      text_status: row.text_status || "",
+      text_char_count: numberValue(row.text_char_count),
+      position: numberValue(row.position),
+      updated_at: row.updated_at || ""
+    })),
     reader_messages: [...reportSeedMessages(report, id), ...(messageRows.rows || []).map(messagePayload)]
   };
+}
+
+export async function saveReaderReferencePapers(paperId, payload = {}) {
+  const id = positiveId(paperId, "paper_id");
+  const rawIds = Array.isArray(payload.paper_ids) ? payload.paper_ids : [];
+  const referenceIds = [...new Set(rawIds.map((value) => positiveId(value, "reference_paper_id")))];
+  if (referenceIds.length > 3) throw new ValidationError("At most 3 reference papers can be selected");
+  if (referenceIds.includes(id)) throw new ValidationError("A paper cannot reference itself");
+
+  await withTransaction(async (client) => {
+    await findLegacyPaper(client, id);
+    if (referenceIds.length) {
+      const result = await client.query(
+        "SELECT id, text_status, text_path FROM arxiv_papers WHERE id = ANY($1::bigint[])",
+        [referenceIds]
+      );
+      if ((result.rows || []).length !== referenceIds.length) {
+        throw new ValidationError("One or more reference papers do not exist");
+      }
+      const unavailable = (result.rows || []).find(
+        (row) => row.text_status !== "complete" || !text(row.text_path)
+      );
+      if (unavailable) throw new ValidationError("Reference paper full text is not available");
+    }
+    await client.query("DELETE FROM paper_reader_reference_papers WHERE paper_id = $1", [id]);
+    const now = nowIso();
+    for (const [position, referenceId] of referenceIds.entries()) {
+      await client.query(
+        `
+          INSERT INTO paper_reader_reference_papers(
+            paper_id, reference_paper_id, position, created_at, updated_at
+          )
+          VALUES ($1, $2, $3, $4, $4)
+        `,
+        [id, referenceId, position, now]
+      );
+    }
+  });
+  return { ...(await getReaderPaperDetail(id)), ok: true };
 }
 
 export async function getReaderPaperPdfPath(paperId, db = { query }) {

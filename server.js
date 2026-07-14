@@ -53,7 +53,8 @@ import {
   getReaderPaperDetail as getNodeReaderPaperDetail,
   getReaderPaperPdfPath as getNodeReaderPaperPdfPath,
   getReaderPapers as getNodeReaderPapers,
-  retryReaderReport as retryNodeReaderReport
+  retryReaderReport as retryNodeReaderReport,
+  saveReaderReferencePapers as saveNodeReaderReferencePapers
 } from "./server/reader.js";
 import {
   getInbox as getNodeInbox,
@@ -71,6 +72,12 @@ import {
   unlinkProjectPaper as unlinkNodeProjectPaper
 } from "./server/projects.js";
 import { cleanupStaleWorkerJobs, countActiveWorkerJobs, enqueueWorkerJob } from "./server/workerQueue.js";
+import {
+  DEFAULT_READER_UPLOAD_MAX_FILE_BYTES,
+  DEFAULT_READER_UPLOAD_MAX_FILES,
+  discardStagedReaderUploads,
+  stageReaderPdfUploads
+} from "./server/uploadStaging.js";
 
 const __dirname = resolve(fileURLToPath(new URL(".", import.meta.url)));
 const ENV_PATH = join(__dirname, ".env");
@@ -127,6 +134,11 @@ const WORKER_JOB_STALE_AFTER_SECONDS = Math.max(
   Number(process.env.KRIS_WORKER_JOB_STALE_AFTER_SECONDS || 30 * 60)
 );
 const READER_FOLLOWUPS_SYNC_FALLBACK_ENABLED = envBoolean("KRIS_READER_FOLLOWUPS_SYNC_FALLBACK_ENABLED", true);
+const READER_UPLOAD_MAX_FILE_BYTES = positiveInteger(
+  process.env.READER_UPLOAD_MAX_FILE_BYTES,
+  DEFAULT_READER_UPLOAD_MAX_FILE_BYTES
+);
+const READER_UPLOAD_MAX_FILES = positiveInteger(process.env.READER_UPLOAD_MAX_FILES, DEFAULT_READER_UPLOAD_MAX_FILES);
 const WORKER_PROGRESS_EVENT_PREFIX = "KRIS_PROGRESS_EVENT ";
 const DAILY_JOB_COMMANDS = new Set(["run-daily", "resume-daily", "retry-daily"]);
 const PAPER_REPORT_QUEUE_COMMAND = "generate-paper-reports";
@@ -2218,28 +2230,41 @@ async function routeApi(req, res, url) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/reader/papers/upload") {
-    const body = await readRequestJson(req);
-    if (isQueueJobBackend()) {
-      const data = await enqueueActionWorkerJob(
-        "reader-import-upload",
-        { body },
-        { source: "reader-upload", maxAttempts: 2 }
-      );
-      sendJson(res, 202, data);
-      return;
-    }
-    const data = await jsonFromWorker(["api-reader-upload"], JSON.stringify(body));
-    sendJson(res, 200, data);
-    await publishDurableEvent(SERVER_EVENTS.READER_PAPERS_IMPORTED, {
-      source: "upload",
-      imported: Array.isArray(data.imported) ? data.imported.map((item) => ({
-        paper_id: eventNumber(item.paper_id || item.id),
-        title: item.title || null
-      })).filter((item) => item.paper_id) : [],
-      imported_count: Array.isArray(data.imported) ? data.imported.length : 0,
-      error_count: Array.isArray(data.errors) ? data.errors.length : 0
+    const settings = await readAppSettings();
+    const stagedUpload = await stageReaderPdfUploads(req, {
+      pdfDirectory: settings.arxiv_pdf_dir,
+      maxFileBytes: READER_UPLOAD_MAX_FILE_BYTES,
+      maxFiles: READER_UPLOAD_MAX_FILES
     });
-    return;
+    const body = { files: stagedUpload.files };
+    try {
+      if (isQueueJobBackend()) {
+        const data = await enqueueActionWorkerJob(
+          "reader-import-upload",
+          { body },
+          { source: "reader-upload", maxAttempts: 2 }
+        );
+        sendJson(res, 202, data);
+        return;
+      }
+      const data = await jsonFromWorker(["api-reader-upload"], JSON.stringify(body));
+      sendJson(res, 200, data);
+      await publishDurableEvent(SERVER_EVENTS.READER_PAPERS_IMPORTED, {
+        source: "upload",
+        imported: Array.isArray(data.imported) ? data.imported.map((item) => ({
+          paper_id: eventNumber(item.paper_id || item.id),
+          title: item.title || null
+        })).filter((item) => item.paper_id) : [],
+        imported_count: Array.isArray(data.imported) ? data.imported.length : 0,
+        error_count: Array.isArray(data.errors) ? data.errors.length : 0
+      });
+      return;
+    } catch (error) {
+      await discardStagedReaderUploads(stagedUpload.files).catch((cleanupError) => {
+        console.error("Failed to discard staged PDF upload", cleanupError);
+      });
+      throw error;
+    }
   }
 
   if (req.method === "POST" && url.pathname === "/api/reader/papers/urls") {
@@ -2292,6 +2317,20 @@ async function routeApi(req, res, url) {
       "cache-control": "no-store"
     });
     createReadStream(pdfPath).pipe(res);
+    return;
+  }
+
+  const readerReferencesMatch = url.pathname.match(/^\/api\/reader\/papers\/(\d+)\/reference-papers$/);
+  if (req.method === "PUT" && readerReferencesMatch) {
+    const body = await readRequestJson(req);
+    const data = await saveNodeReaderReferencePapers(readerReferencesMatch[1], body);
+    sendJson(res, 200, data);
+    await publishDurablePaperChanged(
+      SERVER_EVENTS.READER_PAPER_UPDATED,
+      data,
+      readerReferencesMatch[1],
+      { action: "reference_papers_updated" }
+    );
     return;
   }
 

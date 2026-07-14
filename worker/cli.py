@@ -43,6 +43,7 @@ from .knowledge import sync_project_context_documents_from_project_notes
 from .obsidian import OBSIDIAN_NOT_CONFIGURED, ObsidianNotConfiguredError, sync_obsidian
 from .obsidian_remote import obsidian_remote_enabled
 from .paper_reports import ensure_paper_reports_for_recommendations, process_paper_report_queue
+from .project_chat_profiles import refresh_project_chat_profiles
 from .project_status import run_daily_project_status_sql
 from .paper_reader import (
     generate_reader_followup_questions,
@@ -209,6 +210,7 @@ def _with_deadlock_retry(conn, handler: Callable[[], dict[str, int]], *, attempt
 
 DAILY_STEPS = [
     ("sync_context_sources", "同步上下文来源"),
+    ("refresh_project_chat_profiles", "更新项目 Chat 摘要"),
     ("fetch_arxiv", "抓取 arXiv"),
     ("snapshot", "生成论文快照"),
     ("cache_text", "缓存 PDF/TXT"),
@@ -220,6 +222,7 @@ DAILY_STEPS = [
     ("archive_zero_match", "归档未通过论文"),
     ("generate_daily_report_artifact", "生成日报产物"),
 ]
+DAILY_STEP_INDEX = {key: index for index, (key, _) in enumerate(DAILY_STEPS)}
 DAILY_JOB_TYPES = ("run-daily", "resume-daily", "retry-daily")
 DAILY_STAGE_COLUMNS = (
     "text_status",
@@ -264,6 +267,10 @@ def _step_summary(result: dict[str, Any]) -> str:
     priority = [
         ("notes_indexed", "notes"),
         ("projects_synced", "projects"),
+        ("project_chat_profiles_created", "project chat profiles"),
+        ("project_chat_profiles_updated", "project chat profiles"),
+        ("project_chat_profiles_unchanged", "unchanged project profiles"),
+        ("project_chat_profiles_failed", "project profile failures"),
         ("papers_inserted", "new papers"),
         ("prefilter_passed", "passed"),
         ("prefilter_skipped", "skipped"),
@@ -1631,6 +1638,7 @@ def run_daily_job(
             {"key": key, "label": label, "status": "pending"}
             for key, label in DAILY_STEPS
         ]
+        step_index = DAILY_STEP_INDEX
         accumulated: dict[str, Any] = {"daily_mode": requested_mode}
         source_job_id = int(resume_context["id"]) if resume_context else None
         if source_job_id:
@@ -1643,31 +1651,90 @@ def run_daily_job(
             source_job_id=source_job_id,
             arxiv_batch_id=str((resume_context or {}).get("meta", {}).get("arxiv_batch_id") or ""),
         )
-        _update_daily_progress(conn, job_id, steps, 0, "running", accumulated)
+        _update_daily_progress(
+            conn,
+            job_id,
+            steps,
+            step_index["sync_context_sources"],
+            "running",
+            accumulated,
+        )
 
         if requested_mode == "resume-daily":
             snapshot_result = _clone_daily_snapshot(conn, int(source_job_id or 0), job_id)
-            _mark_daily_step_resumed(conn, job_id, steps, 0, accumulated, int(source_job_id or 0))
-            _mark_daily_step_resumed(conn, job_id, steps, 1, accumulated, int(source_job_id or 0))
-            _mark_daily_step_resumed(conn, job_id, steps, 2, accumulated, int(source_job_id or 0))
+            _mark_daily_step_resumed(
+                conn,
+                job_id,
+                steps,
+                step_index["sync_context_sources"],
+                accumulated,
+                int(source_job_id or 0),
+            )
+            profile_key = "refresh_project_chat_profiles"
+            profile_status = _daily_step_status_map(conn, job_id).get(profile_key)
+            if profile_status in {"completed", "skipped"}:
+                _mark_daily_step_resumed(
+                    conn,
+                    job_id,
+                    steps,
+                    step_index[profile_key],
+                    accumulated,
+                    int(source_job_id or 0),
+                )
+            else:
+                profile_result = _run_daily_step(
+                    conn,
+                    job_id,
+                    steps,
+                    step_index[profile_key],
+                    accumulated,
+                    lambda: refresh_project_chat_profiles(conn, settings),
+                )
+                accumulated.update(profile_result)
+            _mark_daily_step_resumed(
+                conn,
+                job_id,
+                steps,
+                step_index["fetch_arxiv"],
+                accumulated,
+                int(source_job_id or 0),
+            )
+            _mark_daily_step_resumed(
+                conn,
+                job_id,
+                steps,
+                step_index["snapshot"],
+                accumulated,
+                int(source_job_id or 0),
+            )
             accumulated.update(snapshot_result)
         else:
             sync_result = _run_daily_step(
                 conn,
                 job_id,
                 steps,
-                0,
+                step_index["sync_context_sources"],
                 accumulated,
                 lambda: sync_context_sources(conn, settings),
             )
             accumulated.update({f"context_{key}": value for key, value in sync_result.items()})
+
+            profile_result = _run_daily_step(
+                conn,
+                job_id,
+                steps,
+                step_index["refresh_project_chat_profiles"],
+                accumulated,
+                lambda: refresh_project_chat_profiles(conn, settings),
+            )
+            accumulated.update(profile_result)
 
             if requested_mode == "run-daily":
                 arxiv_result = _run_daily_step(
                     conn,
                     job_id,
                     steps,
-                    1,
+                    step_index["fetch_arxiv"],
                     accumulated,
                     lambda: fetch_arxiv(conn, settings),
                 )
@@ -1693,13 +1760,20 @@ def run_daily_job(
                     conn,
                     job_id,
                     steps,
-                    2,
+                    step_index["snapshot"],
                     accumulated,
                     build_new_snapshot,
                 )
                 accumulated.update(snapshot_result)
             else:
-                _mark_daily_step_skipped(conn, job_id, steps, 1, accumulated, "retry-daily does not fetch arXiv")
+                _mark_daily_step_skipped(
+                    conn,
+                    job_id,
+                    steps,
+                    step_index["fetch_arxiv"],
+                    accumulated,
+                    "retry-daily does not fetch arXiv",
+                )
 
                 selected_holder: list[DbRow] = []
 
@@ -1720,7 +1794,7 @@ def run_daily_job(
                     conn,
                     job_id,
                     steps,
-                    2,
+                    step_index["snapshot"],
                     accumulated,
                     build_retry_snapshot,
                 )
@@ -1737,7 +1811,8 @@ def run_daily_job(
         }
         status_map = _daily_step_status_map(conn, job_id)
 
-        def run_or_resume(index: int, handler: Callable[[], dict[str, Any]], prefix: str = "") -> dict[str, Any]:
+        def run_or_resume(key: str, handler: Callable[[], dict[str, Any]], prefix: str = "") -> dict[str, Any]:
+            index = step_index[key]
             key = steps[index]["key"]
             if status_map.get(key) in {"completed", "skipped"}:
                 _mark_daily_step_resumed(conn, job_id, steps, index, accumulated, int(source_job_id or job_id))
@@ -1746,7 +1821,7 @@ def run_daily_job(
             return {f"{prefix}{name}": value for name, value in result.items()} if prefix else result
 
         text_result = run_or_resume(
-            3,
+            "cache_text",
             lambda: cache_arxiv_full_texts(
                 conn,
                 settings,
@@ -1763,7 +1838,7 @@ def run_daily_job(
         accumulated.update(text_result)
 
         rank_result = run_or_resume(
-            4,
+            "rank_global",
             lambda: rank_unmatched_papers(
                 conn,
                 settings,
@@ -1774,13 +1849,13 @@ def run_daily_job(
         accumulated.update(rank_result)
 
         project_rank_result = run_or_resume(
-            5,
+            "rank_project",
             lambda: rank_project_papers(conn, settings, papers=selected_papers),
         )
         accumulated.update(project_rank_result)
 
         explain_result = run_or_resume(
-            6,
+            "judge_project_papers",
             lambda: generate_missing_project_judgments(
                 conn,
                 settings,
@@ -1790,25 +1865,25 @@ def run_daily_job(
         accumulated.update(explain_result)
 
         recommendation_result = run_or_resume(
-            7,
+            "paper_recommendations",
             lambda: sync_project_paper_recommendations(conn, selected_paper_ids),
         )
         accumulated.update(recommendation_result)
 
         paper_report_result = run_or_resume(
-            8,
+            "paper_reports",
             lambda: ensure_paper_reports_for_recommendations(conn, selected_paper_ids),
         )
         accumulated.update(paper_report_result)
 
         archive_result = run_or_resume(
-            9,
+            "archive_zero_match",
             lambda: _archive_daily_filtered_papers(conn, settings, job_id, selected_paper_ids),
         )
         accumulated.update(archive_result)
 
         report_result = run_or_resume(
-            10,
+            "generate_daily_report_artifact",
             lambda: generate_daily_report(
                 conn,
                 settings,

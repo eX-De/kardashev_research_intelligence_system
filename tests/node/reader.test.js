@@ -8,7 +8,8 @@ import {
   deleteReaderReport,
   getReaderPaperDetail,
   getReaderPapers,
-  retryReaderReport
+  retryReaderReport,
+  saveReaderReferencePapers
 } from "../../server/reader.js";
 
 const T0 = "2026-07-06T00:00:00Z";
@@ -33,6 +34,25 @@ function createReaderFake() {
       text_status: "complete",
       text_error: "",
       text_char_count: "1234",
+      fetched_batch_id: "reader-import"
+    },
+    {
+      id: "102",
+      arxiv_id: "2607.00002",
+      title: "Reference Paper",
+      authors_json: "[]",
+      summary: "Reference abstract",
+      categories_json: "[\"cs.AI\"]",
+      published_at: "2026-07-02T00:00:00Z",
+      updated_at: T0,
+      link: "https://arxiv.org/abs/2607.00002",
+      pdf_link: "https://arxiv.org/pdf/2607.00002",
+      pdf_path: "data/reference.pdf",
+      text_path: "data/reference.txt",
+      text_extracted_at: T0,
+      text_status: "complete",
+      text_error: "",
+      text_char_count: "900",
       fetched_batch_id: "reader-import"
     }
   ];
@@ -107,6 +127,7 @@ function createReaderFake() {
     }
   ];
   const calls = [];
+  const referencePapers = [];
 
   function legacyIdForArtifact(artifact) {
     return Number(JSON.parse(artifact.content_json).legacy_arxiv_paper_id || JSON.parse(artifact.source_json).legacy_arxiv_paper_id || 0);
@@ -227,6 +248,36 @@ function createReaderFake() {
     if (normalized.startsWith("SELECT ID, PAPER_ID, ROLE")) {
       return { rows: messages.filter((message) => Number(message.paper_id) === Number(params[0])) };
     }
+    if (normalized.startsWith("SELECT P.ID AS PAPER_ID") && normalized.includes("PAPER_READER_REFERENCE_PAPERS")) {
+      return {
+        rows: referencePapers
+          .filter((reference) => Number(reference.paper_id) === Number(params[0]))
+          .sort((left, right) => left.position - right.position)
+          .map((reference) => {
+            const paper = arxivPapers.find((item) => Number(item.id) === Number(reference.reference_paper_id));
+            return { ...paper, paper_id: paper.id, position: reference.position, updated_at: reference.updated_at };
+          })
+      };
+    }
+    if (normalized.startsWith("SELECT ID, TEXT_STATUS, TEXT_PATH FROM ARXIV_PAPERS WHERE ID = ANY")) {
+      return { rows: arxivPapers.filter((paper) => params[0].map(Number).includes(Number(paper.id))) };
+    }
+    if (normalized.startsWith("DELETE FROM PAPER_READER_REFERENCE_PAPERS")) {
+      for (let index = referencePapers.length - 1; index >= 0; index -= 1) {
+        if (Number(referencePapers[index].paper_id) === Number(params[0])) referencePapers.splice(index, 1);
+      }
+      return { rows: [], rowCount: 1 };
+    }
+    if (normalized.startsWith("INSERT INTO PAPER_READER_REFERENCE_PAPERS")) {
+      referencePapers.push({
+        paper_id: String(params[0]),
+        reference_paper_id: String(params[1]),
+        position: Number(params[2]),
+        created_at: params[3],
+        updated_at: params[3]
+      });
+      return { rows: [], rowCount: 1 };
+    }
     if (normalized.startsWith("DELETE FROM PAPER_READER_MESSAGES")) {
       const before = messages.length;
       const index = messages.findIndex((message) => Number(message.id) === Number(params[0]) && Number(message.paper_id) === Number(params[1]));
@@ -270,6 +321,7 @@ function createReaderFake() {
     artifacts,
     calls,
     messages,
+    referencePapers,
     txCalls,
     pool: {
       async query(sql, params) {
@@ -312,6 +364,21 @@ test("getReaderPaperDetail prepends synthetic report messages before persisted c
   assert.equal(detail.reader_messages[0].source, "analysis_prompt");
   assert.equal(detail.reader_messages[1].source, "analysis_report");
   assert.equal(detail.reader_messages[2].content, "Question");
+  assert.deepEqual(detail.reference_papers, []);
+});
+
+test("saveReaderReferencePapers persists full-text references in order", async () => {
+  const fake = createReaderFake();
+  setPoolForTesting(fake.pool);
+  try {
+    const detail = await saveReaderReferencePapers(101, { paper_ids: [102] });
+    assert.equal(detail.ok, true);
+    assert.equal(detail.reference_papers[0].paper_id, 102);
+    assert.equal(detail.reference_papers[0].title, "Reference Paper");
+    assert.deepEqual(fake.referencePapers.map((item) => Number(item.reference_paper_id)), [102]);
+  } finally {
+    setPoolForTesting(null);
+  }
 });
 
 test("deleteReaderMessage removes persisted chat and returns updated detail", async () => {

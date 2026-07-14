@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import threading
 import time
@@ -60,6 +61,7 @@ from worker.paper_reports import (
 from worker.artifacts import content_hash, upsert_artifact
 from worker.papers import paper_id_for_arxiv_paper_id
 from worker.paper_reader import (
+    _build_chat_messages,
     cancel_reader_report,
     delete_reader_message,
     generate_reader_followup_questions,
@@ -110,6 +112,53 @@ def test_settings() -> Settings:
         llm_embedding_model="",
         embedding_concurrency=2,
     )
+
+
+class PaperReaderChatContextTests(unittest.TestCase):
+    def test_build_chat_messages_injects_the_complete_project_summary(self) -> None:
+        complete_summary = "# 项目摘要\n\n完整概览。\n\n## 当前方法\n\n- 方法 A\n- 方法 B"
+
+        messages = _build_chat_messages(
+            "paper body",
+            [],
+            "这篇论文对项目有什么帮助？",
+            report_seed_messages=[
+                {"role": "user", "content": "生成论文报告"},
+                {"role": "assistant", "content": "已有论文报告"},
+            ],
+            project_profiles=[
+                {
+                    "project_id": 7,
+                    "project_name": "Project A",
+                    "content_markdown": complete_summary,
+                }
+            ],
+            reference_papers=[
+                {
+                    "paper_id": 9,
+                    "title": "Reference Paper",
+                    "arxiv_id": "2607.00009",
+                    "text": "reference paper body",
+                }
+            ],
+        )
+
+        profile_message = next(message for message in messages if "<project_profiles>" in message["content"])
+        self.assertIn(complete_summary, profile_message["content"])
+        self.assertIn('project_id="7"', profile_message["content"])
+        paper_index = next(index for index, item in enumerate(messages) if "<paper_text>" in item["content"])
+        reference_index = next(index for index, item in enumerate(messages) if "<reference_papers>" in item["content"])
+        report_index = next(index for index, item in enumerate(messages) if item["content"] == "生成论文报告")
+        profile_index = messages.index(profile_message)
+        self.assertLess(paper_index, reference_index)
+        self.assertLess(reference_index, report_index)
+        self.assertLess(report_index, profile_index)
+        self.assertEqual(messages[-1]["content"], "这篇论文对项目有什么帮助？")
+
+    def test_build_chat_messages_omits_project_section_when_disabled(self) -> None:
+        messages = _build_chat_messages("paper body", [], "总结论文", project_profiles=[])
+
+        self.assertFalse(any("<project_profiles>" in message["content"] for message in messages))
 
 
 def embedding_settings() -> Settings:
@@ -1617,7 +1666,10 @@ class WorkerTests(unittest.TestCase):
             yield "基于全文的回答"
 
         events: list[tuple[str, dict[str, object]]] = []
-        with patch("worker.paper_reader._iter_chat_text_chunks", side_effect=fake_chunks):
+        with (
+            patch("worker.paper_reader._iter_chat_text_chunks", side_effect=fake_chunks),
+            patch("worker.paper_reader.project_chat_profiles_for_paper") as project_profiles,
+        ):
             paper_reader_chat_stream(
                 conn,
                 Settings(
@@ -1631,6 +1683,8 @@ class WorkerTests(unittest.TestCase):
                 {"message": "这篇论文的方法是什么？"},
                 lambda event, data: events.append((event, data)),
             )
+
+        project_profiles.assert_not_called()
 
         self.assertEqual([event for event, _ in events], ["start", "chunk", "done"])
         self.assertEqual(events[1][1]["text"], "基于全文的回答")
@@ -1652,12 +1706,12 @@ class WorkerTests(unittest.TestCase):
             messages[0]["content"],
             "You are a research paper reading assistant. Answer from the supplied full PDF text whenever possible.",
         )
-        self.assertEqual(messages[1], {"role": "user", "content": PAPER_READER_DEFAULT_PROMPT})
-        self.assertEqual(messages[2]["role"], "assistant")
-        self.assertIn("已有解读报告", messages[2]["content"])
-        self.assertIn("后续对话都应优先基于这份文本回答。", messages[3]["content"])
-        self.assertIn("--- page 1 ---\nMethod details for chat.", messages[3]["content"])
-        self.assertEqual(messages[4]["content"], "我已收到完整 PDF 解析文本。")
+        self.assertIn("后续对话都应优先基于这份文本回答。", messages[1]["content"])
+        self.assertIn("--- page 1 ---\nMethod details for chat.", messages[1]["content"])
+        self.assertEqual(messages[2]["content"], "我已收到完整 PDF 解析文本。")
+        self.assertEqual(messages[3], {"role": "user", "content": PAPER_READER_DEFAULT_PROMPT})
+        self.assertEqual(messages[4]["role"], "assistant")
+        self.assertIn("已有解读报告", messages[4]["content"])
         self.assertEqual(messages[-1]["content"], "这篇论文的方法是什么？")
 
     def test_import_reader_pdf_creates_report_queue_item_and_chunks(self) -> None:
@@ -1761,6 +1815,35 @@ class WorkerTests(unittest.TestCase):
             ).fetchone()["count"],
             2,
         )
+
+    def test_import_staged_reader_pdf_moves_upload_to_reader_pdf_directory(self) -> None:
+        settings = test_settings()
+        staging_dir = settings.arxiv_pdf_dir / ".reader-upload-staging"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        staged_path = staging_dir / "queued-upload.pdf"
+        pdf_bytes = b"%PDF- staged reader upload"
+        staged_path.write_bytes(pdf_bytes)
+        digest = hashlib.sha256(pdf_bytes).hexdigest()
+        payload = {
+            "filename": "queued-upload.pdf",
+            "staged_path": str(staged_path.resolve()),
+            "sha256": digest,
+        }
+        final_path = settings.arxiv_pdf_dir / f"upload-{hashlib.sha256(digest.encode('utf-8')).hexdigest()[:16]}.pdf"
+        try:
+            with patch("worker.paper_reader._import_reader_pdf_path", return_value={"ok": True}) as persist:
+                first = import_reader_pdfs(object(), settings, {"files": [payload]})
+                second = import_reader_pdfs(object(), settings, {"files": [payload]})
+
+            self.assertTrue(first["ok"])
+            self.assertTrue(second["ok"])
+            self.assertFalse(staged_path.exists())
+            self.assertEqual(final_path.read_bytes(), pdf_bytes)
+            self.assertEqual(persist.call_count, 2)
+            self.assertEqual(persist.call_args.kwargs["pdf_path"], final_path)
+        finally:
+            staged_path.unlink(missing_ok=True)
+            final_path.unlink(missing_ok=True)
 
     def test_reader_save_without_obsidian_vault_raises_structured_error(self) -> None:
         conn = connect_test_db()
@@ -2060,14 +2143,19 @@ class WorkerTests(unittest.TestCase):
                 "reader_chat_model": "reader-stream-model",
             }
         )
-        with patch("worker.paper_reader._iter_chat_text_chunks", side_effect=fake_chunks):
+        with (
+            patch("worker.paper_reader._iter_chat_text_chunks", side_effect=fake_chunks),
+            patch("worker.paper_reader.project_chat_profiles_for_paper", return_value=[]) as project_profiles,
+        ):
             paper_reader_chat_stream(
                 conn,
                 settings,
                 int(paper_id),
-                {"message": "流式解释。"},
+                {"message": "流式解释。", "include_project_context": True},
                 lambda event, data: events.append((event, data)),
             )
+
+        project_profiles.assert_called_once_with(conn, int(paper_id))
 
         self.assertEqual([event for event, _ in events], ["start", "chunk", "chunk", "done"])
         self.assertEqual(events[1][1]["text"], "第一段")

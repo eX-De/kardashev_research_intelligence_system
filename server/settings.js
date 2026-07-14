@@ -71,6 +71,8 @@ export const STRING_FIELDS = new Set([
   "paper_reader_default_prompt",
   "paper_report_provider_id",
   "paper_report_model",
+  "project_chat_profile_provider_id",
+  "project_chat_profile_model",
   "reader_chat_provider_id",
   "reader_chat_model",
   "reader_smart_save_provider_id",
@@ -149,6 +151,8 @@ const DATACLASS_SETTING_FIELDS = new Set([
   "paper_reader_default_prompt",
   "paper_report_provider_id",
   "paper_report_model",
+  "project_chat_profile_provider_id",
+  "project_chat_profile_model",
   "reader_chat_provider_id",
   "reader_chat_model",
   "reader_smart_save_provider_id",
@@ -376,6 +380,8 @@ export function loadBaseSettingsFromEnv() {
     paper_reader_default_prompt: envValue("PAPER_READER_DEFAULT_PROMPT", ""),
     paper_report_provider_id: envValue("PAPER_REPORT_PROVIDER_ID", ""),
     paper_report_model: envValue("PAPER_REPORT_MODEL", ""),
+    project_chat_profile_provider_id: envValue("PROJECT_CHAT_PROFILE_PROVIDER_ID", ""),
+    project_chat_profile_model: envValue("PROJECT_CHAT_PROFILE_MODEL", ""),
     reader_chat_provider_id: envValue("READER_CHAT_PROVIDER_ID", ""),
     reader_chat_model: envValue("READER_CHAT_MODEL", ""),
     reader_smart_save_provider_id: envValue("READER_SMART_SAVE_PROVIDER_ID", ""),
@@ -484,6 +490,12 @@ export function settingsPayloadFromStored(stored = {}) {
     ),
     paper_report_provider_id: String(storedOr(stored, "paper_report_provider_id", settings.paper_report_provider_id || "")),
     paper_report_model: String(storedOr(stored, "paper_report_model", settings.paper_report_model || "")),
+    project_chat_profile_provider_id: String(
+      storedOr(stored, "project_chat_profile_provider_id", settings.project_chat_profile_provider_id || "")
+    ),
+    project_chat_profile_model: String(
+      storedOr(stored, "project_chat_profile_model", settings.project_chat_profile_model || "")
+    ),
     reader_chat_provider_id: String(storedOr(stored, "reader_chat_provider_id", settings.reader_chat_provider_id || "")),
     reader_chat_model: String(storedOr(stored, "reader_chat_model", settings.reader_chat_model || "")),
     reader_smart_save_provider_id: String(

@@ -441,7 +441,15 @@ def dispatch_worker_job(conn: Any, settings: Any, worker_job: dict[str, Any]) ->
 
     if job_type == "reader-import-upload":
         body = payload.get("body") if isinstance(payload.get("body"), dict) else payload
-        return import_reader_pdfs(conn, settings, body)
+        result = import_reader_pdfs(conn, settings, body)
+        if not result.get("ok"):
+            errors = result.get("errors") if isinstance(result.get("errors"), list) else []
+            first_error = next(
+                (str(item.get("error") or "").strip() for item in errors if isinstance(item, dict) and item.get("error")),
+                "PDF import failed",
+            )
+            raise RuntimeError(first_error)
+        return result
 
     if job_type == "reader-import-url":
         body = payload.get("body") if isinstance(payload.get("body"), dict) else payload

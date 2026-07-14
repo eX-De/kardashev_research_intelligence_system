@@ -86,6 +86,8 @@ class Settings:
     paper_reader_default_prompt: str = ""
     paper_report_provider_id: str = ""
     paper_report_model: str = ""
+    project_chat_profile_provider_id: str = ""
+    project_chat_profile_model: str = ""
     reader_chat_provider_id: str = ""
     reader_chat_model: str = ""
     reader_smart_save_provider_id: str = ""
@@ -216,6 +218,8 @@ def load_settings() -> Settings:
         paper_reader_default_prompt=env_value("PAPER_READER_DEFAULT_PROMPT", ""),
         paper_report_provider_id=env_value("PAPER_REPORT_PROVIDER_ID", ""),
         paper_report_model=env_value("PAPER_REPORT_MODEL", ""),
+        project_chat_profile_provider_id=env_value("PROJECT_CHAT_PROFILE_PROVIDER_ID", ""),
+        project_chat_profile_model=env_value("PROJECT_CHAT_PROFILE_MODEL", ""),
         reader_chat_provider_id=env_value("READER_CHAT_PROVIDER_ID", ""),
         reader_chat_model=env_value("READER_CHAT_MODEL", ""),
         reader_smart_save_provider_id=env_value("READER_SMART_SAVE_PROVIDER_ID", ""),

@@ -793,6 +793,7 @@ h2 {
 
 .reader-chat-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-start;
   gap: 10px;
@@ -823,6 +824,150 @@ h2 {
   background: #fff;
   padding: 0 10px;
   font-size: 13px;
+}
+
+.reader-project-context-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.reader-project-context-control input {
+  margin: 0;
+}
+
+.reader-project-context-control span {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.reader-project-context-control small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.reader-project-context-control.is-disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.reader-reference-button {
+  min-height: 34px;
+  padding: 5px 10px;
+  white-space: nowrap;
+}
+
+.reader-reference-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.reader-reference-tags > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.reader-reference-tags button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 280px;
+  overflow: hidden;
+  padding: 4px 5px 4px 9px;
+  border-radius: 999px;
+}
+
+.reader-reference-tags button > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reader-reference-remove {
+  display: inline-grid;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(196, 54, 54, 0.12);
+  color: #b4232d;
+  font-size: 16px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.reader-reference-tags button:hover .reader-reference-remove {
+  background: #b4232d;
+  color: #fff;
+}
+
+.reader-reference-dialog {
+  width: min(680px, calc(100vw - 32px));
+}
+
+.reader-reference-body {
+  display: grid;
+  gap: 10px;
+}
+
+.reader-reference-body > input {
+  width: 100%;
+}
+
+.reader-reference-list {
+  display: grid;
+  gap: 8px;
+  max-height: min(52vh, 520px);
+  overflow: auto;
+}
+
+.reader-reference-list label {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  cursor: pointer;
+}
+
+.reader-reference-list label.is-disabled {
+  opacity: 0.62;
+  cursor: not-allowed;
+}
+
+.reader-reference-list label > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.reader-reference-list strong,
+.reader-reference-list small {
+  overflow-wrap: anywhere;
+}
+
+.reader-reference-list small {
+  color: var(--muted);
 }
 
 .reader-import-panel {

@@ -107,9 +107,10 @@ export function createApiError(response, data, fallback = "Request failed") {
   return error;
 }
 
-function requestHeaders(headers) {
+function requestHeaders(headers, body) {
   const nextHeaders = new Headers(headers || {});
-  if (!nextHeaders.has("content-type")) nextHeaders.set("content-type", "application/json");
+  const isFormData = typeof FormData !== "undefined" && body instanceof FormData;
+  if (!nextHeaders.has("content-type") && !isFormData) nextHeaders.set("content-type", "application/json");
   return nextHeaders;
 }
 
@@ -118,7 +119,7 @@ export async function api(path, options = {}) {
   const response = await fetch(path, {
     ...restOptions,
     credentials: "same-origin",
-    headers: requestHeaders(headers)
+    headers: requestHeaders(headers, restOptions.body)
   });
   const data = await readResponseJson(response);
   if (!response.ok || isNonJsonResponse(data)) {

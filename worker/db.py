@@ -415,7 +415,18 @@ CREATE TABLE IF NOT EXISTS paper_reader_messages (
   source TEXT NOT NULL DEFAULT 'chat',
   model_provider_id TEXT NOT NULL DEFAULT '',
   model TEXT NOT NULL DEFAULT '',
+  context_json TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS paper_reader_reference_papers (
+  paper_id INTEGER NOT NULL REFERENCES arxiv_papers(id) ON DELETE CASCADE,
+  reference_paper_id INTEGER NOT NULL REFERENCES arxiv_papers(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(paper_id, reference_paper_id),
+  CHECK(paper_id != reference_paper_id)
 );
 
 CREATE TABLE IF NOT EXISTS project_notes (
@@ -476,6 +487,7 @@ CREATE INDEX IF NOT EXISTS idx_project_paper_judgments_paper ON project_paper_ju
 CREATE INDEX IF NOT EXISTS idx_project_paper_recommendations_state ON project_paper_recommendations(state, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_project_paper_recommendations_paper ON project_paper_recommendations(paper_id);
 CREATE INDEX IF NOT EXISTS idx_paper_reader_messages_paper ON paper_reader_messages(paper_id, id);
+CREATE INDEX IF NOT EXISTS idx_paper_reader_reference_papers ON paper_reader_reference_papers(paper_id, position);
 CREATE INDEX IF NOT EXISTS idx_artifacts_scope ON artifacts(scope_type, scope_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_artifacts_type ON artifacts(artifact_type, updated_at DESC);
 """
@@ -511,6 +523,7 @@ REQUIRED_TABLES = {
     "project_paper_judgments",
     "project_paper_recommendations",
     "paper_reader_messages",
+    "paper_reader_reference_papers",
     "project_notes",
     "artifacts",
 }
@@ -547,6 +560,7 @@ REQUIRED_INDEXES = {
     "idx_project_paper_recommendations_state",
     "idx_project_paper_recommendations_paper",
     "idx_paper_reader_messages_paper",
+    "idx_paper_reader_reference_papers",
     "idx_artifacts_scope",
     "idx_artifacts_type",
 }
@@ -593,6 +607,7 @@ REQUIRED_COLUMNS = {
         "source_judgment_hash",
         "synced_at",
     },
+    "paper_reader_messages": {"context_json"},
     "job_runs": {
         "pid",
         "heartbeat_at",
@@ -910,6 +925,9 @@ def _migrate_postgres_db(conn) -> None:
             "text_status": "text_status TEXT NOT NULL DEFAULT 'pending'",
             "text_error": "text_error TEXT NOT NULL DEFAULT ''",
             "text_char_count": "text_char_count INTEGER NOT NULL DEFAULT 0",
+        },
+        "paper_reader_messages": {
+            "context_json": "context_json TEXT NOT NULL DEFAULT '{}'",
         },
         "matches": {
             "arxiv_chunk_id": "arxiv_chunk_id INTEGER REFERENCES arxiv_text_chunks(id) ON DELETE SET NULL",

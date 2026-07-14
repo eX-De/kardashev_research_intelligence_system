@@ -90,6 +90,7 @@ function ProviderSelectors({ settings, providers, onProviderChange, onAddProvide
   };
   const readerPairs = [
     ["paper_report_provider_id", "paper_report_model", "解读报告模型"],
+    ["project_chat_profile_provider_id", "project_chat_profile_model", "项目 Chat 摘要模型"],
     ["reader_chat_provider_id", "reader_chat_model", "阅读器 Chat 模型"],
     ["reader_smart_save_provider_id", "reader_smart_save_model", "Smart Save 模型"],
     ["reader_question_provider_id", "reader_question_model", "追问生成模型"]
@@ -208,7 +209,7 @@ function ProviderSelectors({ settings, providers, onProviderChange, onAddProvide
         </section>
 
         <section className="model-routing-panel">
-          <h3>阅读器模型</h3>
+          <h3>阅读器与项目模型</h3>
           <div className="reader-model-grid">
             {readerPairs.map(([providerField, modelField, label]) => {
               const selectedProviderId = settings[providerField] || settings.llm_chat_provider_id || "";

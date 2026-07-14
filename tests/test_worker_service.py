@@ -100,6 +100,21 @@ class WorkerServiceDispatchTests(unittest.TestCase):
 
         run.assert_called_once_with(conn, settings, {"files": []})
 
+    def test_dispatch_reader_import_upload_fails_the_job_when_every_file_failed(self) -> None:
+        conn = object()
+        settings = object()
+        worker_job = {
+            "id": 15,
+            "job_run_id": 50,
+            "job_type": "reader-import-upload",
+            "payload": {"command": "reader-import-upload", "body": {"files": []}},
+        }
+        with patch("worker.service.import_reader_pdfs", return_value={"ok": False, "errors": [{"error": "staged file missing"}]}) as run:
+            with self.assertRaisesRegex(RuntimeError, "staged file missing"):
+                service.dispatch_worker_job(conn, settings, worker_job)
+
+        run.assert_called_once_with(conn, settings, {"files": []})
+
     def test_dispatch_paper_report_uses_payload_body(self) -> None:
         conn = object()
         settings = object()
