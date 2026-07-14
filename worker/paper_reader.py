@@ -37,6 +37,18 @@ from .obsidian_library import (
 
 VALID_READER_ROLES = {"user", "assistant"}
 PDF_LINK_PATTERN = re.compile(r"""href=["']([^"']+?\.pdf(?:\?[^"']*)?)["']""", re.IGNORECASE)
+READER_MESSAGE_COLUMNS = (
+    "id",
+    "paper_id",
+    "role",
+    "content",
+    "source",
+    "model_provider_id",
+    "model",
+    "context_json",
+    "created_at",
+)
+READER_MESSAGE_PROJECTION = ", ".join(READER_MESSAGE_COLUMNS)
 
 
 def _reader_message_payload(row: DbRow) -> dict[str, object]:
@@ -124,8 +136,8 @@ def _reader_report_prompt(settings: Settings) -> str:
 
 def paper_reader_messages(conn: DbConnection, paper_id: int) -> list[dict[str, object]]:
     rows = conn.execute(
-        """
-        SELECT id, paper_id, role, content, source, model_provider_id, model, context_json, created_at
+        f"""
+        SELECT {READER_MESSAGE_PROJECTION}
         FROM paper_reader_messages
         WHERE paper_id = ?
         ORDER BY id
@@ -1110,8 +1122,8 @@ def generate_reader_followup_questions(
         raise RuntimeError("Selected text is required")
     anchor_message_id = int(payload.get("anchor_message_id") or payload.get("anchorMessageId") or 0)
     anchor = conn.execute(
-        """
-        SELECT id, paper_id, role, content, source, model_provider_id, model, created_at
+        f"""
+        SELECT {READER_MESSAGE_PROJECTION}
         FROM paper_reader_messages
         WHERE id = ?
           AND paper_id = ?

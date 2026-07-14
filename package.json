@@ -1,6 +1,6 @@
 {
   "name": "research-intelligence-system",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "license": "AGPL-3.0-only",
   "private": true,
   "type": "module",
@@ -11,7 +11,7 @@
     "start": "npm run build && node scripts/start.js",
     "start:api": "node server.js",
     "worker": "python -m worker.service",
-    "check": "node --check server.js && node --check scripts/start.js && node --check server/env.js && node --check server/db.js && node --check server/events.js && node --check server/settings.js && node --check server/jobs.js && node --check server/health.js && node --check server/notifications.js && node --check server/outbox.js && node --check server/artifacts.js && node --check server/library.js && node --check server/projects.js && node --check server/reader.js && node --check server/papers.js && node --check server/workerQueue.js && node --check server/uploadStaging.js && node --check src/lib/cacheKeys.js && node --check src/lib/serverEventRules.js && npm run test:node && npm run build && python -m compileall worker tests",
+    "check": "node --check server.js && node --check scripts/start.js && node --check server/env.js && node --check server/db.js && node --check server/events.js && node --check server/settings.js && node --check server/jobs.js && node --check server/health.js && node --check server/notifications.js && node --check server/outbox.js && node --check server/artifacts.js && node --check server/library.js && node --check server/projects.js && node --check server/reader.js && node --check server/papers.js && node --check server/workerQueue.js && node --check server/uploadStaging.js && node --check src/lib/cacheKeys.js && node --check src/lib/markdownMath.js && node --check src/lib/serverEventRules.js && npm run test:node && npm run build && python -m compileall worker tests",
     "init-db": "python -m worker.cli init-db",
     "sync-obsidian": "python -m worker.cli sync-obsidian",
     "fetch-arxiv": "python -m worker.cli fetch-arxiv",

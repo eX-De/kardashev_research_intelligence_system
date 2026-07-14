@@ -61,6 +61,7 @@ from worker.paper_reports import (
 from worker.artifacts import content_hash, upsert_artifact
 from worker.papers import paper_id_for_arxiv_paper_id
 from worker.paper_reader import (
+    READER_MESSAGE_COLUMNS,
     _build_chat_messages,
     cancel_reader_report,
     delete_reader_message,
@@ -115,6 +116,10 @@ def test_settings() -> Settings:
 
 
 class PaperReaderChatContextTests(unittest.TestCase):
+    def test_reader_message_projection_includes_payload_context(self) -> None:
+        self.assertIn("context_json", READER_MESSAGE_COLUMNS)
+        self.assertEqual(len(READER_MESSAGE_COLUMNS), len(set(READER_MESSAGE_COLUMNS)))
+
     def test_build_chat_messages_injects_the_complete_project_summary(self) -> None:
         complete_summary = "# 项目摘要\n\n完整概览。\n\n## 当前方法\n\n- 方法 A\n- 方法 B"
 

@@ -3,6 +3,7 @@ import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import "katex/dist/katex.min.css";
+import { normalizeMathDelimiters } from "../lib/markdownMath.js";
 
 const remarkPlugins = [
   remarkGfm,
@@ -22,18 +23,6 @@ const markdownComponents = {
     );
   }
 };
-
-function normalizeMathDelimiters(markdown) {
-  return markdown
-    .split(/(```[\s\S]*?```)/g)
-    .map((part) => {
-      if (part.startsWith("```")) return part;
-      return part
-        .replace(/\\\[([\s\S]*?)\\\]/g, "\n$$\n$1\n$$\n")
-        .replace(/\\\(([\s\S]*?)\\\)/g, "$$$1$");
-    })
-    .join("");
-}
 
 export default function MarkdownReport({ markdown }) {
   const content = normalizeMathDelimiters(String(markdown || "")).trim();
