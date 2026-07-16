@@ -2155,6 +2155,7 @@ async function routeApi(req, res, url) {
     const data = await getNodePaperLibrary({
       status: url.searchParams.get("status") || "",
       source_type: url.searchParams.get("source_type") || "",
+      report_presence: url.searchParams.get("report_presence") || "",
       project_id: url.searchParams.get("project_id") || "",
       q: url.searchParams.get("q") || "",
       date_from: url.searchParams.get("date_from") || "",
@@ -2190,7 +2191,8 @@ async function routeApi(req, res, url) {
       scope_id: url.searchParams.get("scope_id") || "",
       artifact_type: url.searchParams.get("artifact_type") || "",
       status: url.searchParams.get("status") || "",
-      limit: url.searchParams.get("limit") || "100"
+      limit: url.searchParams.get("limit") || "100",
+      offset: url.searchParams.get("offset") || "0"
     });
     sendJson(res, 200, data);
     return;

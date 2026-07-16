@@ -17,20 +17,30 @@ const QUICK_SAVE_FIELDS = new Set([
   "rag_prefilter_enabled"
 ]);
 const SUCCESS_TOAST_THROTTLE_MS = 2500;
+const CONTROL_SAVE_STATUS_LABELS = {
+  idle: "配置已同步",
+  dirty: "等待保存",
+  saving: "正在保存",
+  saved: "已保存",
+  error: "保存失败"
+};
 const DAILY_JOB_TYPES = new Set(["run-daily", "resume-daily", "retry-daily"]);
 const ABOUT_LINKS = [
   {
     title: "KRIS GitHub",
+    description: "查看主项目源码、Issue 与版本发布记录",
     href: "https://github.com/eX-De/kardashev_research_intelligence_system",
     logo: "github"
   },
   {
     title: "KRIS Docker Hub",
+    description: "获取最新容器镜像与历史版本标签",
     href: "https://hub.docker.com/r/exde1968/kardashev-research-intelligence-system",
     logo: "docker"
   },
   {
     title: "kris-agent GitHub",
+    description: "查看配套 Agent 的安装与使用说明",
     href: "https://github.com/eX-De/kris-agent",
     logo: "github"
   }
@@ -102,12 +112,23 @@ function AboutLogo({ type }) {
 function AboutPanel() {
   return (
     <section className="panel about-panel">
-      <PanelTitle title="关于" subtitle="KRIS 项目源码、镜像和 agent 入口。" />
+      <header className="settings-about-heading">
+        <div>
+          <span>Resources</span>
+          <h2>项目资源</h2>
+          <p>KRIS 源码、容器镜像与配套 Agent。</p>
+        </div>
+        <em>OPEN SOURCE</em>
+      </header>
       <div className="about-action-row">
         {ABOUT_LINKS.map((item) => (
           <a className="about-action-button" href={item.href} key={item.title} rel="noreferrer" target="_blank">
             <AboutLogo type={item.logo} />
-            <strong className="about-action-title">{item.title}</strong>
+            <span className="about-action-copy">
+              <strong className="about-action-title">{item.title}</strong>
+              <small>{item.description}</small>
+            </span>
+            <i className="about-action-arrow" aria-hidden="true">↗</i>
           </a>
         ))}
       </div>
@@ -173,6 +194,8 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
   const history = historyQuery.hasData ? historyQuery.data?.items || [] : fallbackHistory;
   const dailyRecovery = dailyRecoveryFromHistory(history);
   const tasksLoading = !jobStatusQuery.hasData || !jobsSummaryQuery.hasData;
+  const refreshBusy = settingsQuery.refreshing || jobStatusQuery.refreshing || jobsSummaryQuery.refreshing || historyQuery.refreshing || healthQuery.refreshing;
+  const systemHealthy = Boolean(health?.database?.ok && health?.llm?.configured);
 
   settingsRef.current = settings;
   providersRef.current = providers;
@@ -468,23 +491,33 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
   }
 
   return (
-    <section className="view control-view">
-      <header className="control-header">
-        <div>
-          <h1>设置</h1>
-          <p>系统连接、模型路由、论文源、检索策略和自动化规则。</p>
+    <section className="view control-view vision-settings">
+      <header className="vision-topbar settings-topbar">
+        <div className="vision-brand">
+          <span>系统工作区</span>
+          <h1>设置中心</h1>
         </div>
-        <RefreshButton label="刷新状态" onClick={() => refreshControl({ hydrate: false, includeTaskHistory: true }).catch((error) => setStatusMessage(error.message))} />
+        <div className="vision-top-actions">
+          <span className={`vision-live-state ${systemHealthy ? "ready" : "attention"}`}><i aria-hidden="true" />{healthQuery.hasData ? (systemHealthy ? "服务就绪" : "需要配置") : "同步状态"}</span>
+          <RefreshButton className="vision-refresh" busy={refreshBusy} label="刷新状态" onClick={() => refreshControl({ hydrate: false, includeTaskHistory: true }).catch((error) => setStatusMessage(error.message))} />
+        </div>
       </header>
 
-      <div className="control-grid">
-        <section className="panel">
-          <PanelTitle title="连接状态" subtitle="基础设施连通性；任务控制和最近历史在本页下方。" />
+      <main className="settings-workspace">
+        <section className="settings-overview-card">
+          <header className="settings-card-heading">
+            <div>
+              <span>运行基础</span>
+              <h2>连接与服务</h2>
+              <p>数据库、知识库集成和模型服务的即时状态。</p>
+            </div>
+            <em>{healthQuery.hasData ? (systemHealthy ? "ALL SYSTEMS READY" : "ACTION NEEDED") : "SYNCING"}</em>
+          </header>
           <HealthGrid health={health} settings={settings} />
         </section>
 
         {tasksLoading ? (
-          <LoadingPanel className="panel" description="正在同步调度器和任务摘要。" rows={5} title="读取任务状态" />
+          <LoadingPanel className="settings-task-loading" description="正在同步调度器和任务摘要。" rows={5} title="读取任务状态" />
         ) : (
           <TaskControlPanel
             scheduler={scheduler}
@@ -498,10 +531,16 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
             onRunJob={runJob}
           />
         )}
-      </div>
 
-      <section className="panel">
-        <PanelTitle title="系统配置" subtitle="保存后立即影响下一次手动或定时任务。" />
+      <section className="settings-config-shell">
+        <header className="settings-card-heading settings-config-heading">
+          <div>
+            <span>配置中心</span>
+            <h2>系统配置</h2>
+            <p>连接、来源、检索与自动化参数会自动保存，并作用于下一次任务。</p>
+          </div>
+          <em>{CONTROL_SAVE_STATUS_LABELS[saveStatus] || saveStatus}</em>
+        </header>
         <SettingsForm
           settings={settings}
           providers={providers}
@@ -517,7 +556,7 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
 
       <TaskHistoryPanel history={history} loading={tasksLoading} refreshing={historyQuery.refreshing} />
       <AboutPanel />
-
+      </main>
     </section>
   );
 }

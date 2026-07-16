@@ -480,6 +480,28 @@ export async function ensurePaperReportsForRecommendations(paperIds = null) {
 export async function getInbox() {
   await syncProjectPaperRecommendations();
   await ensurePaperReportsForRecommendations();
+  const projectNamesResult = await query(
+    `
+      SELECT r.paper_id, rp.name AS project_name
+      FROM project_paper_recommendations r
+      JOIN research_projects rp ON rp.id = r.project_id
+      WHERE r.state = 'pending'
+        AND rp.status NOT IN ('paused', 'archived')
+      ORDER BY
+        r.paper_id,
+        CASE r.relation_type WHEN 'direct' THEN 0 ELSE 1 END,
+        r.updated_at DESC,
+        rp.name
+    `
+  );
+  const projectNamesByPaper = new Map();
+  for (const row of projectNamesResult.rows || []) {
+    const paperId = Number(row.paper_id);
+    const names = projectNamesByPaper.get(paperId) || [];
+    const projectName = text(row.project_name);
+    if (projectName && !names.includes(projectName)) names.push(projectName);
+    projectNamesByPaper.set(paperId, names);
+  }
   const result = await query(
     `
       WITH pending_recommendations AS (
@@ -567,6 +589,7 @@ export async function getInbox() {
         score: numberValue(row.usefulness_score),
         project_id: Number(row.project_id),
         project_name: row.project_name || "",
+        project_names: projectNamesByPaper.get(Number(row.id)) || (row.project_name ? [row.project_name] : []),
         relation_type: row.relation_type || "",
         confidence: numberValue(row.confidence),
         reason: row.reason || "",

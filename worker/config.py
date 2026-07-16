@@ -88,6 +88,7 @@ class Settings:
     paper_report_model: str = ""
     project_chat_profile_provider_id: str = ""
     project_chat_profile_model: str = ""
+    project_chat_profile_concurrency: int = 2
     reader_chat_provider_id: str = ""
     reader_chat_model: str = ""
     reader_smart_save_provider_id: str = ""
@@ -147,11 +148,13 @@ def _bool(name: str, default: str = "false") -> bool:
     return env_bool(name, default)
 
 
-def _positive_int(name: str, default: int) -> int:
+def _positive_int(name: str, default: int, *, maximum: int | None = None) -> int:
     raw_value = env_value(name, str(default))
     value = int(raw_value or default)
     if value < 1:
         raise RuntimeError(f"{name} must be at least 1")
+    if maximum is not None and value > maximum:
+        raise RuntimeError(f"{name} must be at most {maximum}")
     return value
 
 
@@ -220,6 +223,7 @@ def load_settings() -> Settings:
         paper_report_model=env_value("PAPER_REPORT_MODEL", ""),
         project_chat_profile_provider_id=env_value("PROJECT_CHAT_PROFILE_PROVIDER_ID", ""),
         project_chat_profile_model=env_value("PROJECT_CHAT_PROFILE_MODEL", ""),
+        project_chat_profile_concurrency=_positive_int("PROJECT_CHAT_PROFILE_CONCURRENCY", 2, maximum=8),
         reader_chat_provider_id=env_value("READER_CHAT_PROVIDER_ID", ""),
         reader_chat_model=env_value("READER_CHAT_MODEL", ""),
         reader_smart_save_provider_id=env_value("READER_SMART_SAVE_PROVIDER_ID", ""),

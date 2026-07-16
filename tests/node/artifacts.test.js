@@ -6,6 +6,7 @@ import {
   getArtifactDetail,
   getArtifacts,
   normalizeArtifactLimit,
+  normalizeArtifactOffset,
   normalizeArtifactsFilter
 } from "../../server/artifacts.js";
 
@@ -37,10 +38,7 @@ function createArtifactsPool(rows = [artifactRow()]) {
       async query(sql, params = []) {
         calls.push({ sql, params });
         const normalized = String(sql).replace(/\s+/g, " ").trim().toUpperCase();
-        if (normalized.startsWith("SELECT * FROM ARTIFACTS WHERE ID = $1")) {
-          return { rows: rows.filter((row) => Number(row.id) === Number(params[0])) };
-        }
-        if (normalized.startsWith("SELECT * FROM ARTIFACTS")) {
+        function filteredRows() {
           let filtered = rows;
           if (normalized.includes("SCOPE_TYPE = $1")) {
             filtered = filtered.filter((row) => row.scope_type === params[0]);
@@ -54,11 +52,20 @@ function createArtifactsPool(rows = [artifactRow()]) {
           }
           if (normalized.includes("STATUS =")) {
             const statusIndex = params.findIndex((item) => item === "ready" || item === "draft");
-            if (statusIndex >= 0) {
-              filtered = filtered.filter((row) => row.status === params[statusIndex]);
-            }
+            if (statusIndex >= 0) filtered = filtered.filter((row) => row.status === params[statusIndex]);
           }
-          return { rows: filtered.slice(0, Number(params[params.length - 1])) };
+          return filtered;
+        }
+        if (normalized.startsWith("SELECT * FROM ARTIFACTS WHERE ID = $1")) {
+          return { rows: rows.filter((row) => Number(row.id) === Number(params[0])) };
+        }
+        if (normalized.startsWith("SELECT COUNT(*)::INT AS TOTAL FROM ARTIFACTS")) {
+          return { rows: [{ total: filteredRows().length }] };
+        }
+        if (normalized.startsWith("SELECT * FROM ARTIFACTS")) {
+          const limit = Number(params[params.length - 2]);
+          const offset = Number(params[params.length - 1]);
+          return { rows: filteredRows().slice(offset, offset + limit) };
         }
         throw new Error(`Unexpected SQL in artifacts test: ${sql}`);
       }
@@ -89,6 +96,7 @@ test("getArtifacts returns Python-compatible artifact payloads with parsed JSON"
     assert.deepEqual(data.items[0].source, { source_key: "project_index:7" });
     assert.deepEqual(data.items[1].content_json, {});
     assert.deepEqual(data.items[1].source, {});
+    assert.equal(data.total, 2);
   } finally {
     setPoolForTesting(null);
   }
@@ -110,9 +118,27 @@ test("getArtifacts applies filters and validates numeric values", async () => {
     });
     assert.equal(data.items.length, 1);
     assert.equal(data.items[0].title, "Project Index");
-    assert.deepEqual(fake.calls[0].params, ["project", 7, "project_index", "ready", 10]);
+    assert.deepEqual(fake.calls[0].params, ["project", 7, "project_index", "ready"]);
+    assert.deepEqual(fake.calls[1].params, ["project", 7, "project_index", "ready", 10, 0]);
     assert.throws(() => normalizeArtifactsFilter({ scope_id: "x" }), ValidationError);
     assert.throws(() => normalizeArtifactLimit("0"), ValidationError);
+    assert.throws(() => normalizeArtifactOffset("-1"), ValidationError);
+  } finally {
+    setPoolForTesting(null);
+  }
+});
+
+test("getArtifacts returns total independently from the requested page", async () => {
+  const fake = createArtifactsPool([
+    artifactRow({ id: "1", title: "First" }),
+    artifactRow({ id: "2", title: "Second" }),
+    artifactRow({ id: "3", title: "Third" })
+  ]);
+  setPoolForTesting(fake.pool);
+  try {
+    const data = await getArtifacts({ limit: "1", offset: "1" });
+    assert.equal(data.total, 3);
+    assert.deepEqual(data.items.map((item) => item.title), ["Second"]);
   } finally {
     setPoolForTesting(null);
   }

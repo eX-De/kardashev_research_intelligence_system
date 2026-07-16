@@ -233,6 +233,33 @@ test("getPaperLibrary hides archived by default and returns counts", async () =>
   }
 });
 
+test("getPaperLibrary filters papers by report presence", async () => {
+  const fake = createLibraryPool();
+  setPoolForTesting(fake.pool);
+  try {
+    await getPaperLibrary({ report_presence: "with", limit: "25", offset: "0" });
+    assert.match(fake.calls[0].sql, /EXISTS\s*\(\s*SELECT 1\s*FROM artifacts report_filter/i);
+    assert.match(fake.calls[0].sql, /report_filter\.artifact_type = 'paper_report'/i);
+    assert.match(fake.calls[0].sql, /report_filter\.status <> 'removed'/i);
+
+    fake.calls.length = 0;
+    await getPaperLibrary({ report_presence: "without", limit: "25", offset: "0" });
+    assert.match(fake.calls[0].sql, /NOT EXISTS\s*\(\s*SELECT 1\s*FROM artifacts report_filter/i);
+  } finally {
+    setPoolForTesting(null);
+  }
+});
+
+test("getPaperLibrary rejects invalid report presence", async () => {
+  const fake = createLibraryPool();
+  setPoolForTesting(fake.pool);
+  try {
+    await assert.rejects(() => getPaperLibrary({ report_presence: "maybe" }), ValidationError);
+  } finally {
+    setPoolForTesting(null);
+  }
+});
+
 test("getPaperLibraryDetail returns nested paper library shape with paper report", async () => {
   const fake = createLibraryPool();
   setPoolForTesting(fake.pool);

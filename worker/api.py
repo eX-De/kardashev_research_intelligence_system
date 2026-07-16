@@ -813,6 +813,26 @@ def unlink_project_note(conn: DbConnection, project_id: int, note_id: int) -> di
 def inbox(conn: DbConnection) -> dict[str, object]:
     sync_project_paper_recommendations(conn)
     ensure_paper_reports_for_recommendations(conn)
+    project_names_by_paper: dict[int, list[str]] = {}
+    for project_row in conn.execute(
+        """
+        SELECT r.paper_id, rp.name AS project_name
+        FROM project_paper_recommendations r
+        JOIN research_projects rp ON rp.id = r.project_id
+        WHERE r.state = 'pending'
+          AND rp.status NOT IN ('paused', 'archived')
+        ORDER BY
+          r.paper_id,
+          CASE r.relation_type WHEN 'direct' THEN 0 ELSE 1 END,
+          r.updated_at DESC,
+          rp.name
+        """
+    ).fetchall():
+        paper_id = int(project_row["paper_id"])
+        project_name = str(project_row["project_name"] or "").strip()
+        names = project_names_by_paper.setdefault(paper_id, [])
+        if project_name and project_name not in names:
+            names.append(project_name)
     rows = conn.execute(
         """
         WITH pending_recommendations AS (
@@ -903,6 +923,10 @@ def inbox(conn: DbConnection) -> dict[str, object]:
                 "score": float(row["usefulness_score"] or 0),
                 "project_id": int(row["project_id"]),
                 "project_name": row["project_name"],
+                "project_names": project_names_by_paper.get(
+                    int(row["id"]),
+                    [row["project_name"]] if row["project_name"] else [],
+                ),
                 "relation_type": row["relation_type"],
                 "confidence": float(row["confidence"] or 0),
                 "reason": row["reason"],

@@ -23,9 +23,18 @@ export function PapersWorkspaceView({
 }) {
   const currentSection = PAPER_SECTIONS[section] || PAPER_SECTIONS.inbox;
   const ActiveView = currentSection.component;
+  const workspaceClassName = [
+    "view",
+    "papers-workspace-view",
+    section === "inbox" ? "inbox-workspace-shell" : "",
+    section === "library" ? "library-workspace-shell" : "",
+    section === "reports" ? "reports-workspace-shell" : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return (
-    <section className="view papers-workspace-view">
+    <section className={workspaceClassName}>
       <ActiveView
         onOpenReportQueue={onOpenReportQueue}
         onSelectPaper={onSelectPaper}

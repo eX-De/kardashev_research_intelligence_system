@@ -18,10 +18,8 @@ import { friendlyObsidianMessage, postObsidianJson, useObsidianCapability } from
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
 import { LoadingPanel } from "./Loading.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
-
-function relationOptions(options) {
-  return options.map(([value, label]) => <option key={value} value={value}>{label}</option>);
-}
+import { VisionMetric } from "./VisionMetric.jsx";
+import { WorkspaceSelect } from "./WorkspaceSelect.jsx";
 
 const PROJECT_STATUS_LABELS = Object.fromEntries(PROJECT_STATUSES);
 const PROJECT_PAPER_RELATION_LABELS = Object.fromEntries(PROJECT_PAPER_RELATIONS);
@@ -77,27 +75,25 @@ function ProjectForm({ project, form, setForm, obsidianCapability, onPickPath, o
   const obsidianDisabled = !obsidianCapability?.available;
   const obsidianHint = obsidianCapability?.disabledReason || "请先配置可选 Obsidian 集成。";
   return (
-    <div className="detail-card project-settings-card">
-      <form className="project-form" onSubmit={onSubmit}>
-        <div className="detail-title">
-          <h2>{project?.id ? "项目设置" : "新建项目"}</h2>
-          <p className="muted">{project?.id ? `项目元数据和上下文输入 · Updated ${fmtDate(project.updated_at)}` : "先创建项目；论文判断、关联和实验进展会在保存后进入工作台。"}</p>
-        </div>
-        <label>
+    <section className="project-detail-section project-detail-settings">
+      <header className="project-detail-section-header">
+        <div><span>Project configuration</span><h2>{project?.id ? "项目设置" : "创建研究项目"}</h2></div>
+        <p>{project?.id ? `最后更新 ${fmtDate(project.updated_at)}` : "保存后进入完整项目工作区"}</p>
+      </header>
+      <form className="project-detail-form" onSubmit={onSubmit}>
+        <label className="project-detail-field">
           <span>项目名称</span>
           <input value={form.name} required onChange={(event) => update("name", event.target.value)} />
         </label>
-        <label>
+        <div className="project-detail-field">
           <span>状态</span>
-          <select value={form.status} onChange={(event) => update("status", event.target.value)}>
-            {PROJECT_STATUSES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-          </select>
-        </label>
-        <label>
+          <WorkspaceSelect ariaLabel="选择项目状态" onChange={(value) => update("status", value)} options={PROJECT_STATUSES} value={form.status} />
+        </div>
+        <label className="project-detail-field project-detail-field-wide">
           <span>关键词</span>
           <input value={form.keywords} placeholder="RAG,agent,scientific discovery" onChange={(event) => update("keywords", event.target.value)} />
         </label>
-        <label>
+        <label className="project-detail-field project-detail-field-wide">
           <span>原始项目上下文</span>
           <textarea
             value={form.raw_context}
@@ -106,7 +102,7 @@ function ProjectForm({ project, form, setForm, obsidianCapability, onPickPath, o
             rows={7}
           />
         </label>
-        <label className={obsidianDisabled ? "capability-disabled" : ""}>
+        <label className={`project-detail-field project-detail-field-wide ${obsidianDisabled ? "capability-disabled" : ""}`}>
           <span>Obsidian 项目主页</span>
           <div className="path-input-row">
             <input disabled={obsidianDisabled} value={form.obsidian_project_path} placeholder="Projects/Agentic RAG/Home.md" onChange={(event) => update("obsidian_project_path", event.target.value)} />
@@ -114,7 +110,7 @@ function ProjectForm({ project, form, setForm, obsidianCapability, onPickPath, o
           </div>
           {obsidianDisabled ? <small className="capability-hint">{obsidianHint}</small> : null}
         </label>
-        <label className={obsidianDisabled ? "capability-disabled" : ""}>
+        <label className={`project-detail-field project-detail-field-wide ${obsidianDisabled ? "capability-disabled" : ""}`}>
           <span>Obsidian 输出目录</span>
           <div className="path-input-row">
             <input disabled={obsidianDisabled} value={form.obsidian_output_dir} placeholder="Projects/Agentic RAG" onChange={(event) => update("obsidian_output_dir", event.target.value)} />
@@ -122,69 +118,70 @@ function ProjectForm({ project, form, setForm, obsidianCapability, onPickPath, o
           </div>
           {obsidianDisabled ? <small className="capability-hint">{obsidianHint}</small> : null}
         </label>
-        <div className="form-actions">
-          <button type="submit" className="primary">保存项目</button>
+        <div className="project-detail-form-actions project-detail-field-wide">
+          <p>保存会同步更新项目检索上下文。</p>
+          <button type="submit">保存项目 <i aria-hidden="true">→</i></button>
         </div>
       </form>
-    </div>
+    </section>
   );
 }
 
-function ProjectSummaryStrip({ project, pendingCount, linkedPaperCount, reportCount, contextCount, artifactCount }) {
-  const statusLabel = PROJECT_STATUS_LABELS[project?.status] || project?.status || "未设置";
+function ProjectDailyBrief({ artifact }) {
+  const profile = artifact?.content_json || {};
+  const findings = Array.isArray(profile.current_findings) ? profile.current_findings.slice(0, 3) : [];
+  const questions = Array.isArray(profile.open_questions) ? profile.open_questions.slice(0, 3) : [];
+  const model = artifact?.source?.model?.model || "每日任务";
   return (
-    <div className="project-summary-strip" aria-label="项目状态摘要">
-      <div className="project-summary-item primary">
-        <span>待判断论文</span>
-        <strong>{pendingCount}</strong>
-      </div>
-      <div className="project-summary-item">
-        <span>已关联论文</span>
-        <strong>{linkedPaperCount}</strong>
-      </div>
-      <div className="project-summary-item">
-        <span>实验进展</span>
-        <strong>{reportCount}</strong>
-      </div>
-      <div className="project-summary-item">
-        <span>Context</span>
-        <strong>{contextCount}</strong>
-      </div>
-      <div className="project-summary-item">
-        <span>项目状态</span>
-        <strong>{statusLabel}</strong>
-        <p>{artifactCount} outputs</p>
-      </div>
-    </div>
+    <article className={`project-daily-brief ${artifact ? "has-summary" : "is-empty"}`}>
+      <header>
+        <div><span><i aria-hidden="true" />每日项目摘要</span><h2>{artifact ? "今天从这里继续" : "等待首次项目摘要"}</h2></div>
+        {artifact ? <time>{fmtDate(artifact.updated_at)}</time> : <em>每日任务</em>}
+      </header>
+      {artifact ? (
+        <>
+          <p className="project-daily-brief-summary">{profile.summary || snippet(artifact.content_markdown || "", 520)}</p>
+          <div className="project-daily-brief-columns">
+            <section><span>已记录发现</span>{findings.length ? <ul>{findings.map((item) => <li key={item}>{item}</li>)}</ul> : <p>暂无可靠发现记录。</p>}</section>
+            <section><span>待解决问题</span>{questions.length ? <ul>{questions.map((item) => <li key={item}>{item}</li>)}</ul> : <p>暂无待解决问题。</p>}</section>
+          </div>
+          <footer><span>{model} · 自动更新</span><a href={`/artifacts/${artifact.id}`}>查看完整摘要 <i aria-hidden="true">→</i></a></footer>
+        </>
+      ) : (
+        <div className="project-daily-brief-empty">
+          <span aria-hidden="true">◎</span>
+          <div><strong>每日任务尚未生成项目 Chat 摘要</strong><p>运行每日任务后，这里会汇总项目目标、当前方法、已记录发现与下一步问题。</p></div>
+        </div>
+      )}
+    </article>
   );
 }
 
 function PendingPaperQueuePanel({ papers, evidenceByPaperId, onAcceptRecommendation }) {
   return (
-    <section className="panel project-match-panel pending-paper-panel">
-      <div className="panel-title">
+    <section className="project-detail-section project-pending-section">
+      <header className="project-detail-section-header">
         <div>
-          <h2>待判断论文</h2>
-          <p>来自论文 inbox 的项目级 pending 推荐；相似度匹配只作为解释证据。</p>
+          <span>Decision queue</span><h2>待判断论文</h2>
         </div>
-        <p>{papers.length} pending</p>
-      </div>
-      <div className="project-match-list">
+        <p>{papers.length} 篇等待决策</p>
+      </header>
+      <div className="project-detail-paper-list">
         {papers.length ? papers.map((paper) => {
           const relationType = paper.relation_type || "recommended";
           const evidence = evidenceByPaperId.get(Number(paper.id)) || [];
           const primaryEvidence = evidence[0] || null;
           return (
-            <article className="project-match-item" key={`${paper.id}-${paper.recommendation_updated_at || ""}`}>
-              <div className="project-match-head">
+            <article className="project-detail-paper-card" key={`${paper.id}-${paper.recommendation_updated_at || ""}`}>
+              <div className="project-detail-paper-head">
                 <div>
                   <strong>{paper.title}</strong>
-                  <p className="muted">{paper.arxiv_id} · {relationType} · usefulness {fmtScore(paper.score)}{paper.confidence ? ` · confidence ${fmtScore(paper.confidence)}` : ""}</p>
+                  <p>{paper.arxiv_id} · {relationType} · 匹配 {fmtScore(paper.score)}{paper.confidence ? ` · 置信度 ${fmtScore(paper.confidence)}` : ""}</p>
                 </div>
-                <div className="project-match-actions">
+                <div className="project-detail-paper-actions">
                   {paper.link ? <a href={paper.link} target="_blank" rel="noreferrer">arXiv</a> : null}
                   <a href={`/papers/inbox/${paper.id}`}>打开待判断</a>
-                  <div className="recommendation-quick-actions" aria-label="保存重要性">
+                  <div className="project-detail-importance" aria-label="保存重要性">
                     <span>保存</span>
                     <button type="button" onClick={() => onAcceptRecommendation(paper.id, "high")}>高</button>
                     <button type="button" onClick={() => onAcceptRecommendation(paper.id, "medium")}>中</button>
@@ -192,17 +189,17 @@ function PendingPaperQueuePanel({ papers, evidenceByPaperId, onAcceptRecommendat
                   </div>
                 </div>
               </div>
-              <p className="project-recommendation-reason"><span>推荐理由</span>{paper.reason || "暂无推荐理由。"}</p>
+              <p className="project-detail-paper-reason"><span>推荐理由</span>{paper.reason || "暂无推荐理由。"}</p>
               {primaryEvidence ? (
-                <div className="project-match-evidence">
+                <div className="project-detail-evidence">
                   <p><span>论文匹配片段</span>{snippet(primaryEvidence.arxiv_text || primaryEvidence.evidence?.arxiv_text)}</p>
                   <p><span>项目上下文片段</span>{snippet(`${primaryEvidence.note_title || ""} ${primaryEvidence.obsidian_heading || ""} ${primaryEvidence.obsidian_text || ""}`)}</p>
-                  <p className="muted">{primaryEvidence.note_path || "项目上下文"} · chunk {primaryEvidence.best_obsidian_chunk_id || ""}</p>
+                  <p>{primaryEvidence.note_path || "项目上下文"} · chunk {primaryEvidence.best_obsidian_chunk_id || ""}</p>
                 </div>
               ) : null}
             </article>
           );
-        }) : <p className="muted">暂无来自论文 inbox 的待判断推荐。运行每日任务或同步上下文后，这里会出现新的 pending 推荐。</p>}
+        }) : <div className="project-detail-empty"><strong>当前队列为空</strong><p>运行每日任务或同步上下文后，新的项目候选论文会出现在这里。</p></div>}
       </div>
     </section>
   );
@@ -212,38 +209,35 @@ function ExperimentProgressPanel({ reports, obsidianCapability, onExport }) {
   const exportDisabled = !obsidianCapability?.available;
   const obsidianHint = obsidianCapability?.disabledReason || "请先配置可选 Obsidian 集成。";
   return (
-    <section className="panel experiment-progress-panel">
-      <div className="panel-title">
-        <h2>实验进展</h2>
-        <p>{reports.length} reports</p>
-      </div>
-      <div className="experiment-report-list">
+    <section className="project-detail-section project-experiment-section">
+      <header className="project-detail-section-header"><div><span>Research outputs</span><h2>实验进展</h2></div><p>{reports.length} 份报告</p></header>
+      <div className="project-detail-report-list">
         {reports.length ? reports.map((report) => {
           const content = report.content_json || {};
           const reportJson = content.report_json || {};
           const sourceAgent = content.source_agent || report.source?.source_agent || "manual";
           const summary = reportJson.task_summary || reportJson.goal || reportJson.conclusion || snippet(report.content_markdown || "", 220);
           return (
-            <article className="experiment-report-item" key={report.id}>
-              <div className="experiment-report-head">
+            <article className="project-detail-report-card" key={report.id}>
+              <div className="project-detail-report-head">
                 <div>
                   <strong>{report.title}</strong>
-                  <p className="muted">{sourceAgent} · {fmtDate(report.updated_at)}{report.obsidian_path ? ` · ${report.obsidian_path}` : ""}</p>
+                  <p>{sourceAgent} · {fmtDate(report.updated_at)}{report.obsidian_path ? ` · ${report.obsidian_path}` : ""}</p>
                 </div>
-                <div className="experiment-report-actions">
+                <div className="project-detail-report-actions">
                   <a href={`/artifacts/${report.id}`}>打开产物</a>
                   <button disabled={exportDisabled} title={exportDisabled ? obsidianHint : undefined} type="button" onClick={() => onExport(report.id)}>导出</button>
                 </div>
               </div>
-              {summary ? <p className="summary">{summary}</p> : null}
+              {summary ? <p className="project-detail-report-summary">{summary}</p> : null}
               {report.content_markdown ? (
-                <div className="experiment-report-preview">
+                <div className="project-detail-report-preview">
                   <LazyMarkdownReport markdown={report.content_markdown.slice(0, 1400)} />
                 </div>
               ) : null}
             </article>
           );
-        }) : <p className="muted">暂无实验进展报告。</p>}
+        }) : <div className="project-detail-empty"><strong>暂无实验进展</strong><p>Agent 回传的实验报告会显示在这里。</p></div>}
       </div>
     </section>
   );
@@ -251,80 +245,82 @@ function ExperimentProgressPanel({ reports, obsidianCapability, onExport }) {
 
 function LinkedPapersPanel({ linkedPapers, onUnlinkPaper }) {
   return (
-    <section className="panel linked-papers-panel resource-panel">
-      <div className="panel-title">
+    <section className="project-detail-section project-linked-section">
+      <header className="project-detail-section-header">
         <div>
-          <h2>已关联论文</h2>
-          <p>已经进入这个项目知识资产的论文。</p>
+          <span>Paper collection</span><h2>已关联论文</h2>
         </div>
-        <p>{linkedPapers.length} papers</p>
-      </div>
-      <div className="linked-list">
+        <p>{linkedPapers.length} 篇论文</p>
+      </header>
+      <div className="project-detail-resource-list">
         {linkedPapers.length ? linkedPapers.map((paper) => (
-          <div className="linked-item" key={paper.id}>
+          <article className="project-detail-resource-item" key={paper.id}>
             <div>
               <strong>{paper.title}</strong>
-              <p className="muted">{PROJECT_PAPER_RELATION_LABELS[paper.relation] || paper.relation} · {paper.arxiv_id}{paper.project_score ? ` · score ${fmtScore(paper.project_score)}` : ""}</p>
-              {paper.note ? <p className="muted">{paper.note}</p> : null}
+              <p>{PROJECT_PAPER_RELATION_LABELS[paper.relation] || paper.relation} · {paper.arxiv_id}{paper.project_score ? ` · 匹配 ${fmtScore(paper.project_score)}` : ""}</p>
+              {paper.note ? <small>{paper.note}</small> : null}
             </div>
             <button type="button" onClick={() => onUnlinkPaper(paper.id)}>移除</button>
-          </div>
-        )) : <p className="muted">暂无关联论文。先在待判断论文里按重要性保存，或进入 /papers/inbox 完成处理。</p>}
+          </article>
+        )) : <div className="project-detail-empty"><strong>暂无关联论文</strong><p>从待判断队列保存论文后会进入这里。</p></div>}
       </div>
     </section>
   );
 }
 
 function ProjectContextPanel({ contextDocuments, linkedNotes, candidateNotes, onLinkNote, onUnlinkNote }) {
+  const [noteId, setNoteId] = useState("");
+  const [relation, setRelation] = useState("source");
+  useEffect(() => {
+    if (!candidateNotes.length) setNoteId("");
+    else if (!candidateNotes.some((note) => String(note.id) === String(noteId))) setNoteId(String(candidateNotes[0].id));
+  }, [candidateNotes, noteId]);
   return (
-    <section className="panel project-context-panel resource-panel">
-      <div className="panel-title">
+    <section className="project-detail-section project-context-section-card">
+      <header className="project-detail-section-header">
         <div>
-          <h2>Context</h2>
-          <p>推荐和判断用到的项目上下文，作为论文工作流的输入层。</p>
+          <span>Knowledge context</span><h2>项目上下文</h2>
         </div>
-        <p>{contextDocuments.length} docs · {linkedNotes.length} notes</p>
-      </div>
-      <div className="project-context-section">
+        <p>{contextDocuments.length} 文档 · {linkedNotes.length} 笔记</p>
+      </header>
+      <div className="project-detail-context-group">
         <h3>系统内上下文</h3>
-        <div className="linked-list">
+        <div className="project-detail-resource-list">
           {contextDocuments.length ? contextDocuments.map((document) => (
-            <div className="linked-item" key={`${document.document_id}-${document.relation}`}>
+            <article className="project-detail-resource-item" key={`${document.document_id}-${document.relation}`}>
               <div>
                 <strong>{document.title}</strong>
-                <p className="muted">{document.source_type} · {document.relation} · {document.chunk_count} chunks</p>
-                {document.excerpt ? <p className="muted">{snippet(document.excerpt, 160)}</p> : null}
+                <p>{document.source_type} · {document.relation} · {document.chunk_count} 个片段</p>
+                {document.excerpt ? <small>{snippet(document.excerpt, 160)}</small> : null}
               </div>
-            </div>
-          )) : <p className="muted">暂无系统内上下文文档。</p>}
+            </article>
+          )) : <div className="project-detail-empty compact"><p>暂无系统内上下文文档。</p></div>}
         </div>
       </div>
-      <div className="project-context-section">
+      <div className="project-detail-context-group">
         <h3>项目笔记</h3>
-        <form className="link-form" onSubmit={onLinkNote}>
-          <label>
+        <form className="project-detail-note-form" onSubmit={(event) => { event.preventDefault(); if (noteId) onLinkNote(noteId, relation); }}>
+          <div className="project-detail-field">
             <span>加入笔记</span>
-            <select name="note_id" disabled={!candidateNotes.length}>
-              {candidateNotes.length ? candidateNotes.map((note) => <option key={note.id} value={note.id}>{compactLabel(`${note.title} · ${note.path}`)}</option>) : <option value="">无可选笔记</option>}
-            </select>
-          </label>
-          <label>
+            <WorkspaceSelect ariaLabel="选择项目笔记" disabled={!candidateNotes.length} onChange={setNoteId} options={candidateNotes.length ? candidateNotes.map((note) => [String(note.id), compactLabel(`${note.title} · ${note.path}`)]) : [["", "无可选笔记"]]} value={noteId} />
+          </div>
+          <div className="project-detail-field">
             <span>关系</span>
-            <select name="relation" defaultValue="source">{relationOptions(PROJECT_NOTE_RELATIONS)}</select>
-          </label>
+            <WorkspaceSelect ariaLabel="选择笔记关系" onChange={setRelation} options={PROJECT_NOTE_RELATIONS} value={relation} />
+          </div>
           <button type="submit" disabled={!candidateNotes.length}>加入</button>
         </form>
-        <div className="linked-list">
+        <div className="project-detail-resource-list">
           {linkedNotes.length ? linkedNotes.map((note) => (
-            <div className="linked-item" key={note.id}>
+            <article className="project-detail-resource-item" key={note.id}>
               <div>
                 <strong>{note.title}</strong>
-                <p className="muted">{PROJECT_NOTE_RELATION_LABELS[note.relation] || note.relation} · {note.path}</p>
-                {note.note ? <p className="muted">{note.note}</p> : null}
+                <p>{PROJECT_NOTE_RELATION_LABELS[note.relation] || note.relation} · {note.path}</p>
+                {note.note ? <small>{note.note}</small> : null}
               </div>
               <button type="button" onClick={() => onUnlinkNote(note.id)}>移除</button>
-            </div>
-          )) : <p className="muted">暂无关联笔记。</p>}
+            </article>
+          )) : <div className="project-detail-empty compact"><p>暂无关联笔记。</p></div>}
         </div>
       </div>
     </section>
@@ -402,6 +398,10 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
   const artifacts = detail?.artifacts || [];
   const experimentReports = useMemo(
     () => artifacts.filter((artifact) => artifact.artifact_type === "experiment_report"),
+    [artifacts]
+  );
+  const dailyProjectSummary = useMemo(
+    () => artifacts.find((artifact) => artifact.artifact_type === "project_chat_profile" && artifact.status === "ready") || null,
     [artifacts]
   );
   const contextDocuments = detail?.context_documents || [];
@@ -532,12 +532,6 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
     }
   }
 
-  async function submitNoteLink(event) {
-    event.preventDefault();
-    const formData = new FormData(event.currentTarget);
-    await linkNoteById(formData.get("note_id"), formData.get("relation") || "source");
-  }
-
   async function unlink(type, id) {
     if (!projectId) return;
     try {
@@ -551,14 +545,21 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
   }
 
   return (
-    <section className="view project-view project-page">
-      <header className="project-dashboard-header">
-        <div>
-          <button type="button" onClick={onBack}>← 返回项目中心</button>
-          <h1>{title}</h1>
-          <p>{projectLoading ? "正在读取项目详情" : isNew ? "创建系统内项目配置；保存后进入论文工作台。" : `论文判断工作台 · ${linkedPapers.length} papers · ${linkedNotes.length} notes · ${artifacts.length} outputs`}</p>
+    <section className="view project-detail-view">
+      <header className="vision-topbar project-detail-topbar">
+        <div className="project-detail-title-group">
+          <button aria-label="返回项目中心" className="project-detail-back" type="button" onClick={onBack}>←</button>
+          <div className="vision-brand">
+            <span>{isNew ? "创建研究空间" : "项目研究空间"}</span>
+            <h1>{title}</h1>
+          </div>
         </div>
-        {!isNew ? <RefreshButton busy={projectQuery.loading || projectQuery.refreshing} onClick={() => refreshProject().catch((error) => setStatusMessage(error.message))} /> : null}
+        {!isNew ? (
+          <div className="vision-top-actions">
+            <span className={`vision-live-state ${["active", "exploring", "writing"].includes(project.status) ? "running" : "ready"}`}><i aria-hidden="true" />{PROJECT_STATUS_LABELS[project.status] || project.status || "未设置"}</span>
+            <RefreshButton busy={projectQuery.loading || projectQuery.refreshing} className="vision-refresh" onClick={() => refreshProject().catch((error) => setStatusMessage(error.message))} />
+          </div>
+        ) : null}
       </header>
 
       {projectLoading ? (
@@ -569,26 +570,38 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
           title="读取项目详情"
         />
       ) : (
-        <div className={`project-page-grid ${isNew ? "project-new-layout" : ""}`}>
+        <main className={`project-detail-layout ${isNew ? "is-new" : ""}`}>
           {isNew ? (
             <ProjectForm project={project} form={form} setForm={setForm} obsidianCapability={obsidianCapability} onPickPath={pickPath} onSubmit={saveProject} />
           ) : (
             <>
-              <ProjectSummaryStrip
-                artifactCount={artifacts.length}
-                contextCount={contextDocuments.length + linkedNotes.length}
-                linkedPaperCount={linkedPapers.length}
-                pendingCount={pendingPapers.length}
-                project={project}
-                reportCount={experimentReports.length}
-              />
-              <div className="project-workbench-grid">
+              <section className="project-detail-hero">
+                <div className="project-detail-intro">
+                  <span>Research workspace</span>
+                  <h2>{project.name}</h2>
+                  <p>{project.summary || project.goals || "这个项目尚未填写人工概述。可以在页面下方的项目设置中补充研究背景和目标。"}</p>
+                  <div className="project-detail-tags">
+                    {(project.keywords || []).length ? project.keywords.slice(0, 8).map((keyword) => <span key={keyword}>{keyword}</span>) : <span>暂无关键词</span>}
+                  </div>
+                  <footer><span>创建于 {fmtDate(project.created_at)}</span><span>更新于 {fmtDate(project.updated_at)}</span></footer>
+                </div>
+                <ProjectDailyBrief artifact={dailyProjectSummary} />
+              </section>
+
+              <section className="vision-stats project-detail-stats" aria-label="项目规模">
+                <VisionMetric hint="等待项目决策" label="待判断" tone="coral" value={pendingPapers.length} />
+                <VisionMetric hint="已进入项目资产" label="关联论文" tone="blue" value={linkedPapers.length} />
+                <VisionMetric hint={`${contextDocuments.length} 文档 · ${linkedNotes.length} 笔记`} label="知识上下文" tone="gold" value={contextDocuments.length + linkedNotes.length} />
+                <VisionMetric hint={`${experimentReports.length} 份实验报告`} label="研究产物" tone="violet" value={artifacts.length} />
+              </section>
+
+              <div className="project-detail-primary-grid">
                 <PendingPaperQueuePanel
                   evidenceByPaperId={evidenceByPaperId}
                   onAcceptRecommendation={acceptProjectRecommendation}
                   papers={pendingPapers}
                 />
-                <div className="project-workbench-side">
+                <div className="project-detail-side-stack">
                   <LinkedPapersPanel
                     linkedPapers={linkedPapers}
                     onUnlinkPaper={(id) => unlink("paper", id)}
@@ -596,19 +609,19 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
                   <ExperimentProgressPanel reports={experimentReports} obsidianCapability={obsidianCapability} onExport={exportArtifact} />
                 </div>
               </div>
-              <div className="project-secondary-grid">
-                <ProjectForm project={project} form={form} setForm={setForm} obsidianCapability={obsidianCapability} onPickPath={pickPath} onSubmit={saveProject} />
+              <div className="project-detail-secondary-grid">
                 <ProjectContextPanel
                   candidateNotes={candidateNotes}
                   contextDocuments={contextDocuments}
                   linkedNotes={linkedNotes}
-                  onLinkNote={submitNoteLink}
+                  onLinkNote={linkNoteById}
                   onUnlinkNote={(id) => unlink("note", id)}
                 />
+                <ProjectForm project={project} form={form} setForm={setForm} obsidianCapability={obsidianCapability} onPickPath={pickPath} onSubmit={saveProject} />
               </div>
             </>
           )}
-        </div>
+        </main>
       )}
     </section>
   );

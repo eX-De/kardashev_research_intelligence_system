@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 import {
   api,
@@ -14,6 +15,8 @@ import { friendlyObsidianMessage, postObsidianJson, useObsidianCapability } from
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
 import { InlineLoader, LoadingPanel } from "./Loading.jsx";
+import { WorkspaceDialog } from "./WorkspaceDialog.jsx";
+import { WorkspaceSelect } from "./WorkspaceSelect.jsx";
 
 const REPORT_STATUS_LABELS = {
   queued: "排队",
@@ -232,22 +235,25 @@ function ReaderRow({ active, deleting, item, onDelete, onSelect }) {
   const recommendationProjectNames = item.recommendation_project_names || [];
   const projectNames = linkedProjectNames.length ? linkedProjectNames : recommendationProjectNames;
   const projectCount = linkedProjectNames.length ? item.linked_project_count : item.recommendation_project_count;
+  function selectRow() {
+    onSelect(item.paper_id);
+  }
   return (
-    <article className={`report-row ${active ? "active" : ""}`} onClick={() => onSelect(item.paper_id)} role="button" tabIndex={0}>
-      <div className="report-row-main">
-        <div className="report-row-title">{item.title}</div>
-        <div className="report-row-meta">
-          <span>{item.arxiv_id}</span>
-          <span>TXT {item.text_status || "pending"}</span>
-          {projectNames.length ? <span>{linkedProjectNames.length ? "已关联" : "推荐"} {projectNames.slice(0, 2).join(", ")}</span> : null}
-          {projectCount > 2 ? <span>{projectCount} 个项目</span> : null}
-          {item.model ? <span>{item.model}</span> : null}
-          {item.updated_at ? <span>{fmtDate(item.updated_at)}</span> : null}
-        </div>
-        {item.error_message ? <p className="report-row-error">{item.error_message}</p> : null}
-      </div>
-      <div className="report-row-actions">
-        <span className={`status-pill report-status-${item.status}`}>{reportStatusLabel(item.status)}</span>
+    <article
+      className={`inbox-paper-row report-queue-paper-row ${active ? "active" : ""}`}
+      onClick={selectRow}
+      onKeyDown={(event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        selectRow();
+      }}
+      role="button"
+      tabIndex={0}
+    >
+      <div className="inbox-paper-row-head">
+        <span className="inbox-score">{item.arxiv_id || "本地论文"}</span>
+        <div className="inbox-paper-row-actions">
+          <span className={`inbox-report-status ${item.status || "missing"}`}>{reportStatusLabel(item.status)}</span>
         <button
           className={`danger queue-delete-button ${deleting ? "is-busy" : ""}`}
           disabled={!canDelete || deleting}
@@ -260,7 +266,23 @@ function ReaderRow({ active, deleting, item, onDelete, onSelect }) {
         >
           {deleting ? <InlineLoader compact label="删除中" /> : "删除"}
         </button>
+        </div>
       </div>
+      <h2>{item.title}</h2>
+      {projectNames.length ? (
+        <div className="inbox-project-match">
+          <strong>{linkedProjectNames.length ? "已关联项目" : "推荐项目"}</strong>
+          <div>{projectNames.slice(0, 3).map((name) => <span key={name}>{name}</span>)}</div>
+        </div>
+      ) : null}
+      <div className="inbox-paper-meta">
+        <span>{item.arxiv_id || "本地论文"}</span>
+        <span>全文 {item.text_status || "pending"}</span>
+        {projectCount > 3 ? <span>{projectCount} 个项目</span> : null}
+        {item.model ? <span>{item.model}</span> : null}
+        {item.updated_at ? <span>{fmtDate(item.updated_at)}</span> : null}
+      </div>
+      {item.error_message ? <p className="inbox-paper-error">{item.error_message}</p> : null}
     </article>
   );
 }
@@ -287,21 +309,23 @@ function ChatMessage({ deleting, message, onDelete }) {
       data-reader-message={persistedId ? "true" : undefined}
     >
       <div className="reader-message-header">
-        <strong>{roleLabel}</strong>
-        {sourceLabel ? <span>{sourceLabel}</span> : null}
-        {message.model ? <span>{message.model}</span> : null}
-        {message.created_at ? <span>{fmtDate(message.created_at)}</span> : null}
-        {message.streaming ? <span>streaming</span> : null}
-        {message.context?.reference_paper_ids?.length ? (
-          <span>参考论文 {message.context.reference_paper_ids.length}</span>
-        ) : null}
+        <div className="reader-message-identity">
+          <i className="reader-message-avatar" aria-hidden="true">{isAssistant ? "AI" : "你"}</i>
+          <div><strong>{roleLabel}</strong>{sourceLabel ? <span>{sourceLabel}</span> : null}</div>
+        </div>
+        <div className="reader-message-badges">
+          {message.model ? <span>{message.model}</span> : null}
+          {message.created_at ? <span>{fmtDate(message.created_at)}</span> : null}
+          {message.streaming ? <span>生成中</span> : null}
+          {message.context?.reference_paper_ids?.length ? <span>参考论文 {message.context.reference_paper_ids.length}</span> : null}
         {canDelete ? (
-          <button disabled={deleting} onClick={() => onDelete(persistedId)} type="button">
+          <button className="reader-message-delete" disabled={deleting} onClick={() => onDelete(persistedId)} type="button">
             {deleting ? "删除中" : "删除"}
           </button>
         ) : null}
+        </div>
       </div>
-      <div data-message-content="true">
+      <div className="reader-message-body" data-message-content="true">
         {isAssistant ? (
           message.content ? <LazyMarkdownReport markdown={message.content} /> : <p className="muted">...</p>
         ) : (
@@ -317,10 +341,11 @@ function ProjectLinkControl({ linkedProjects, linking, onLink, paperId, projects
   const linkedProjectNames = (linkedProjects || []).map((item) => item.project_name).filter(Boolean);
   const label = !projects.length ? "暂无项目" : linking ? "关联中..." : "手动关联到项目";
   return (
-    <div className="project-link-control">
+    <label className="project-link-control inbox-project-link-control">
+      <span>手动关联</span>
       <select
         aria-label="手动关联项目"
-        className="project-link-select"
+        className="project-link-select inbox-project-link-select"
         disabled={!projects.length || linking}
         onChange={(event) => onLink(paperId, event.target.value)}
         title="手动关联到项目"
@@ -333,7 +358,7 @@ function ProjectLinkControl({ linkedProjects, linking, onLink, paperId, projects
           </option>
         ))}
       </select>
-    </div>
+    </label>
   );
 }
 
@@ -375,7 +400,18 @@ function ReaderDetail({
   const [referenceDialogOpen, setReferenceDialogOpen] = useState(false);
   const [referenceQuery, setReferenceQuery] = useState("");
   const [draftReferenceIds, setDraftReferenceIds] = useState([]);
+  const [messageScroll, setMessageScroll] = useState({ max: 0, top: 0 });
   const messagesRef = useRef(null);
+
+  const updateMessageScroll = useCallback(() => {
+    const container = messagesRef.current;
+    if (!container) return;
+    const next = {
+      max: Math.max(0, container.scrollHeight - container.clientHeight),
+      top: Math.max(0, container.scrollTop)
+    };
+    setMessageScroll((current) => current.max === next.max && current.top === next.top ? current : next);
+  }, []);
 
   useEffect(() => {
     if (!selectedText) return undefined;
@@ -418,6 +454,57 @@ function ReaderDetail({
   useEffect(() => {
     if (activeTab !== "chat" && selectedText) resetFollowUpSelection();
   }, [activeTab, selectedText]);
+
+  useEffect(() => {
+    if (activeTab !== "chat") return undefined;
+    const container = messagesRef.current;
+    if (!container || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return undefined;
+    const messages = [...container.querySelectorAll("[data-reader-message], .reader-message")];
+    if (!messages.length) return undefined;
+    const revealMidpoint = () => {
+      const rect = container.getBoundingClientRect();
+      return rect.top + rect.height / 2;
+    };
+
+    messages.forEach((element, index) => {
+      element.style.setProperty("--reader-message-order", String(Math.min(index, 6)));
+      element.classList.add(element.getBoundingClientRect().top < revealMidpoint() ? "reveal-from-top" : "reveal-from-bottom");
+    });
+    container.classList.add("is-reveal-ready");
+
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) {
+          entry.target.classList.remove("is-scroll-visible");
+          return;
+        }
+        entry.target.classList.remove("reveal-from-top", "reveal-from-bottom");
+        entry.target.classList.add(entry.boundingClientRect.top < revealMidpoint() ? "reveal-from-top" : "reveal-from-bottom");
+        requestAnimationFrame(() => entry.target.classList.add("is-scroll-visible"));
+      });
+    }, { root: container, rootMargin: "-5% 0px -5% 0px", threshold: 0.08 });
+
+    messages.forEach((element) => observer.observe(element));
+    return () => {
+      observer.disconnect();
+      container.classList.remove("is-reveal-ready");
+      messages.forEach((element) => element.classList.remove("is-scroll-visible", "reveal-from-top", "reveal-from-bottom"));
+    };
+  }, [activeTab, displayedMessages.length]);
+
+  useEffect(() => {
+    if (activeTab !== "chat") return undefined;
+    const container = messagesRef.current;
+    if (!container) return undefined;
+    const frame = requestAnimationFrame(updateMessageScroll);
+    const resizeObserver = new ResizeObserver(updateMessageScroll);
+    resizeObserver.observe(container);
+    [...container.children].forEach((child) => resizeObserver.observe(child));
+    return () => {
+      cancelAnimationFrame(frame);
+      resizeObserver.disconnect();
+    };
+  }, [activeTab, displayedMessages.length, updateMessageScroll]);
 
   if (!detail?.paper) {
     return (
@@ -572,115 +659,126 @@ function ReaderDetail({
   }
 
   return (
-    <div className="detail-card reader-detail-card">
+    <div className="detail-card inbox-detail-card reader-detail-card reader-detail-transition">
       <div className="detail-main">
-        <div className="detail-title">
+        <div className="detail-title inbox-detail-title reader-detail-title">
+          <span className="inbox-detail-eyebrow">全文报告 · {paper.arxiv_id || "本地论文"}</span>
           <h2>{paper.title}</h2>
-          <p className="muted">
-            <a href={paper.link} target="_blank" rel="noreferrer">{paper.arxiv_id}</a>
-            {" · "}
-            {(paper.categories || []).join(", ") || "arXiv"}
+          <p className="inbox-detail-authors">
+            {(paper.authors || []).slice(0, 8).join(", ") || "作者信息暂无"}
           </p>
-          <p className="muted">TXT: {paper.text_status || "pending"}{paper.text_path ? ` · ${paper.text_path}` : ""}</p>
+          <div className="inbox-detail-meta">
+            <a href={paper.link} target="_blank" rel="noreferrer">{paper.arxiv_id}</a>
+            <span>{(paper.categories || []).join(" · ") || "arXiv"}</span>
+            <span>全文 {paper.text_status || "pending"}</span>
+          </div>
           {paper.pdf_path ? (
-            <p className="muted">
+            <div className="inbox-detail-meta reader-file-meta">
               <a href={`/api/reader/papers/${paper.id}/pdf`} target="_blank" rel="noreferrer">打开 PDF</a>
-              {" · "}
-              {paper.pdf_path}
-            </p>
+              <span>{paper.pdf_path}</span>
+            </div>
           ) : null}
         </div>
 
-        <div className="reader-tabs" role="tablist">
-          <button className={activeTab === "analysis" ? "active" : ""} onClick={() => onTabChange("analysis")} type="button">
-            解读报告
+        <div aria-label="论文详情视图" className="reader-tabs" role="tablist">
+          <button aria-selected={activeTab === "analysis"} className={activeTab === "analysis" ? "active" : ""} onClick={() => onTabChange("analysis")} role="tab" type="button">
+            <i aria-hidden="true">01</i><span><strong>解读报告</strong><small>REPORT</small></span>
           </button>
-          <button className={activeTab === "chat" ? "active" : ""} onClick={() => onTabChange("chat")} type="button">
-            Chat
+          <button aria-selected={activeTab === "chat"} className={activeTab === "chat" ? "active" : ""} onClick={() => onTabChange("chat")} role="tab" type="button">
+            <i aria-hidden="true">02</i><span><strong>Chat</strong><small>DISCUSS</small></span>
           </button>
-          <button className={activeTab === "meta" ? "active" : ""} onClick={() => onTabChange("meta")} type="button">
-            元信息
+          <button aria-selected={activeTab === "meta"} className={activeTab === "meta" ? "active" : ""} onClick={() => onTabChange("meta")} role="tab" type="button">
+            <i aria-hidden="true">03</i><span><strong>元信息</strong><small>METADATA</small></span>
           </button>
         </div>
 
         {activeTab === "analysis" ? (
-          <>
-            <div className="reader-action-strip">
+          <div className="reader-tab-panel reader-analysis-panel" role="tabpanel">
+            <section className="section inbox-content-section reader-report-section">
+              <header className="inbox-section-heading">
+                <div><span>深度阅读</span><h3>全文报告</h3></div>
+                <em>{reportStatusLabel(report.status)}</em>
+              </header>
               <div className={`report-state ${report.status || "missing"}`}>
                 <strong>{reportStatusLabel(report.status)}</strong>
                 {report.error_message ? <p>{report.error_message}</p> : null}
                 {report.model ? <p>{report.model_provider_id ? `${report.model_provider_id} · ` : ""}{report.model}</p> : null}
-                {report.updated_at ? <p>Updated: {fmtDate(report.updated_at)}</p> : null}
+                {report.updated_at ? <p>更新于 {fmtDate(report.updated_at)}</p> : null}
               </div>
-              <div className="detail-actions">
+              <div className="detail-actions inbox-primary-actions reader-report-actions">
                 <button
                   aria-label="智能保存到 Obsidian"
+                  className={ready ? "primary" : ""}
                   disabled={smartSaveDisabled}
                   onClick={() => onSave(paper.id)}
                   title={obsidianCapability?.available ? "用全文报告和 Chat 对话整理成 Obsidian 笔记" : obsidianHint}
                   type="button"
-                >
-                  智能保存
-                </button>
-                {!obsidianCapability?.available ? <p className="capability-hint">{obsidianHint}</p> : null}
+                >智能保存</button>
                 {report.status !== "processing" && report.status !== "queued" && !ready ? (
-                  <button disabled={busy} onClick={() => onGenerate(paper.id, false)} type="button">生成全文报告</button>
+                  <button className="primary" disabled={busy} onClick={() => onGenerate(paper.id, false)} type="button">生成全文报告</button>
                 ) : null}
-                {report.status === "queued" ? (
-                  <button disabled={busy} onClick={() => onCancel(paper.id)} type="button">取消排队</button>
-                ) : null}
-                {canRetry ? (
-                  <button disabled={busy} onClick={() => onRetry(paper.id)} type="button">重新入队</button>
-                ) : null}
+                {report.status === "queued" ? <button disabled={busy} onClick={() => onCancel(paper.id)} type="button">取消排队</button> : null}
+                {canRetry ? <button className="primary" disabled={busy} onClick={() => onRetry(paper.id)} type="button">重新入队</button> : null}
               </div>
-            </div>
-            <div className="section">
-              <h3>项目关联</h3>
-              <ProjectLinkControl
-                linkedProjects={linkedProjects}
-                linking={linkingProject}
-                onLink={onProjectLink}
-                paperId={paper.id}
-                projects={projects}
-              />
+              {!obsidianCapability?.available ? <p className="inbox-decision-hint capability-hint">{obsidianHint}</p> : null}
+              <div className="reader-report-content">
+                {ready ? <LazyMarkdownReport markdown={report.report_markdown} /> : <p className="muted">报告尚未生成。</p>}
+              </div>
+            </section>
+            <section className="section inbox-content-section reader-project-section">
+              <header className="inbox-section-heading">
+                <div><span>推荐依据</span><h3>项目关联</h3></div>
+                <em>{linkedProjects.length + recommendations.length}</em>
+              </header>
+              <ProjectLinkControl linkedProjects={linkedProjects} linking={linkingProject} onLink={onProjectLink} paperId={paper.id} projects={projects} />
               <div className="evidence-list">
                 {linkedProjects.map((project) => (
-                  <article className="evidence" key={`linked-${project.project_id}`}>
-                    <strong>{project.project_name} · {project.relation} · 已关联</strong>
-                    <p>{project.note || "手动关联到项目。"}</p>
-                  </article>
+                  <article className="evidence" key={`linked-${project.project_id}`}><strong>{project.project_name} · {project.relation} · 已关联</strong><p>{project.note || "手动关联到项目。"}</p></article>
                 ))}
                 {recommendations.map((recommendation) => (
-                  <article className="evidence" key={`${recommendation.project_id}-${recommendation.state}`}>
-                    <strong>{recommendation.project_name} · {recommendation.relation_type} · {recommendation.state}</strong>
-                    <p>{recommendation.reason || "暂无推荐理由。"}</p>
-                  </article>
+                  <article className="evidence" key={`${recommendation.project_id}-${recommendation.state}`}><strong>{recommendation.project_name} · {recommendation.relation_type} · {recommendation.state}</strong><p>{recommendation.reason || "暂无推荐理由。"}</p></article>
                 ))}
                 {!linkedProjects.length && !recommendations.length ? <p className="summary">暂无项目级推荐。</p> : null}
               </div>
-            </div>
-            <div className="section">
-              <h3>全文报告</h3>
-              {ready ? <LazyMarkdownReport markdown={report.report_markdown} /> : <p className="muted">报告尚未生成。</p>}
-            </div>
-          </>
+            </section>
+          </div>
         ) : null}
 
         {activeTab === "chat" ? (
-          <section className="reader-chat">
-            <div className="reader-messages" onKeyUp={updateSelectedText} onMouseUp={updateSelectedText} ref={messagesRef}>
-              {displayedMessages.length ? displayedMessages.map((item) => (
-                <ChatMessage
-                  deleting={deletingMessageId === Number(item.id)}
-                  key={item.id}
-                  message={item}
-                  onDelete={onDeleteMessage}
-                />
-              )) : <p className="muted">还没有对话。发送问题后会基于论文全文回答。</p>}
+          <section className="reader-chat inbox-content-section" role="tabpanel">
+            <header className="inbox-section-heading reader-chat-heading">
+              <div><span>论文对话</span><h3>全文问答</h3></div>
+              <em>{displayedMessages.length} 条</em>
+            </header>
+            <div className="reader-messages-shell">
+              <div className="reader-messages" onKeyUp={updateSelectedText} onMouseUp={updateSelectedText} onScroll={updateMessageScroll} ref={messagesRef}>
+                {displayedMessages.length ? displayedMessages.map((item) => (
+                  <ChatMessage
+                    deleting={deletingMessageId === Number(item.id)}
+                    key={item.id}
+                    message={item}
+                    onDelete={onDeleteMessage}
+                  />
+                )) : <p className="muted">还没有对话。发送问题后会基于论文全文回答。</p>}
+              </div>
+              <input
+                aria-label="滚动 Chat 对话记录"
+                className={`reader-message-scrollbar ${messageScroll.max > 0 ? "is-visible" : ""}`}
+                max={Math.max(1, messageScroll.max)}
+                min="0"
+                onChange={(event) => {
+                  if (!messagesRef.current) return;
+                  messagesRef.current.scrollTop = Number(event.target.value);
+                  updateMessageScroll();
+                }}
+                step="1"
+                type="range"
+                value={Math.min(messageScroll.top, Math.max(1, messageScroll.max))}
+              />
             </div>
-            {selectedText && followUpPanelPosition ? (
+            {selectedText && followUpPanelPosition ? createPortal((
               <div
-                className="reader-followups reader-followups-floating"
+                className="reader-followups reader-followups-floating vision-reader-followups"
                 onMouseDown={(event) => event.preventDefault()}
                 style={{
                   left: `${followUpPanelPosition.left}px`,
@@ -692,7 +790,7 @@ function ReaderDetail({
                   <strong>追问建议</strong>
                   <button onClick={clearSelection} type="button">清除</button>
                 </div>
-                <p>{selectedText.length > 260 ? `${selectedText.slice(0, 260)}...` : selectedText}</p>
+                <p className="reader-followups-selection">{selectedText.length > 260 ? `${selectedText.slice(0, 260)}...` : selectedText}</p>
                 <div className="reader-followups-actions">
                   <button disabled={generatingQuestions || busy} onClick={generateQuestions} type="button">
                     {generatingQuestions ? <InlineLoader compact label="生成中" /> : "生成追问"}
@@ -709,7 +807,7 @@ function ReaderDetail({
                   </div>
                 ) : null}
               </div>
-            ) : null}
+            ), document.body) : null}
             <div className="reader-chat-composer">
               <div className="reader-chat-toolbar">
                 <label className="reader-chat-model-control">
@@ -741,6 +839,7 @@ function ReaderDetail({
                     onChange={(event) => onProjectContextChange(event.target.checked)}
                     type="checkbox"
                   />
+                  <i aria-hidden="true" className="reader-context-checkmark">✓</i>
                   <span>
                     使用项目上下文
                     <small>{hasProjectContext ? `${contextProjectNames.length} 个项目` : "没有项目"}</small>
@@ -784,62 +883,75 @@ function ReaderDetail({
                   {busy ? <InlineLoader compact label="发送中" /> : "发送"}
                 </button>
               </form>
-              {referenceDialogOpen ? (
-                <div className="modal-backdrop" role="presentation">
-                  <article aria-modal="true" className="modal-dialog reader-reference-dialog" role="dialog">
-                    <header className="modal-header">
-                      <div>
-                        <h2>参考论文上下文</h2>
-                        <p>选择最多 3 篇全文可用论文；发送问题时会注入完整 TXT。</p>
-                      </div>
-                      <button className="modal-close" onClick={() => setReferenceDialogOpen(false)} type="button">×</button>
-                    </header>
-                    <div className="modal-body reader-reference-body">
-                      <input
-                        autoFocus
-                        onChange={(event) => setReferenceQuery(event.target.value)}
-                        placeholder="搜索标题或 arXiv ID"
-                        type="search"
-                        value={referenceQuery}
-                      />
-                      <p className="muted">已选择 {draftReferenceIds.length}/3</p>
-                      <div className="reader-reference-list">
-                        {visibleReferenceCandidates.length ? visibleReferenceCandidates.map((candidate) => {
-                          const candidateId = Number(candidate.paper_id);
-                          const selected = draftReferenceIds.includes(candidateId);
-                          const available = candidate.text_status === "complete";
-                          return (
-                            <label className={!available ? "is-disabled" : ""} key={candidateId}>
-                              <input
-                                checked={selected}
-                                disabled={!available || (!selected && draftReferenceIds.length >= 3)}
-                                onChange={() => toggleReferencePaper(candidateId)}
-                                type="checkbox"
-                              />
-                              <span>
-                                <strong>{candidate.title || "未命名论文"}</strong>
-                                <small>{candidate.arxiv_id || `Paper ${candidateId}`} · {available ? "全文可用" : "尚未提取全文"}</small>
-                              </span>
-                            </label>
-                          );
-                        }) : <p className="muted">没有匹配的论文。</p>}
-                      </div>
-                    </div>
-                    <div className="modal-actions">
-                      <button onClick={() => setReferenceDialogOpen(false)} type="button">取消</button>
-                      <button className="primary" disabled={savingReferencePapers} onClick={saveReferencePapers} type="button">
-                        {savingReferencePapers ? "保存中..." : "完成"}
+              <WorkspaceDialog
+                className="reference-picker-dialog"
+                description="选择最多 3 篇全文可用论文；发送问题时会注入完整文本作为对照上下文。"
+                eyebrow="Reader context"
+                footer={(
+                  <>
+                    <span>已选择 <strong>{draftReferenceIds.length}</strong> / 3</span>
+                    <div>
+                      <button disabled={savingReferencePapers} onClick={() => setReferenceDialogOpen(false)} type="button">取消</button>
+                      <button className="workspace-dialog-primary" disabled={savingReferencePapers} onClick={saveReferencePapers} type="button">
+                        {savingReferencePapers ? "保存中…" : "应用参考论文"}<i aria-hidden="true">→</i>
                       </button>
                     </div>
-                  </article>
+                  </>
+                )}
+                icon="RF"
+                onClose={() => {
+                  if (!savingReferencePapers) setReferenceDialogOpen(false);
+                }}
+                open={referenceDialogOpen}
+                title="添加参考论文"
+              >
+                <div className="reader-reference-body workspace-reference-body">
+                  <label className="workspace-reference-search">
+                    <svg aria-hidden="true" fill="none" viewBox="0 0 20 20" stroke="currentColor" strokeLinecap="round" strokeWidth="1.7"><circle cx="8.5" cy="8.5" r="5" /><path d="m12.2 12.2 4 4" /></svg>
+                    <input
+                      autoFocus
+                      onChange={(event) => setReferenceQuery(event.target.value)}
+                      placeholder="搜索标题或 arXiv ID"
+                      type="search"
+                      value={referenceQuery}
+                    />
+                    <span>{visibleReferenceCandidates.length} 篇</span>
+                  </label>
+                  <div className="reader-reference-list">
+                    {visibleReferenceCandidates.length ? visibleReferenceCandidates.map((candidate) => {
+                      const candidateId = Number(candidate.paper_id);
+                      const selected = draftReferenceIds.includes(candidateId);
+                      const available = candidate.text_status === "complete";
+                      return (
+                        <label className={`${selected ? "selected" : ""} ${!available ? "is-disabled" : ""}`} key={candidateId}>
+                          <input
+                            checked={selected}
+                            disabled={!available || (!selected && draftReferenceIds.length >= 3)}
+                            onChange={() => toggleReferencePaper(candidateId)}
+                            type="checkbox"
+                          />
+                          <i aria-hidden="true" className="reader-reference-checkmark">✓</i>
+                          <span>
+                            <strong>{candidate.title || "未命名论文"}</strong>
+                            <small>{candidate.arxiv_id || `Paper ${candidateId}`} · {available ? "全文可用" : "尚未提取全文"}</small>
+                          </span>
+                        </label>
+                      );
+                    }) : <p className="workspace-dialog-empty">没有匹配的论文。</p>}
+                  </div>
                 </div>
-              ) : null}
+              </WorkspaceDialog>
             </div>
           </section>
         ) : null}
 
         {activeTab === "meta" ? (
-          <section className="reader-meta-grid">
+          <section className="reader-meta-section inbox-content-section" role="tabpanel">
+            <header className="inbox-section-heading reader-meta-heading">
+              <div><span>数据档案</span><h3>论文元信息</h3></div>
+              <em>8 项</em>
+            </header>
+            <div className="reader-meta-grid">
             <div className="reader-meta-item wide">
               <span>标题</span>
               <strong>{paper.title || "未记录"}</strong>
@@ -866,11 +978,12 @@ function ReaderDetail({
             </div>
             <div className="reader-meta-item wide">
               <span>TXT 路径</span>
-              <strong>{paper.text_path || "未生成"}</strong>
+              <strong className="reader-meta-value is-path">{paper.text_path || "未生成"}</strong>
             </div>
             <div className="reader-meta-item wide">
               <span>PDF 路径</span>
-              <strong>{paper.pdf_path || "未缓存"}</strong>
+              <strong className="reader-meta-value is-path">{paper.pdf_path || "未缓存"}</strong>
+            </div>
             </div>
           </section>
         ) : null}
@@ -959,7 +1072,8 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
   ), [items, statusFilter]);
   const hasQueueSearch = Boolean(queueSearchQuery);
   const queueSearchPending = queueQuery.trim() !== queueSearchQuery;
-  const queueActiveFilterCount = queueQuery.trim() ? 1 : 0;
+  const queueActiveFilterCount = [queueQuery.trim(), statusFilter !== "all"].filter(Boolean).length;
+  const activeReportCount = Number(stats.queued || 0) + Number(stats.processing || 0);
 
   const refresh = useCallback(async () => {
     const [data] = await Promise.all([
@@ -1367,79 +1481,39 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
   }
 
   return (
-    <section className="view report-queue-view reader-view">
-      <header className="reader-queue-header">
-        <div>
+    <section className="view report-queue-view reader-view vision-inbox vision-reports">
+      <header className="vision-topbar reader-queue-header reports-topbar">
+        <div className="vision-brand">
+          <span>论文工作区</span>
           <h1>报告队列</h1>
-          <p className="muted">
-            自动生成{queueStatus.enabled ? "已启用" : "未启用"}
-            {queueStatus.concurrency ? ` · 并发 ${queueStatus.active || 0}/${queueStatus.concurrency}` : ""}
-            {queueStatus.last_skip_reason ? ` · ${queueStatus.last_skip_reason}` : ""}
-          </p>
         </div>
-        <div className="reader-queue-actions">
-          <button onClick={() => setImportOpen((current) => !current)} type="button">
-            {importOpen ? "收起导入" : "导入论文"}
+        <div className="vision-top-actions reader-queue-actions">
+          <span className={`vision-live-state ${queueStatus.active ? "running" : "ready"}`}>
+            <i aria-hidden="true" />
+            {queueStatus.enabled ? `自动生成 · ${queueStatus.active || 0}/${queueStatus.concurrency || 0}` : "自动生成未启用"}
+          </span>
+          <RefreshButton className="vision-refresh" onClick={() => refresh().catch((error) => setStatusMessage(error.message))} />
+          <button className="workspace-primary-action" onClick={() => setImportOpen(true)} type="button">
+            <span aria-hidden="true">＋</span>导入论文
           </button>
-          <RefreshButton onClick={() => refresh().catch((error) => setStatusMessage(error.message))} />
         </div>
       </header>
 
-      <div className="reader-queue-filters" role="tablist" aria-label="报告状态筛选">
-        {REPORT_FILTERS.map(([status, label]) => (
-          <button className={statusFilter === status ? "active" : ""} key={status} onClick={() => setStatusFilter(status)} type="button">
-            <span>{label}</span>
-            <strong>{status === "all" ? stats.total || items.length : stats[status] || 0}</strong>
-          </button>
-        ))}
-      </div>
+      <section className="inbox-summary-strip reports-summary-strip" aria-label="报告队列概览">
+        <div><span>队列任务</span><strong>{loading ? "—" : stats.total || items.length}</strong><p>全部全文报告</p></div>
+        <div><span>正在处理</span><strong>{loading ? "—" : activeReportCount}</strong><p>排队与生成中</p></div>
+        <div><span>报告就绪</span><strong>{loading ? "—" : stats.done || 0}</strong><p>可直接深度阅读</p></div>
+      </section>
 
-      {importOpen ? (
-        <div className="reader-import-drawer">
-          <form className="reader-import-block" onSubmit={submitUrls}>
-            <label>
-              <span>导入 arXiv URL</span>
-              <textarea
-                disabled={importBusy}
-                onChange={(event) => setUrls(event.target.value)}
-                placeholder="https://arxiv.org/abs/..."
-                value={urls}
-              />
-            </label>
-            <button className={importBusy ? "is-busy" : undefined} disabled={importBusy || !urls.trim()} type="submit">
-              {importBusy ? <InlineLoader compact label="导入中" /> : "导入 URL"}
-            </button>
-          </form>
-          <form className="reader-import-block" onSubmit={submitPdf}>
-            <label>
-              <span>导入本地 PDF</span>
-              <input
-                accept="application/pdf,.pdf"
-                disabled={importBusy}
-                multiple
-                onChange={(event) => setSelectedFiles([...event.target.files || []])}
-                type="file"
-              />
-            </label>
-            <button className={importBusy ? "is-busy" : undefined} disabled={importBusy || !selectedFiles.length} type="submit">
-              {importBusy ? <InlineLoader compact label="导入中" /> : `导入 PDF${selectedFiles.length ? ` (${selectedFiles.length})` : ""}`}
-            </button>
-          </form>
-        </div>
-      ) : null}
-
-      <div className="reader-workspace">
-        <section className="report-list-panel" aria-label="全文报告队列">
-          <header className="queue-list-header">
+      <div className="reader-workspace inbox-workspace-grid">
+        <section className="inbox-panel report-queue-list-panel" aria-label="全文报告队列">
+          <header className="inbox-list-heading queue-list-header">
             <div>
+              <span>报告任务</span>
               <h2>队列列表</h2>
-              <p className="muted">
-                {loading || queueSearchPending
-                  ? "读取中"
-                  : `${visibleItems.length} / ${items.length} 篇${hasQueueSearch ? "匹配" : ""}`}
-              </p>
+              <p>选择论文后在右侧阅读报告或继续对话</p>
             </div>
-            <div className="paper-filter-summary reader-queue-filter-summary">
+            <div className="inbox-list-heading-actions reader-queue-filter-summary">
               <button
                 aria-controls="reader-queue-filter-panel"
                 aria-expanded={queueFiltersOpen}
@@ -1449,11 +1523,21 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
               >
                 {queueFiltersOpen ? "收起筛选" : `筛选${queueActiveFilterCount ? ` (${queueActiveFilterCount})` : ""}`}
               </button>
+              <em>{loading || queueSearchPending ? "…" : visibleItems.length}</em>
             </div>
           </header>
           {queueFiltersOpen ? (
-            <div className="library-toolbar paper-library-toolbar reader-queue-filter-panel" id="reader-queue-filter-panel" aria-label="报告队列筛选">
-              <label className="library-filter-control paper-filter-control paper-search-control reader-queue-search-control">
+            <div className="inbox-list-filters reader-queue-filter-panel" id="reader-queue-filter-panel" aria-label="报告队列筛选">
+              <div className="inbox-filter-control reader-queue-status-control">
+                <span>状态</span>
+                <WorkspaceSelect
+                  ariaLabel="筛选报告状态"
+                  onChange={setStatusFilter}
+                  options={REPORT_FILTERS}
+                  value={statusFilter}
+                />
+              </div>
+              <label className="inbox-filter-control inbox-filter-search reader-queue-search-control">
                 <span>搜索</span>
                 <input
                   disabled={loading && !items.length}
@@ -1465,7 +1549,7 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
               </label>
             </div>
           ) : null}
-          <div className="report-list">
+          <div className="paper-list inbox-paper-list report-queue-paper-list">
             {loading ? (
               <LoadingPanel compact rows={8} title="读取队列列表" />
             ) : visibleItems.length ? visibleItems.map((item) => (
@@ -1500,7 +1584,7 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
           </div>
         </section>
 
-        <section className="detail-panel" aria-label="报告队列详情">
+        <section className="detail-panel inbox-detail-panel reader-detail-panel" aria-label="报告队列详情">
           {loading || detailLoading ? (
             <LoadingPanel
               description={detailLoading ? "正在读取所选论文的报告、Chat 记录和项目关联。" : "正在读取报告详情、阅读设置和项目关联。"}
@@ -1515,6 +1599,7 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
               deletingMessageId={deletingMessageId}
               detail={detail}
               displayedMessages={displayedMessages}
+              key={detail?.paper?.id || "empty"}
               linkingProject={linkingProjectPaperId === detail?.paper?.id}
               message={message}
               obsidianCapability={obsidianCapability}
@@ -1543,6 +1628,67 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
           )}
         </section>
       </div>
+      <WorkspaceDialog
+        className="reader-import-dialog"
+        description="通过 arXiv 链接或本地 PDF 建立全文报告任务；导入完成后会出现在报告队列中。"
+        eyebrow="Paper intake"
+        footer={(
+          <>
+            <span>支持批量导入，PDF 可一次选择多个文件</span>
+            <div>
+              <button disabled={importBusy} onClick={() => setImportOpen(false)} type="button">关闭</button>
+            </div>
+          </>
+        )}
+        icon="IN"
+        onClose={() => { if (!importBusy) setImportOpen(false); }}
+        open={importOpen}
+        title="导入论文"
+      >
+        <div className="reader-import-dialog-body">
+          <form className="reader-import-method" onSubmit={submitUrls}>
+            <header>
+              <i aria-hidden="true">URL</i>
+              <div><span>远程论文</span><h3>导入 arXiv 链接</h3><p>每行填写一个论文链接，可批量创建全文任务。</p></div>
+            </header>
+            <label className="workspace-field">
+              <span>arXiv URL</span>
+              <textarea
+                disabled={importBusy}
+                onChange={(event) => setUrls(event.target.value)}
+                placeholder={"https://arxiv.org/abs/2401.00001\nhttps://arxiv.org/abs/2401.00002"}
+                value={urls}
+              />
+            </label>
+            <button className="reader-import-submit" disabled={importBusy || !urls.trim()} type="submit">
+              {importBusy ? <InlineLoader compact label="导入中" /> : <>导入 URL <i aria-hidden="true">→</i></>}
+            </button>
+          </form>
+          <form className="reader-import-method" onSubmit={submitPdf}>
+            <header>
+              <i aria-hidden="true">PDF</i>
+              <div><span>本地文件</span><h3>上传论文 PDF</h3><p>选择一篇或多篇 PDF，系统会提取全文并生成任务。</p></div>
+            </header>
+            <label className="reader-import-file-picker">
+              <input
+                accept="application/pdf,.pdf"
+                disabled={importBusy}
+                multiple
+                onChange={(event) => setSelectedFiles([...event.target.files || []])}
+                type="file"
+              />
+              <i aria-hidden="true">＋</i>
+              <span>
+                <strong>{selectedFiles.length ? `已选择 ${selectedFiles.length} 个 PDF` : "选择本地 PDF"}</strong>
+                <small>{selectedFiles.length ? selectedFiles.map((file) => file.name).join("、") : "支持多选，仅接受 PDF 文件"}</small>
+              </span>
+            </label>
+            <button className="reader-import-submit" disabled={importBusy || !selectedFiles.length} type="submit">
+              {importBusy ? <InlineLoader compact label="导入中" /> : <>导入 PDF{selectedFiles.length ? ` (${selectedFiles.length})` : ""} <i aria-hidden="true">→</i></>}
+            </button>
+          </form>
+        </div>
+      </WorkspaceDialog>
     </section>
   );
 }

@@ -38,7 +38,8 @@ export const INT_FIELDS = new Set([
   "rag_prefilter_max_keep",
   "scheduler_interval_hours",
   "paper_report_queue_concurrency",
-  "embedding_concurrency"
+  "embedding_concurrency",
+  "project_chat_profile_concurrency"
 ]);
 
 export const FLOAT_FIELDS = new Set([
@@ -153,6 +154,7 @@ const DATACLASS_SETTING_FIELDS = new Set([
   "paper_report_model",
   "project_chat_profile_provider_id",
   "project_chat_profile_model",
+  "project_chat_profile_concurrency",
   "reader_chat_provider_id",
   "reader_chat_model",
   "reader_smart_save_provider_id",
@@ -229,10 +231,13 @@ function integerOrDefault(value, defaultValue, field) {
   return parseInteger(pythonOr(value, defaultValue), field);
 }
 
-function positiveInteger(value, defaultValue, field) {
+function positiveInteger(value, defaultValue, field, maximum = null) {
   const source = value === null || value === undefined || String(value).trim() === "" ? defaultValue : value;
   const parsed = parseInteger(source, field);
   if (parsed < 1) throw new ValidationError(`${field} must be at least 1`);
+  if (maximum !== null && parsed > maximum) {
+    throw new ValidationError(`${field} must be at most ${maximum}`);
+  }
   return parsed;
 }
 
@@ -382,6 +387,12 @@ export function loadBaseSettingsFromEnv() {
     paper_report_model: envValue("PAPER_REPORT_MODEL", ""),
     project_chat_profile_provider_id: envValue("PROJECT_CHAT_PROFILE_PROVIDER_ID", ""),
     project_chat_profile_model: envValue("PROJECT_CHAT_PROFILE_MODEL", ""),
+    project_chat_profile_concurrency: positiveInteger(
+      envValue("PROJECT_CHAT_PROFILE_CONCURRENCY", "2"),
+      2,
+      "project_chat_profile_concurrency",
+      8
+    ),
     reader_chat_provider_id: envValue("READER_CHAT_PROVIDER_ID", ""),
     reader_chat_model: envValue("READER_CHAT_MODEL", ""),
     reader_smart_save_provider_id: envValue("READER_SMART_SAVE_PROVIDER_ID", ""),
@@ -417,9 +428,13 @@ export function applyStoredSettings(stored, baseSettings = loadBaseSettingsFromE
   }
   for (const field of INT_FIELDS) {
     if (hasOwn(stored, field) && DATACLASS_SETTING_FIELDS.has(field)) {
-      settings[field] = field === "embedding_concurrency"
-        ? positiveInteger(stored[field], settings.embedding_concurrency || 2, field)
-        : parseInteger(stored[field], field);
+      if (field === "embedding_concurrency") {
+        settings[field] = positiveInteger(stored[field], settings.embedding_concurrency || 2, field);
+      } else if (field === "project_chat_profile_concurrency") {
+        settings[field] = positiveInteger(stored[field], settings.project_chat_profile_concurrency || 2, field, 8);
+      } else {
+        settings[field] = parseInteger(stored[field], field);
+      }
     }
   }
   for (const field of FLOAT_FIELDS) {
@@ -495,6 +510,16 @@ export function settingsPayloadFromStored(stored = {}) {
     ),
     project_chat_profile_model: String(
       storedOr(stored, "project_chat_profile_model", settings.project_chat_profile_model || "")
+    ),
+    project_chat_profile_concurrency: positiveInteger(
+      storedOr(
+        stored,
+        "project_chat_profile_concurrency",
+        envValue("PROJECT_CHAT_PROFILE_CONCURRENCY", String(settings.project_chat_profile_concurrency || 2))
+      ),
+      settings.project_chat_profile_concurrency || 2,
+      "project_chat_profile_concurrency",
+      8
     ),
     reader_chat_provider_id: String(storedOr(stored, "reader_chat_provider_id", settings.reader_chat_provider_id || "")),
     reader_chat_model: String(storedOr(stored, "reader_chat_model", settings.reader_chat_model || "")),
@@ -587,6 +612,9 @@ export function normalizeSettingsPayload(payload = {}, currentSettings = {}) {
       value = parseInteger(rawValue || 0, key);
       if (key === "embedding_concurrency" && value < 1) {
         throw new ValidationError("embedding_concurrency must be at least 1");
+      }
+      if (key === "project_chat_profile_concurrency" && (value < 1 || value > 8)) {
+        throw new ValidationError("project_chat_profile_concurrency must be between 1 and 8");
       }
     } else if (FLOAT_FIELDS.has(key)) {
       value = parseFloatValue(rawValue || 0, key);

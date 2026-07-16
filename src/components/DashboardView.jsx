@@ -3,8 +3,8 @@ import { Link } from "react-router-dom";
 
 import { DailyRunProgressCard } from "./DailyRunProgressCard.jsx";
 import { LoadingPanel } from "./Loading.jsx";
-import { PanelTitle } from "./PanelTitle.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
+import { formatMetricCount, VisionMetric } from "./VisionMetric.jsx";
 import { api, fmtDate, postJson } from "../lib/dashboard.js";
 import { useCachedApi } from "../lib/apiCache.jsx";
 
@@ -15,14 +15,107 @@ npm run start:api`;
 
 const DEFAULT_DOCKER_SERVICE = "app";
 
-function Metric({ label, value, hint }) {
-  return (
-    <div className="dashboard-metric">
-      <span>{label}</span>
-      <strong>{value ?? 0}</strong>
-      <p>{hint}</p>
-    </div>
-  );
+function dashboardRunState(currentJob, latestJob) {
+  if (currentJob) {
+    return {
+      kind: "running",
+      tone: "running",
+      title: "后台任务正在执行",
+      detail: "任务状态会在完成后自动更新。"
+    };
+  }
+
+  const status = String(latestJob?.status || "").toLowerCase();
+  if (status === "failed") {
+    return {
+      kind: "failed",
+      tone: "attention",
+      title: "最近一轮任务未完成",
+      detail: "请查看需要关注中的详情，或从任务控制页重新执行。"
+    };
+  }
+
+  if (status === "queued" || status === "pending") {
+    return {
+      kind: "queued",
+      tone: "queued",
+      title: "任务正在排队",
+      detail: "后台工作进程会在可用时开始处理。"
+    };
+  }
+
+  if (status === "completed" || status === "success") {
+    return {
+      kind: "completed",
+      tone: "ready",
+      title: "最近一轮任务已完成",
+      detail: "结果已同步到对应的论文、报告或研究产物中。"
+    };
+  }
+
+  return {
+    kind: "idle",
+    tone: "ready",
+    title: "暂无正在运行的任务",
+    detail: "你可以从右侧选择下一项工作。"
+  };
+}
+
+function dashboardHeroCopy({ dailyRunNotification, recoverableNotification, arxivRateLimitNotification, runState }) {
+  if (dailyRunNotification) {
+    return {
+      title: "每日流程正在推进",
+      detail: "当前阶段、处理进度和缓存状态显示在下方。"
+    };
+  }
+
+  if (recoverableNotification) {
+    return {
+      title: "每日流程可以从中断处继续",
+      detail: "已完成的阶段会保留；你可以继续处理，或明确选择重新执行。"
+    };
+  }
+
+  if (arxivRateLimitNotification) {
+    return {
+      title: "来源同步暂时受限",
+      detail: "等待来源恢复后，可以从下方重新执行每日流程。"
+    };
+  }
+
+  const copy = {
+    running: {
+      title: "研究数据正在更新",
+      detail: "后台任务完成后，相关论文、报告和研究产物会自动同步。"
+    },
+    failed: {
+      title: "需要检查上一轮处理",
+      detail: "任务详情和后续操作会显示在下方及状态中心。"
+    },
+    queued: {
+      title: "下一项任务正在等待执行",
+      detail: "后台工作进程可用后会自动开始处理。"
+    },
+    completed: {
+      title: "本轮研究工作已同步",
+      detail: "你可以查看结果，或从右侧继续下一项工作。"
+    },
+    idle: {
+      title: "工作区已准备就绪",
+      detail: "从右侧选择下一项工作，或等待计划任务启动。"
+    }
+  };
+
+  return copy[runState.kind] || copy.idle;
+}
+
+function dashboardTopStatus({ dailyRunNotification, recoverableNotification, arxivRateLimitNotification, runState }) {
+  if (dailyRunNotification) return { tone: "running", label: "每日流程运行中" };
+  if (recoverableNotification) return { tone: "queued", label: "可继续执行" };
+  if (arxivRateLimitNotification || runState.kind === "failed") return { tone: "attention", label: "需要处理" };
+  if (runState.kind === "running") return { tone: "running", label: "后台任务运行中" };
+  if (runState.kind === "queued") return { tone: "queued", label: "任务排队中" };
+  return { tone: "ready", label: "系统正常" };
 }
 
 function artifactPath(artifactId) {
@@ -82,10 +175,10 @@ async function copyText(text) {
 function UpdateNotificationCard({ item, onOpen }) {
   const update = updateFromNotification(item);
   return (
-    <article className={`compact-item update-available ${item.severity || ""}`} key={item.id}>
+    <article className={`vision-feed-item vision-update-available ${item.severity || ""}`} key={item.id}>
       <strong>{item.title}</strong>
       <p>{item.detail}{item.created_at ? ` · ${fmtDate(item.created_at)}` : ""}</p>
-      <div className="compact-actions">
+      <div className="vision-feed-actions">
         <button className="primary" onClick={() => onOpen("release", item)} type="button">查看更新说明</button>
         <button onClick={() => onOpen("source", item)} type="button">源码更新命令</button>
         <button onClick={() => onOpen("docker", item)} type="button">Docker 更新命令</button>
@@ -169,11 +262,10 @@ function DailyRunRecoveryCard({ item, onResume, onRunNow }) {
   const recovery = recoveryFromNotification(item) || {};
   const count = recovery.total ? `${recovery.completed || 0}/${recovery.total}` : `${recovery.completed || 0} 步`;
   return (
-    <article className="current-run-card recoverable">
-      <span>建议操作</span>
+    <article className="vision-run-card recoverable">
       <strong>{item?.title || "每日流程可继续"}</strong>
       <p>{item?.detail || `上次流程失败在：${recovery.failed_label || "未知阶段"}，已完成 ${count}。`}</p>
-      <div className="current-run-actions">
+      <div className="vision-run-actions">
         <button className="primary" onClick={onResume} type="button">继续上次每日流程</button>
         <button onClick={onRunNow} type="button">重新执行今日流程</button>
       </div>
@@ -183,11 +275,10 @@ function DailyRunRecoveryCard({ item, onResume, onRunNow }) {
 
 function DailyRunIssueCard({ item, onRunNow }) {
   return (
-    <article className="current-run-card bad">
-      <span>需要处理</span>
+    <article className="vision-run-card bad">
       <strong>{item?.title || "每日流程失败"}</strong>
       <p>{item?.detail || "每日流程失败，请查看通知详情。"}</p>
-      <div className="current-run-actions">
+      <div className="vision-run-actions">
         <button className="primary" onClick={onRunNow} type="button">重新执行每日流程</button>
       </div>
     </article>
@@ -226,9 +317,13 @@ export function DashboardView({ setStatusMessage, notify = () => {} }) {
   const counts = health?.counts || {};
   const currentJob = jobStatus?.scheduler?.current_job;
   const latestJob = health?.latest_job;
+  const reportCount = counts.paper_report_artifacts ?? counts.paper_reading_reports ?? 0;
+  const runState = dashboardRunState(currentJob, latestJob);
   const dailyRunNotification = notifications.find((item) => item.progress);
   const recoverableNotification = notifications.find((item) => item.type === "daily_run_recoverable");
   const arxivRateLimitNotification = notifications.find((item) => item.type === "arxiv_rate_limited");
+  const heroCopy = dashboardHeroCopy({ dailyRunNotification, recoverableNotification, arxivRateLimitNotification, runState });
+  const topStatus = dashboardTopStatus({ dailyRunNotification, recoverableNotification, arxivRateLimitNotification, runState });
   const listNotifications = notifications.filter((item) => (
     item.id !== dailyRunNotification?.id
     && item.id !== recoverableNotification?.id
@@ -298,90 +393,138 @@ export function DashboardView({ setStatusMessage, notify = () => {} }) {
   }
 
   return (
-    <section className="view dashboard-view">
-      <header className="project-dashboard-header">
-        <div>
-          <h1>首页</h1>
-          <p>今日状态、通知和最近更新。</p>
+    <section className="view vision-dashboard">
+      <header className="vision-topbar">
+        <div className="vision-brand">
+          <span>研究智能</span>
+          <h1>研究工作台</h1>
         </div>
-        <RefreshButton onClick={refresh} />
+        <div className="vision-top-actions">
+          <span className={`vision-live-state ${topStatus.tone}`}><i aria-hidden="true" />{topStatus.label}</span>
+          <RefreshButton className="vision-refresh" onClick={refresh} />
+        </div>
       </header>
 
-      <div className="dashboard-grid">
-        <section className="panel dashboard-overview">
-          <PanelTitle title="今日状态" subtitle="每日流程进度和核心规模。" />
-          {loading ? (
-            <LoadingPanel compact rows={5} title="读取今日状态" />
-          ) : (
-            <>
-              {dailyRunNotification ? (
-                <DailyRunProgressCard item={dailyRunNotification} />
-              ) : recoverableNotification ? (
-                <DailyRunRecoveryCard
-                  item={recoverableNotification}
-                  onResume={resumeDailyRun}
-                  onRunNow={runDailyNow}
-                />
-              ) : arxivRateLimitNotification ? (
-                <DailyRunIssueCard
-                  item={arxivRateLimitNotification}
-                  onRunNow={rerunDaily}
-                />
-              ) : (
-                <div className={`current-run-card ${currentJob ? "running" : latestJob?.status === "failed" ? "bad" : "idle"}`}>
-                  <span>{currentJob ? "运行中" : "当前状态"}</span>
-                  <strong>{currentJob ? currentJob.command : latestJob?.status || "Idle"}</strong>
-                  <p>{currentJob ? "任务正在后台执行" : latestJob?.message || "没有正在运行的任务"}</p>
-                </div>
-              )}
-              <div className="dashboard-metrics">
-                <Metric label="项目" value={counts.projects} hint="研究项目" />
-                <Metric label="论文仓库" value={counts.papers} hint="长期论文对象" />
-                <Metric label="报告队列" value={counts.paper_report_artifacts ?? counts.paper_reading_reports ?? 0} hint="全文报告任务" />
-                <Metric label="上下文" value={counts.knowledge_documents || counts.notes} hint="知识来源" />
-              </div>
-            </>
-          )}
+      <main className="vision-layout">
+        <section className={`vision-hero ${topStatus.tone}`} aria-labelledby="vision-run-title">
+          <div className="vision-hero-art" aria-hidden="true" />
+          <div className="vision-hero-copy">
+            <span>今日运行</span>
+            <h2 id="vision-run-title">{heroCopy.title}</h2>
+            <p>{heroCopy.detail}</p>
+          </div>
+          <div className="vision-run-content">
+            {loading ? (
+              <LoadingPanel compact rows={4} title="读取今日状态" />
+            ) : dailyRunNotification ? (
+              <DailyRunProgressCard item={dailyRunNotification} />
+            ) : recoverableNotification ? (
+              <DailyRunRecoveryCard
+                item={recoverableNotification}
+                onResume={resumeDailyRun}
+                onRunNow={runDailyNow}
+              />
+            ) : arxivRateLimitNotification ? (
+              <DailyRunIssueCard
+                item={arxivRateLimitNotification}
+                onRunNow={rerunDaily}
+              />
+            ) : (
+              <article className={`vision-run-card ${runState.tone}`}>
+                <strong>{runState.title}</strong>
+                <p>{runState.detail}</p>
+              </article>
+            )}
+          </div>
         </section>
 
-        <section className="panel">
-          <PanelTitle title="通知" subtitle="只显示需要关注的运行、异常和决策通知。" />
+        <aside className="vision-actions-card" aria-labelledby="vision-actions-title">
+          <div className="vision-actions-art" aria-hidden="true" />
+          <div className="vision-actions-content">
+            <header>
+              <span>工作入口</span>
+              <h2 id="vision-actions-title">下一步</h2>
+            </header>
+            <nav className="vision-action-list" aria-label="工作区快捷入口">
+              <Link to="/papers/inbox">
+                <span><strong>待判断</strong><small>候选论文与人工决策</small></span>
+                <b aria-hidden="true">→</b>
+              </Link>
+              <Link to="/papers/reports">
+                <span><strong>报告队列</strong><small>{formatMetricCount(reportCount)} 个全文分析任务</small></span>
+                <b aria-hidden="true">→</b>
+              </Link>
+              <Link to="/artifacts">
+                <span><strong>研究产物</strong><small>日报、摘要与可交付结果</small></span>
+                <b aria-hidden="true">→</b>
+              </Link>
+              <Link to="/settings">
+                <span><strong>自动化设置</strong><small>来源、规则与后台任务</small></span>
+                <b aria-hidden="true">→</b>
+              </Link>
+            </nav>
+          </div>
+        </aside>
+
+        <section className="vision-stats" aria-label="研究规模">
+          <VisionMetric label="项目" value={counts.projects} hint="研究项目" tone="violet" to="/projects" />
+          <VisionMetric label="论文仓库" value={counts.papers} hint="长期论文对象" tone="blue" to="/papers/library" />
+          <VisionMetric label="报告队列" value={reportCount} hint="全文分析任务" tone="coral" to="/papers/reports" />
+          <VisionMetric label="上下文" value={counts.knowledge_documents || counts.notes} hint="知识来源" tone="gold" to="/artifacts" />
+        </section>
+
+        <section className="vision-attention-card" aria-labelledby="vision-attention-title">
+          <header className="vision-card-heading">
+            <div>
+              <span>状态中心</span>
+              <h2 id="vision-attention-title">需要关注</h2>
+            </div>
+            <em>{loading ? "同步中" : listNotifications.length ? `${listNotifications.length} 项` : "全部清晰"}</em>
+          </header>
           {loading ? (
             <LoadingPanel compact rows={4} title="读取通知" />
           ) : (
-            <div className="compact-list">
+            <div className="vision-feed-list">
               {listNotifications.map((item) => (
                 item.type === "app_update_available" ? (
                   <UpdateNotificationCard item={item} key={item.id} onOpen={openUpdateDialog} />
                 ) : (
-                  <article className={`compact-item ${item.severity || ""}`} key={item.id}>
+                  <article className={`vision-feed-item ${item.severity || ""}`} key={item.id}>
                     <strong>{item.title}</strong>
                     <p>{item.detail}{item.created_at ? ` · ${fmtDate(item.created_at)}` : ""}</p>
                   </article>
                 )
               ))}
-              {!listNotifications.length ? <p className="muted">暂无通知。</p> : null}
+              {!listNotifications.length ? <p className="vision-empty">当前没有需要处理的通知。</p> : null}
             </div>
           )}
         </section>
 
-        <section className="panel dashboard-updates-panel">
-          <PanelTitle title="最近更新" subtitle="论文和产物按时间合并展示。" />
+        <section className="vision-recent-card" aria-labelledby="vision-recent-title">
+          <div className="vision-recent-cover">
+            <div className="vision-recent-art" aria-hidden="true" />
+            <header className="vision-card-heading">
+              <div>
+                <span>研究流</span>
+                <h2 id="vision-recent-title">最近更新</h2>
+              </div>
+            </header>
+          </div>
           {loading ? (
             <LoadingPanel compact rows={5} title="读取最近更新" />
           ) : (
-            <div className="compact-list">
+            <div className="vision-feed-list vision-recent-list">
               {recentUpdates.length ? recentUpdates.map((item) => (
-                <Link className="compact-item update-item update-link" key={item.id} to={item.to}>
-                  <span className="pill">{item.type}</span>
+                <Link className="vision-feed-item vision-recent-item" key={item.id} to={item.to}>
+                  <span className="vision-item-type">{item.type}</span>
                   <strong>{item.title}</strong>
                   <p>{item.meta} · {fmtDate(item.at)}</p>
                 </Link>
-              )) : <p className="muted">暂无最近更新。</p>}
+              )) : <p className="vision-empty">暂无最近更新。</p>}
             </div>
           )}
         </section>
-      </div>
+      </main>
       {updateDialog ? (
         <UpdateDialog
           dialog={updateDialog}

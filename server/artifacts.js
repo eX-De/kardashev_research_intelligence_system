@@ -29,6 +29,14 @@ export function normalizeArtifactLimit(value, fallback = 100) {
   return parsed;
 }
 
+export function normalizeArtifactOffset(value, fallback = 0) {
+  const raw = text(value) || String(fallback);
+  if (!/^\d+$/.test(raw)) {
+    throw new ValidationError("offset must be a non-negative integer");
+  }
+  return Number.parseInt(raw, 10);
+}
+
 function artifactPayload(row) {
   return {
     id: Number(row.id),
@@ -54,7 +62,8 @@ export function normalizeArtifactsFilter(params = {}) {
     scope_id: optionalPositiveInteger(params.scope_id, "scope_id"),
     artifact_type: text(params.artifact_type),
     status: text(params.status),
-    limit: normalizeArtifactLimit(params.limit, 100)
+    limit: normalizeArtifactLimit(params.limit, 100),
+    offset: normalizeArtifactOffset(params.offset, 0)
   };
 }
 
@@ -80,19 +89,28 @@ export async function getArtifacts(params = {}, db = { query }) {
     conditions.push(`status = $${values.length}`);
   }
 
-  values.push(filter.limit);
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const countResult = await db.query(
+    `SELECT COUNT(*)::int AS total FROM artifacts ${where}`,
+    [...values]
+  );
+  const total = Number(countResult.rows[0]?.total || 0);
+  values.push(filter.limit);
+  const limitPlaceholder = `$${values.length}`;
+  values.push(filter.offset);
+  const offsetPlaceholder = `$${values.length}`;
   const result = await db.query(
     `
       SELECT *
       FROM artifacts
       ${where}
       ORDER BY updated_at DESC, id DESC
-      LIMIT $${values.length}
+      LIMIT ${limitPlaceholder}
+      OFFSET ${offsetPlaceholder}
     `,
     values
   );
-  return { items: result.rows.map(artifactPayload) };
+  return { items: result.rows.map(artifactPayload), total };
 }
 
 export async function getArtifactDetail(artifactId, db = { query }) {

@@ -10,6 +10,7 @@ import {
 
 export const VALID_LIBRARY_STATUSES = new Set(["candidate", "saved", "reading", "read", "archived", "discarded"]);
 export const SOURCE_TYPES = new Set(["arxiv", "url", "upload", "manual"]);
+export const REPORT_PRESENCE_VALUES = new Set(["with", "without"]);
 const DEFAULT_HIDDEN_LIBRARY_STATUSES = ["archived", "discarded"];
 const ARCHIVE_PROTECTED_STATUSES = new Set(["saved", "reading", "read"]);
 const PAPER_REPORT_ARTIFACT_TYPE = "paper_report";
@@ -63,6 +64,15 @@ function normalizeSourceType(value) {
     throw new ValidationError(`Invalid paper source type: ${sourceType}`);
   }
   return sourceType;
+}
+
+function normalizeReportPresence(value) {
+  const reportPresence = text(value);
+  if (!reportPresence) return "";
+  if (!REPORT_PRESENCE_VALUES.has(reportPresence)) {
+    throw new ValidationError(`Invalid report presence: ${reportPresence}`);
+  }
+  return reportPresence;
 }
 
 function normalizeLimit(value, fallback = 100) {
@@ -152,6 +162,7 @@ function buildLibraryFilter(params = {}) {
   const filter = {
     library_status: normalizeLibraryStatus(params.status ?? params.library_status, { allowBlank: true }),
     source_type: normalizeSourceType(params.source_type),
+    report_presence: normalizeReportPresence(params.report_presence),
     project_id: optionalInteger(params.project_id, "project_id", { minimum: 1 }),
     query: text(params.q ?? params.query),
     date_from: text(params.date_from).slice(0, 10),
@@ -172,6 +183,19 @@ function buildLibraryFilter(params = {}) {
   if (filter.source_type) {
     values.push(filter.source_type);
     clauses.push(`EXISTS (SELECT 1 FROM paper_sources s WHERE s.paper_id = p.id AND s.source_type = $${values.length})`);
+  }
+  if (filter.report_presence) {
+    const operator = filter.report_presence === "with" ? "EXISTS" : "NOT EXISTS";
+    clauses.push(`
+      ${operator} (
+        SELECT 1
+        FROM artifacts report_filter
+        WHERE report_filter.scope_type = 'paper'
+          AND report_filter.scope_id = p.id
+          AND report_filter.artifact_type = 'paper_report'
+          AND report_filter.status <> 'removed'
+      )
+    `);
   }
   if (filter.query) {
     const needle = `%${filter.query.toLowerCase()}%`;

@@ -118,7 +118,6 @@ function ProjectsRoute({ setStatusMessage }) {
   return (
     <ProjectsView
       onOpenProject={(projectId) => navigate(projectPath(projectId))}
-      onNewProject={() => navigate("/projects/new")}
       setStatusMessage={setStatusMessage}
     />
   );

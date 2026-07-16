@@ -40,6 +40,7 @@ INT_FIELDS = {
     "scheduler_interval_hours",
     "paper_report_queue_concurrency",
     "embedding_concurrency",
+    "project_chat_profile_concurrency",
 }
 
 FLOAT_FIELDS = {
@@ -115,11 +116,13 @@ def _bool(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 
-def _positive_int(value: Any, default: int, field: str) -> int:
+def _positive_int(value: Any, default: int, field: str, *, maximum: int | None = None) -> int:
     raw_value = default if value is None or str(value).strip() == "" else value
     parsed = int(raw_value)
     if parsed < 1:
         raise RuntimeError(f"{field} must be at least 1")
+    if maximum is not None and parsed > maximum:
+        raise RuntimeError(f"{field} must be at most {maximum}")
     return parsed
 
 
@@ -239,6 +242,18 @@ def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, An
         "project_chat_profile_model": str(
             stored.get("project_chat_profile_model", settings.project_chat_profile_model or "")
         ),
+        "project_chat_profile_concurrency": _positive_int(
+            stored.get(
+                "project_chat_profile_concurrency",
+                env_value(
+                    "PROJECT_CHAT_PROFILE_CONCURRENCY",
+                    str(settings.project_chat_profile_concurrency or 2),
+                ),
+            ),
+            settings.project_chat_profile_concurrency or 2,
+            "project_chat_profile_concurrency",
+            maximum=8,
+        ),
         "reader_chat_provider_id": str(
             stored.get("reader_chat_provider_id", settings.reader_chat_provider_id or "")
         ),
@@ -317,6 +332,10 @@ def apply_stored_settings(conn: Any, settings: Settings) -> Settings:
         if field in stored and hasattr(settings, field):
             if field == "embedding_concurrency":
                 updates[field] = _positive_int(stored[field], settings.embedding_concurrency or 2, field)
+            elif field == "project_chat_profile_concurrency":
+                updates[field] = _positive_int(
+                    stored[field], settings.project_chat_profile_concurrency or 2, field, maximum=8
+                )
             else:
                 updates[field] = int(stored[field])
     for field in FLOAT_FIELDS:
@@ -373,6 +392,8 @@ def save_app_settings(conn: Any, payload: dict[str, Any]) -> dict[str, Any]:
             value = int(raw_value or 0)
             if key == "embedding_concurrency" and value < 1:
                 raise RuntimeError("embedding_concurrency must be at least 1")
+            if key == "project_chat_profile_concurrency" and not 1 <= value <= 8:
+                raise RuntimeError("project_chat_profile_concurrency must be between 1 and 8")
         elif key in FLOAT_FIELDS:
             value = float(raw_value or 0)
         elif key in BOOL_FIELDS:

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { csv } from "../lib/dashboard.js";
+import { WorkspaceSelect } from "./WorkspaceSelect.jsx";
 
 function SettingsSection({ eyebrow, title, description, children, bodyClassName = "settings-field-grid" }) {
   return (
@@ -54,9 +55,19 @@ function NumberField({ label, name, min, max, step, value, onChange }) {
 
 function CheckboxField({ label, name, checked, onChange }) {
   return (
-    <label className="checkbox-line">
-      <input name={name} type="checkbox" checked={Boolean(checked)} onChange={(event) => onChange(name, event.target.checked)} />
+    <label className="settings-checkbox-row">
+      <input className="settings-checkbox-input" name={name} type="checkbox" checked={Boolean(checked)} onChange={(event) => onChange(name, event.target.checked)} />
+      <span className="settings-checkbox-mark" aria-hidden="true"><svg fill="none" viewBox="0 0 12 12"><path d="m2.5 6.2 2.2 2.2 4.8-5" /></svg></span>
+      <span className="settings-checkbox-label">{label}</span>
+    </label>
+  );
+}
+
+function SelectField({ label, ariaLabel = label, value, options, onChange }) {
+  return (
+    <label className="settings-select-field">
       <span>{label}</span>
+      <WorkspaceSelect ariaLabel={ariaLabel} onChange={onChange} options={options} value={value || ""} />
     </label>
   );
 }
@@ -89,11 +100,11 @@ function ProviderSelectors({ settings, providers, onProviderChange, onAddProvide
     return String(provider?.chat_models || "").split(",").map((item) => item.trim()).filter(Boolean);
   };
   const readerPairs = [
-    ["paper_report_provider_id", "paper_report_model", "解读报告模型"],
-    ["project_chat_profile_provider_id", "project_chat_profile_model", "项目 Chat 摘要模型"],
-    ["reader_chat_provider_id", "reader_chat_model", "阅读器 Chat 模型"],
-    ["reader_smart_save_provider_id", "reader_smart_save_model", "Smart Save 模型"],
-    ["reader_question_provider_id", "reader_question_model", "追问生成模型"]
+    ["paper_report_provider_id", "paper_report_model", "解读报告", "生成论文全文结构化分析"],
+    ["project_chat_profile_provider_id", "project_chat_profile_model", "项目摘要", "归纳项目对话与每日研究进展"],
+    ["reader_chat_provider_id", "reader_chat_model", "阅读器 Chat", "处理围绕论文正文的连续问答"],
+    ["reader_smart_save_provider_id", "reader_smart_save_model", "Smart Save", "判断论文归档位置与项目关联"],
+    ["reader_question_provider_id", "reader_question_model", "追问生成", "根据报告生成后续研究问题"]
   ];
 
   useEffect(() => {
@@ -114,137 +125,154 @@ function ProviderSelectors({ settings, providers, onProviderChange, onAddProvide
 
   return (
     <>
-      <div className="provider-manager settings-grid-wide">
+      <div className="provider-manager model-provider-studio settings-grid-wide">
         <aside className="provider-sidebar">
           <div className="provider-sidebar-head">
             <div>
-              <h3>模型服务</h3>
-              <p>{rows.length} 个 provider</p>
+              <span>Service registry</span>
+              <h3>服务端点</h3>
+              <p>{rows.length} 个 Provider</p>
             </div>
-            <button type="button" onClick={addProvider}>添加</button>
+            <button aria-label="添加模型服务" type="button" onClick={addProvider}><i aria-hidden="true">＋</i><span>添加</span></button>
           </div>
           <div className="provider-tab-list">
-            {rows.map((provider, index) => (
-              <button className={`provider-tab ${index === activeIndex ? "active" : ""}`} key={index} onClick={() => setActiveProviderIndex(index)} type="button">
-                <span>
-                  <strong>{provider.name || provider.id || "未命名 Provider"}</strong>
-                  <small>{provider.id || "缺少 ID"}</small>
-                </span>
-                <em className={provider.api_key_configured ? "ok" : "warn"}>{provider.api_key_configured ? "已存 key" : "未存 key"}</em>
-              </button>
-            ))}
+            {rows.map((provider, index) => {
+              const chatCount = String(provider.chat_models || "").split(",").filter((item) => item.trim()).length;
+              const embeddingCount = String(provider.embedding_models || "").split(",").filter((item) => item.trim()).length;
+              const providerName = provider.name || provider.id || "未命名 Provider";
+              return (
+                <button className={`provider-tab ${index === activeIndex ? "active" : ""}`} key={index} onClick={() => setActiveProviderIndex(index)} type="button">
+                  <i className="provider-tab-mark" aria-hidden="true">{providerName.slice(0, 1).toUpperCase()}</i>
+                  <span>
+                    <strong>{providerName}</strong>
+                    <small>{provider.id || "缺少 ID"} · {chatCount} Chat · {embeddingCount} Embedding</small>
+                  </span>
+                  <em className={provider.api_key_configured ? "ok" : "warn"} title={provider.api_key_configured ? "API Key 已保存" : "API Key 未配置"}>
+                    <i aria-hidden="true" />
+                    {provider.api_key_configured ? "就绪" : "待配置"}
+                  </em>
+                </button>
+              );
+            })}
           </div>
         </aside>
 
         <section className="provider-editor">
           <div className="provider-editor-head">
             <div>
+              <span>Active provider</span>
               <h3>{activeProvider.name || activeProvider.id || "Provider 配置"}</h3>
               <p>{activeProvider.base_url || "Base URL 未配置"}</p>
             </div>
-            <button className="danger" type="button" onClick={removeActiveProvider}>移除</button>
+            <div className="provider-editor-actions">
+              <span className={`provider-connection-state ${activeProvider.api_key_configured ? "is-ready" : "is-pending"}`}><b>{activeProvider.api_key_configured ? "凭据已保存" : "等待凭据"}</b></span>
+              <button className="danger" type="button" onClick={removeActiveProvider}>移除</button>
+            </div>
           </div>
-          <div className="provider-fields">
-            <label>
-              <span>ID</span>
-              <input value={activeProvider.id} placeholder="qwen" onChange={(event) => onProviderChange(activeIndex, "id", event.target.value)} />
-            </label>
-            <label>
-              <span>名称</span>
-              <input value={activeProvider.name} placeholder="Qwen" onChange={(event) => onProviderChange(activeIndex, "name", event.target.value)} />
-            </label>
-            <label className="provider-field-wide">
-              <span>Base URL</span>
-              <input value={activeProvider.base_url} placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1" onChange={(event) => onProviderChange(activeIndex, "base_url", event.target.value)} />
-            </label>
-            <label>
-              <span>API Key</span>
-              <input value={activeProvider.api_key || ""} type="password" placeholder={keyText} onChange={(event) => onProviderChange(activeIndex, "api_key", event.target.value)} />
-            </label>
-            <label className="provider-field-wide">
-              <span>Chat models</span>
-              <input value={activeProvider.chat_models} placeholder="qwen-plus,qwen-max" onChange={(event) => onProviderChange(activeIndex, "chat_models", event.target.value)} />
-            </label>
-            <label className="provider-field-wide">
-              <span>Embedding models</span>
-              <input value={activeProvider.embedding_models} placeholder="text-embedding-v4" onChange={(event) => onProviderChange(activeIndex, "embedding_models", event.target.value)} />
-            </label>
-            <label className="checkbox-line provider-clear-key">
-              <input type="checkbox" checked={Boolean(activeProvider.clear_api_key)} onChange={(event) => onProviderChange(activeIndex, "clear_api_key", event.target.checked)} />
-              <span>保存时清除这个 provider 的 API key</span>
-            </label>
+          <div className="provider-editor-body">
+            <section className="provider-field-group provider-identity-fields">
+              <header><span>01</span><div><strong>连接信息</strong><p>OpenAI 兼容接口地址与访问凭据</p></div></header>
+              <div className="provider-fields">
+                <label>
+                  <span>Provider ID</span>
+                  <input value={activeProvider.id} placeholder="qwen" onChange={(event) => onProviderChange(activeIndex, "id", event.target.value)} />
+                </label>
+                <label>
+                  <span>显示名称</span>
+                  <input value={activeProvider.name} placeholder="Qwen" onChange={(event) => onProviderChange(activeIndex, "name", event.target.value)} />
+                </label>
+                <label className="provider-field-wide">
+                  <span>Base URL</span>
+                  <input value={activeProvider.base_url} placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1" onChange={(event) => onProviderChange(activeIndex, "base_url", event.target.value)} />
+                </label>
+                <label className="provider-field-wide">
+                  <span>API Key</span>
+                  <input value={activeProvider.api_key || ""} type="password" placeholder={keyText} onChange={(event) => onProviderChange(activeIndex, "api_key", event.target.value)} />
+                </label>
+                <label className="settings-checkbox-row provider-clear-key">
+                  <input className="settings-checkbox-input" type="checkbox" checked={Boolean(activeProvider.clear_api_key)} onChange={(event) => onProviderChange(activeIndex, "clear_api_key", event.target.checked)} />
+                  <span className="settings-checkbox-mark" aria-hidden="true"><svg fill="none" viewBox="0 0 12 12"><path d="m2.5 6.2 2.2 2.2 4.8-5" /></svg></span>
+                  <span className="settings-checkbox-label">保存时清除这个 Provider 的 API Key</span>
+                </label>
+              </div>
+            </section>
+            <section className="provider-field-group provider-catalog-fields">
+              <header><span>02</span><div><strong>模型目录</strong><p>使用英文逗号分隔多个模型标识</p></div></header>
+              <div className="provider-fields">
+                <label className="provider-field-wide">
+                  <span>Chat models</span>
+                  <input value={activeProvider.chat_models} placeholder="qwen-plus,qwen-max" onChange={(event) => onProviderChange(activeIndex, "chat_models", event.target.value)} />
+                </label>
+                <label className="provider-field-wide">
+                  <span>Embedding models</span>
+                  <input value={activeProvider.embedding_models} placeholder="text-embedding-v4" onChange={(event) => onProviderChange(activeIndex, "embedding_models", event.target.value)} />
+                </label>
+              </div>
+            </section>
           </div>
         </section>
       </div>
 
-      <div className="model-routing settings-grid-wide">
-        <section className="model-routing-panel">
-          <h3>默认模型</h3>
+      <div className="model-routing model-routing-workspace settings-grid-wide">
+        <section className="model-routing-panel default-routing-panel">
+          <header className="routing-panel-heading">
+            <div><span>Default route</span><h3>全局默认模型</h3><p>未单独指定任务模型时使用这组配置。</p></div>
+            <em>基础路由</em>
+          </header>
           <div className="model-routing-fields">
-            <label>
-              <span>Chat provider</span>
-              <select value={settings.llm_chat_provider_id || ""} onChange={(event) => onSettingChange("llm_chat_provider_id", event.target.value)}>
-                {providerOptions.length ? providerOptions.map((provider) => <option key={provider.id} value={provider.id}>{provider.name || provider.id}</option>) : <option value="">未配置</option>}
-              </select>
-            </label>
-            <label>
-              <span>Chat model</span>
-              <select value={settings.llm_chat_model || ""} onChange={(event) => onSettingChange("llm_chat_model", event.target.value)}>
-                {chatModels.length ? chatModels.map((model) => <option key={model} value={model}>{model}</option>) : <option value="">未配置</option>}
-              </select>
-            </label>
-            <label>
-              <span>Embedding provider</span>
-              <select value={settings.llm_embedding_provider_id || ""} onChange={(event) => onSettingChange("llm_embedding_provider_id", event.target.value)}>
-                {providerOptions.length ? providerOptions.map((provider) => <option key={provider.id} value={provider.id}>{provider.name || provider.id}</option>) : <option value="">未配置</option>}
-              </select>
-            </label>
-            <label>
-              <span>Embedding model</span>
-              <select value={settings.llm_embedding_model || ""} onChange={(event) => onSettingChange("llm_embedding_model", event.target.value)}>
-                {embeddingModels.length ? embeddingModels.map((model) => <option key={model} value={model}>{model}</option>) : <option value="">未配置</option>}
-              </select>
-            </label>
+            <SelectField label="Chat provider" value={settings.llm_chat_provider_id} onChange={(value) => onSettingChange("llm_chat_provider_id", value)} options={providerOptions.length ? providerOptions.map((provider) => [provider.id, provider.name || provider.id]) : [["", "未配置"]]} />
+            <SelectField label="Chat model" value={settings.llm_chat_model} onChange={(value) => onSettingChange("llm_chat_model", value)} options={chatModels.length ? chatModels.map((model) => [model, model]) : [["", "未配置"]]} />
+            <SelectField label="Embedding provider" value={settings.llm_embedding_provider_id} onChange={(value) => onSettingChange("llm_embedding_provider_id", value)} options={providerOptions.length ? providerOptions.map((provider) => [provider.id, provider.name || provider.id]) : [["", "未配置"]]} />
+            <SelectField label="Embedding model" value={settings.llm_embedding_model} onChange={(value) => onSettingChange("llm_embedding_model", value)} options={embeddingModels.length ? embeddingModels.map((model) => [model, model]) : [["", "未配置"]]} />
           </div>
         </section>
 
-        <section className="model-routing-panel">
-          <h3>阅读器与项目模型</h3>
+        <section className="model-routing-panel task-routing-panel">
+          <header className="routing-panel-heading">
+            <div><span>Task routes</span><h3>任务模型分配</h3><p>为不同研究环节选择独立的 Provider 和模型。</p></div>
+            <em>{readerPairs.length} 条路由</em>
+          </header>
           <div className="reader-model-grid">
-            {readerPairs.map(([providerField, modelField, label]) => {
+            {readerPairs.map(([providerField, modelField, label, description], index) => {
               const selectedProviderId = settings[providerField] || settings.llm_chat_provider_id || "";
               const models = modelsForProvider(selectedProviderId);
               return (
                 <div className="reader-model-row" key={providerField}>
-                  <strong>{label}</strong>
-                  <div>
-                    <label>
-                      <span>Provider</span>
-                      <select value={selectedProviderId} onChange={(event) => onSettingChange(providerField, event.target.value)}>
-                        {providerOptions.length ? providerOptions.map((provider) => <option key={provider.id} value={provider.id}>{provider.name || provider.id}</option>) : <option value="">未配置</option>}
-                      </select>
-                    </label>
-                    <label>
-                      <span>Model</span>
-                      <select value={settings[modelField] || settings.llm_chat_model || ""} onChange={(event) => onSettingChange(modelField, event.target.value)}>
-                        {models.length ? models.map((model) => <option key={model} value={model}>{model}</option>) : <option value="">未配置</option>}
-                      </select>
-                    </label>
+                  <header><i aria-hidden="true">{String(index + 1).padStart(2, "0")}</i><span><strong>{label}</strong><small>{description}</small></span></header>
+                  <div className="reader-model-selectors">
+                    <SelectField label="Provider" value={selectedProviderId} onChange={(value) => onSettingChange(providerField, value)} options={providerOptions.length ? providerOptions.map((provider) => [provider.id, provider.name || provider.id]) : [["", "未配置"]]} />
+                    <SelectField label="Model" value={settings[modelField] || settings.llm_chat_model} onChange={(value) => onSettingChange(modelField, value)} options={models.length ? models.map((model) => [model, model]) : [["", "未配置"]]} />
                   </div>
                 </div>
               );
             })}
+            <div className="reader-model-row concurrency-route-row">
+              <header><i aria-hidden="true">06</i><span><strong>项目摘要并发</strong><small>限制同时运行的项目摘要请求数量</small></span></header>
+              <div className="reader-model-selectors">
+                <NumberField
+                  label="并发请求数"
+                  name="project_chat_profile_concurrency"
+                  min="1"
+                  max="8"
+                  step="1"
+                  value={settings.project_chat_profile_concurrency ?? 2}
+                  onChange={onSettingChange}
+                />
+              </div>
+            </div>
           </div>
         </section>
       </div>
 
-      <label className="settings-grid-wide prompt-field">
-        <span>论文解读默认 prompt</span>
-        <textarea
-          value={settings.paper_reader_default_prompt || ""}
-          onChange={(event) => onSettingChange("paper_reader_default_prompt", event.target.value)}
-        />
-      </label>
+      <section className="settings-grid-wide prompt-field model-prompt-panel">
+        <header className="routing-panel-heading">
+          <div><span>Default instruction</span><h3>论文解读 Prompt</h3><p>用于新建全文解读任务的默认结构化指令。</p></div>
+        </header>
+        <label>
+          <span>Prompt 内容</span>
+          <textarea value={settings.paper_reader_default_prompt || ""} onChange={(event) => onSettingChange("paper_reader_default_prompt", event.target.value)} />
+        </label>
+      </section>
     </>
   );
 }
@@ -296,15 +324,12 @@ export function SettingsForm({ settings, providers, onSettingChange, onProviderC
         title="知识库与可选 Obsidian 集成"
         description="系统内知识库、论文抓取和报告生成可独立运行；填写 vault 后才启用 Obsidian 导入、导出和路径选择。"
       >
-        <label>
-          <span>Obsidian 存储模式</span>
-          <select value={obsidianBackend} onChange={(event) => onSettingChange("obsidian_storage_backend", event.target.value)}>
-            <option value="local">本地 vault</option>
-            <option value="oss">阿里云 OSS</option>
-            <option value="s3">S3 兼容</option>
-            <option value="r2">Cloudflare R2</option>
-          </select>
-        </label>
+        <SelectField
+          label="Obsidian 存储模式"
+          value={obsidianBackend}
+          onChange={(value) => onSettingChange("obsidian_storage_backend", value)}
+          options={[["local", "本地 vault"], ["oss", "阿里云 OSS"], ["s3", "S3 兼容"], ["r2", "Cloudflare R2"]]}
+        />
         {remoteObsidian ? (
           <>
             <TextField label="Endpoint URL" name="obsidian_remote_endpoint_url" placeholder={obsidianBackend === "r2" ? "https://<account>.r2.cloudflarestorage.com" : "https://oss-cn-hangzhou.aliyuncs.com"} value={settings.obsidian_remote_endpoint_url} onChange={onSettingChange} />

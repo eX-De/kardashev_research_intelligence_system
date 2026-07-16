@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from threading import Lock
+from time import sleep
 from unittest.mock import patch
 
 from helpers import connect_test_db
@@ -13,6 +15,7 @@ from worker.knowledge import save_manual_project_context
 from worker.project_chat_profiles import (
     PROJECT_CHAT_PROFILE_ARTIFACT_TYPE,
     PROJECT_CHAT_PROFILE_VERSION,
+    _generate_profiles,
     _profile_prompt,
     project_chat_profiles_for_paper,
     refresh_project_chat_profiles,
@@ -98,6 +101,41 @@ class ProjectChatProfileContractTests(unittest.TestCase):
         self.assertIn("800-1600 字", prompt)
         self.assertIn("最多 10 条", prompt)
 
+    def test_profile_generation_honors_concurrency_without_sharing_database_work(self) -> None:
+        lock = Lock()
+        active = 0
+        maximum_active = 0
+
+        def fake_chat(*args, **kwargs):
+            nonlocal active, maximum_active
+            with lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            sleep(0.05)
+            with lock:
+                active -= 1
+            return profile_response()
+
+        pending = [
+            {
+                "project": {"id": index, "name": f"Project {index}"},
+                "prompt_payload": {"project": {"id": index}, "context_documents": []},
+            }
+            for index in range(3)
+        ]
+        with patch("worker.project_chat_profiles.call_chat_json", side_effect=fake_chat):
+            completed = _generate_profiles(
+                profile_settings(),
+                pending,
+                "profile-provider",
+                "profile-model",
+                max_workers=2,
+            )
+
+        self.assertEqual(len(completed), 3)
+        self.assertEqual(maximum_active, 2)
+        self.assertTrue(all(profile is not None and error is None for _, profile, error in completed))
+
 
 class ProjectChatProfileTests(unittest.TestCase):
     def _seed_project_context(self, conn) -> tuple[int, int]:
@@ -121,6 +159,24 @@ class ProjectChatProfileTests(unittest.TestCase):
             """,
         )
         return project_id, int(document["document_id"])
+
+    def test_refresh_excludes_paused_and_archived_projects(self) -> None:
+        conn = connect_test_db()
+        init_db(conn)
+        for name, status in (("Active", "active"), ("Paused", "paused"), ("Archived", "archived")):
+            conn.execute(
+                """
+                INSERT INTO research_projects(name, status, created_at, updated_at)
+                VALUES (?, ?, 'now', 'now')
+                """,
+                (name, status),
+            )
+        conn.commit()
+
+        result = refresh_project_chat_profiles(conn, test_settings())
+
+        self.assertEqual(result["project_chat_profiles_considered"], 1)
+        self.assertEqual(result["project_chat_profiles_skipped"], 1)
 
     def test_refresh_is_incremental_and_uses_configured_model(self) -> None:
         conn = connect_test_db()
@@ -175,6 +231,49 @@ class ProjectChatProfileTests(unittest.TestCase):
             ).fetchone()["count"],
             1,
         )
+
+    def test_refresh_limits_parallel_model_requests_to_configured_concurrency(self) -> None:
+        conn = connect_test_db()
+        init_db(conn)
+        for index in range(3):
+            row = conn.execute(
+                """
+                INSERT INTO research_projects(name, status, summary, created_at, updated_at)
+                VALUES (?, 'active', ?, 'now', 'now')
+                RETURNING id
+                """,
+                (f"Concurrent Project {index}", f"Project material {index}"),
+            ).fetchone()
+            save_manual_project_context(
+                conn,
+                test_settings(),
+                int(row["id"]),
+                f"Context for concurrent project {index} with enough research detail.",
+            )
+        conn.commit()
+
+        settings = Settings(**{**profile_settings().__dict__, "project_chat_profile_concurrency": 2})
+        lock = Lock()
+        active = 0
+        maximum_active = 0
+
+        def fake_chat(*args, **kwargs):
+            nonlocal active, maximum_active
+            with lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            sleep(0.05)
+            with lock:
+                active -= 1
+            return profile_response()
+
+        with patch("worker.project_chat_profiles.call_chat_json", side_effect=fake_chat) as call:
+            result = refresh_project_chat_profiles(conn, settings)
+
+        self.assertEqual(call.call_count, 3)
+        self.assertEqual(maximum_active, 2)
+        self.assertEqual(result["project_chat_profile_concurrency"], 2)
+        self.assertEqual(result["project_chat_profiles_created"], 3)
 
     def test_one_profile_failure_does_not_fail_the_incremental_stage(self) -> None:
         conn = connect_test_db()
@@ -280,6 +379,7 @@ class ProjectChatProfileTests(unittest.TestCase):
             {
                 "project_chat_profile_provider_id": "profile-provider",
                 "project_chat_profile_model": "profile-model",
+                "project_chat_profile_concurrency": 3,
             },
         )
 
@@ -288,8 +388,10 @@ class ProjectChatProfileTests(unittest.TestCase):
 
         self.assertEqual(applied.project_chat_profile_provider_id, "profile-provider")
         self.assertEqual(applied.project_chat_profile_model, "profile-model")
+        self.assertEqual(applied.project_chat_profile_concurrency, 3)
         self.assertEqual(payload["project_chat_profile_provider_id"], "profile-provider")
         self.assertEqual(payload["project_chat_profile_model"], "profile-model")
+        self.assertEqual(payload["project_chat_profile_concurrency"], 3)
 
     def test_daily_pipeline_runs_profile_stage_after_context_sync(self) -> None:
         self.assertEqual(
