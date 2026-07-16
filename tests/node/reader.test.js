@@ -9,7 +9,8 @@ import {
   getReaderPaperDetail,
   getReaderPapers,
   retryReaderReport,
-  saveReaderReferencePapers
+  saveReaderReferencePapers,
+  updateReaderPaperTitle
 } from "../../server/reader.js";
 
 const T0 = "2026-07-06T00:00:00Z";
@@ -166,8 +167,7 @@ function createReaderFake() {
       };
     }
     if (normalized.startsWith("WITH REPORT_ROWS AS")) {
-      return {
-        rows: reportRows().map((artifact) => {
+      let rows = reportRows().map((artifact) => {
           const paper = arxivPapers.find((item) => Number(item.id) === legacyIdForArtifact(artifact));
           return {
             ...artifact,
@@ -181,10 +181,19 @@ function createReaderFake() {
             categories_json: paper.categories_json,
             published_at: paper.published_at,
             link: paper.link,
-            text_status: paper.text_status
+            text_status: paper.text_status,
+            source: paper.fetched_batch_id === "reader-import" ? "manual" : "daily"
           };
-        })
-      };
+        });
+      if (normalized.includes("RR.STATUS =")) rows = rows.filter((row) => row.status === params.find((item) => REPORT_STATUS_VALUES.has(item)));
+      if (normalized.includes("COALESCE(AP.FETCHED_BATCH_ID, '') = 'READER-IMPORT'")) {
+        const wantsDaily = normalized.includes("NOT ( COALESCE(AP.FETCHED_BATCH_ID, '') = 'READER-IMPORT'");
+        rows = rows.filter((row) => wantsDaily ? row.source === "daily" : row.source === "manual");
+      }
+      if (normalized.includes("SELECT COUNT(*) AS TOTAL")) return { rows: [{ total: String(rows.length) }] };
+      const limit = Number(params.at(-2));
+      const offset = Number(params.at(-1));
+      return { rows: rows.slice(offset, offset + limit) };
     }
     if (normalized.startsWith("SELECT PP.PAPER_ID, PP.PROJECT_ID")) {
       return {
@@ -298,6 +307,12 @@ function createReaderFake() {
       artifact.updated_at = params[1];
       return { rows: [], rowCount: 1 };
     }
+    if (normalized.startsWith("UPDATE ARTIFACTS SET TITLE") && normalized.includes("STATUS != 'REMOVED'")) {
+      for (const artifact of artifacts) {
+        if (legacyIdForArtifact(artifact) === Number(params[3]) && artifact.status !== "removed") artifact.title = params[0];
+      }
+      return { rows: [], rowCount: 1 };
+    }
     if (normalized.startsWith("UPDATE ARTIFACTS SET TITLE =")) {
       const artifact = artifacts.find((item) => Number(item.id) === Number(params[5]));
       artifact.title = params[0];
@@ -309,6 +324,19 @@ function createReaderFake() {
       artifact.model = "";
       artifact.input_hash = params[3];
       artifact.updated_at = params[4];
+      return { rows: [], rowCount: 1 };
+    }
+    if (normalized.startsWith("UPDATE ARXIV_PAPERS SET TITLE")) {
+      const paper = arxivPapers.find((item) => Number(item.id) === Number(params[2]));
+      if (!paper) return { rows: [], rowCount: 0 };
+      paper.title = params[0];
+      paper.updated_at = params[1];
+      return { rows: [{ id: paper.id }], rowCount: 1 };
+    }
+    if (normalized.startsWith("UPDATE PAPERS SET TITLE")) {
+      for (const paper of papers) {
+        if (paper.arxiv_id === arxivPapers.find((item) => Number(item.id) === Number(params[2]))?.arxiv_id) paper.title = params[0];
+      }
       return { rows: [], rowCount: 1 };
     }
     if (normalized.startsWith("SELECT R.PROJECT_ID FROM PROJECT_PAPER_RECOMMENDATIONS")) {
@@ -339,10 +367,15 @@ function createReaderFake() {
   };
 }
 
+const REPORT_STATUS_VALUES = new Set(["queued", "processing", "done", "failed", "cancelled"]);
+
 test("getReaderPapers returns reader list fields and stats without full report markdown", async () => {
   const fake = createReaderFake();
   const data = await getReaderPapers({ limit: "25" }, fake.pool);
   assert.equal(data.stats.total, 1);
+  assert.equal(data.total, 1);
+  assert.equal(data.limit, 25);
+  assert.equal(data.offset, 0);
   assert.equal(data.stats.queued, 1);
   assert.equal(data.items[0].paper_id, 101);
   assert.equal(data.items[0].artifact_id, 301);
@@ -365,6 +398,55 @@ test("getReaderPaperDetail prepends synthetic report messages before persisted c
   assert.equal(detail.reader_messages[1].source, "analysis_report");
   assert.equal(detail.reader_messages[2].content, "Question");
   assert.deepEqual(detail.reference_papers, []);
+});
+
+test("getReaderPapers applies status, project, source, and pagination to the server query", async () => {
+  const fake = createReaderFake();
+  const data = await getReaderPapers({
+    status: "queued",
+    project_id: "7",
+    source: "manual",
+    limit: "10",
+    offset: "0"
+  }, fake.pool);
+  assert.equal(data.total, 1);
+  assert.equal(data.items.length, 1);
+  assert.equal(data.items[0].source, "manual");
+  const countCall = fake.calls.find((call) => /SELECT COUNT\(\*\) AS total/i.test(call.sql));
+  assert.match(countCall.sql, /project_paper_recommendations/);
+  assert.match(countCall.sql, /project_papers/);
+  assert.match(countCall.sql, /fetched_batch_id/);
+  assert.ok(countCall.params.includes("queued"));
+  assert.ok(countCall.params.includes(7));
+});
+
+test("getReaderPapers returns filtered total independently from the requested page", async () => {
+  const fake = createReaderFake();
+  fake.artifacts.push({
+    ...fake.artifacts[0],
+    id: "302",
+    title: "Second report",
+    updated_at: "2026-07-05T23:00:00Z"
+  });
+  const data = await getReaderPapers({ limit: "1", offset: "1" }, fake.pool);
+  assert.equal(data.total, 2);
+  assert.equal(data.limit, 1);
+  assert.equal(data.offset, 1);
+  assert.equal(data.items.length, 1);
+});
+
+test("updateReaderPaperTitle synchronizes reader, library, and report titles", async () => {
+  const fake = createReaderFake();
+  setPoolForTesting(fake.pool);
+  try {
+    const detail = await updateReaderPaperTitle(101, { title: "Edited Reader Paper" });
+    assert.equal(detail.ok, true);
+    assert.equal(detail.paper.title, "Edited Reader Paper");
+    assert.equal(fake.artifacts[0].title, "Edited Reader Paper");
+    assert.deepEqual(fake.txCalls.slice(0, 2), ["BEGIN", "COMMIT"]);
+  } finally {
+    setPoolForTesting(null);
+  }
 });
 
 test("saveReaderReferencePapers persists full-text references in order", async () => {

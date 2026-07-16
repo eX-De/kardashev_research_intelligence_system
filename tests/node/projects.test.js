@@ -6,7 +6,8 @@ import {
   getProjectDetail,
   getProjects,
   linkProjectPaper,
-  saveProject
+  saveProject,
+  unlinkProjectPaper
 } from "../../server/projects.js";
 
 function createProjectsPool() {
@@ -170,6 +171,13 @@ function createProjectsPool() {
       }
       return { rows: [] };
     }
+    if (normalized.startsWith("DELETE FROM PROJECT_PAPERS")) {
+      const index = projectPapers.findIndex((item) => (
+        Number(item.project_id) === Number(params[0]) && Number(item.paper_id) === Number(params[1])
+      ));
+      if (index >= 0) projectPapers.splice(index, 1);
+      return { rows: [], rowCount: index >= 0 ? 1 : 0 };
+    }
     if (normalized.startsWith("SELECT * FROM ARXIV_PAPERS")) {
       return { rows: arxivPapers.filter((paper) => Number(paper.id) === Number(params[0])) };
     }
@@ -308,6 +316,21 @@ test("linkProjectPaper rejects invalid relation", async () => {
       () => linkProjectPaper(1, { paper_id: 12, relation: "bad" }),
       ValidationError
     );
+  } finally {
+    setPoolForTesting(null);
+  }
+});
+
+test("unlinkProjectPaper removes an existing paper association", async () => {
+  const fake = createProjectsPool();
+  fake.projectPapers[0].note = "manual";
+  fake.projectPapers[0].relation = "reading";
+  setPoolForTesting(fake.pool);
+  try {
+    const detail = await unlinkProjectPaper(1, 11);
+    assert.equal(detail.papers.length, 0);
+    assert.equal(fake.projectPapers.length, 0);
+    assert.deepEqual(fake.txCalls.slice(0, 2), ["BEGIN", "COMMIT"]);
   } finally {
     setPoolForTesting(null);
   }

@@ -54,7 +54,8 @@ import {
   getReaderPaperPdfPath as getNodeReaderPaperPdfPath,
   getReaderPapers as getNodeReaderPapers,
   retryReaderReport as retryNodeReaderReport,
-  saveReaderReferencePapers as saveNodeReaderReferencePapers
+  saveReaderReferencePapers as saveNodeReaderReferencePapers,
+  updateReaderPaperTitle as updateNodeReaderPaperTitle
 } from "./server/reader.js";
 import {
   getInbox as getNodeInbox,
@@ -2144,9 +2145,14 @@ async function routeApi(req, res, url) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/paper-reports") {
-    const limit = url.searchParams.get("limit") || "300";
-    const query = url.searchParams.get("q") || "";
-    const data = await getNodeReaderPapers({ limit, q: query });
+    const data = await getNodeReaderPapers({
+      limit: url.searchParams.get("limit") || "300",
+      offset: url.searchParams.get("offset") || "0",
+      q: url.searchParams.get("q") || "",
+      status: url.searchParams.get("status") || "",
+      project_id: url.searchParams.get("project_id") || "",
+      source: url.searchParams.get("source") || ""
+    });
     sendJson(res, 200, data);
     return;
   }
@@ -2224,9 +2230,14 @@ async function routeApi(req, res, url) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/reader/papers") {
-    const limit = url.searchParams.get("limit") || "300";
-    const query = url.searchParams.get("q") || "";
-    const data = await getNodeReaderPapers({ limit, q: query });
+    const data = await getNodeReaderPapers({
+      limit: url.searchParams.get("limit") || "300",
+      offset: url.searchParams.get("offset") || "0",
+      q: url.searchParams.get("q") || "",
+      status: url.searchParams.get("status") || "",
+      project_id: url.searchParams.get("project_id") || "",
+      source: url.searchParams.get("source") || ""
+    });
     sendJson(res, 200, data);
     return;
   }
@@ -2333,6 +2344,15 @@ async function routeApi(req, res, url) {
       readerReferencesMatch[1],
       { action: "reference_papers_updated" }
     );
+    return;
+  }
+  if (req.method === "PATCH" && readerPaperMatch) {
+    const body = await readRequestJson(req);
+    const data = await updateNodeReaderPaperTitle(readerPaperMatch[1], body);
+    sendJson(res, 200, data);
+    await publishDurablePaperChanged(SERVER_EVENTS.READER_PAPER_UPDATED, data, readerPaperMatch[1], {
+      action: "update_title"
+    });
     return;
   }
 

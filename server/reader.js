@@ -35,6 +35,28 @@ function normalizeLimit(value, fallback = 300) {
   return Math.max(1, Math.min(Number.parseInt(raw, 10), 1000));
 }
 
+function normalizeOffset(value) {
+  const raw = text(value) || "0";
+  if (!/^\d+$/.test(raw)) throw new ValidationError("offset must be a non-negative integer");
+  return Number.parseInt(raw, 10);
+}
+
+function normalizeReaderSource(value) {
+  const source = text(value).toLowerCase();
+  if (!source) return "";
+  if (source !== "daily" && source !== "manual") {
+    throw new ValidationError("source must be daily or manual");
+  }
+  return source;
+}
+
+function normalizeReaderStatus(value) {
+  const status = text(value).toLowerCase();
+  if (!status) return "";
+  if (!REPORT_STATUSES.includes(status)) throw new ValidationError(`Invalid report status: ${status}`);
+  return status;
+}
+
 function likeEscape(value) {
   return value.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
 }
@@ -315,9 +337,13 @@ export async function getPaperReportsSummary(db = { query }) {
 
 export async function getReaderPapers(params = {}, db = { query }) {
   const limit = normalizeLimit(params.limit, 300);
+  const offset = normalizeOffset(params.offset);
+  const projectId = text(params.project_id) ? positiveId(params.project_id, "project_id") : null;
+  const source = normalizeReaderSource(params.source ?? params.source_type);
+  const status = normalizeReaderStatus(params.status);
   const tokens = searchTokens(params.q ?? params.query);
   const values = [PAPER_REPORT_ARTIFACT_TYPE];
-  const searchClauses = [];
+  const filters = [];
   for (const token of tokens) {
     const needle = `%${likeEscape(token)}%`;
     const indexes = [];
@@ -325,7 +351,7 @@ export async function getReaderPapers(params = {}, db = { query }) {
       values.push(needle);
       indexes.push(`$${values.length}`);
     }
-    searchClauses.push(`
+    filters.push(`
       (
         LOWER(rr.title) LIKE ${indexes[0]} ESCAPE '\\'
         OR LOWER(rr.status) LIKE ${indexes[1]} ESCAPE '\\'
@@ -338,37 +364,65 @@ export async function getReaderPapers(params = {}, db = { query }) {
       )
     `);
   }
-  values.push(limit);
-  const searchSql = searchClauses.length ? `AND ${searchClauses.join(" AND ")}` : "";
+  if (status) {
+    values.push(status);
+    filters.push(`rr.status = $${values.length}`);
+  }
+  if (projectId) {
+    values.push(projectId);
+    const index = `$${values.length}`;
+    filters.push(`(
+      EXISTS (
+        SELECT 1 FROM project_papers pp
+        WHERE pp.paper_id = rr.legacy_arxiv_paper_id
+          AND pp.project_id = ${index}
+          AND NOT (pp.relation = 'candidate' AND pp.note = '${AUTO_MATCH_NOTE}')
+      )
+      OR EXISTS (
+        SELECT 1 FROM project_paper_recommendations ppr
+        WHERE ppr.paper_id = rr.legacy_arxiv_paper_id
+          AND ppr.project_id = ${index}
+          AND ppr.state IN ('pending', 'accepted')
+      )
+    )`);
+  }
+  const manualSourceSql = `(
+    COALESCE(ap.fetched_batch_id, '') = 'reader-import'
+    OR COALESCE(ap.arxiv_id, '') LIKE 'reader-upload-%'
+    OR COALESCE(ap.arxiv_id, '') LIKE 'reader-url-%'
+  )`;
+  if (source === "manual") filters.push(manualSourceSql);
+  if (source === "daily") filters.push(`NOT ${manualSourceSql}`);
+  const filterSql = filters.length ? `AND ${filters.join(" AND ")}` : "";
+  const reportRowsSql = `WITH report_rows AS (
+    SELECT
+      a.id, a.scope_id, a.title, a.status, a.model_provider_id, a.model,
+      a.content_markdown, LEFT(a.content_markdown, 500) AS report_excerpt,
+      a.content_json, a.source_json, a.created_at, a.updated_at,
+      COALESCE(
+        CASE WHEN (a.content_json::jsonb ->> 'legacy_arxiv_paper_id') ~ '^[0-9]+$'
+          THEN (a.content_json::jsonb ->> 'legacy_arxiv_paper_id')::bigint END,
+        CASE WHEN (a.source_json::jsonb ->> 'legacy_arxiv_paper_id') ~ '^[0-9]+$'
+          THEN (a.source_json::jsonb ->> 'legacy_arxiv_paper_id')::bigint END
+      ) AS legacy_arxiv_paper_id
+    FROM artifacts a
+    WHERE a.scope_type = 'paper'
+      AND a.artifact_type = $1
+      AND a.status != 'removed'
+  )`;
+  const countResult = await db.query(
+    `${reportRowsSql}
+     SELECT COUNT(*) AS total
+     FROM report_rows rr
+     JOIN arxiv_papers ap ON ap.id = rr.legacy_arxiv_paper_id
+     WHERE 1 = 1 ${filterSql}`,
+    values
+  );
+  const total = numberValue(countResult.rows?.[0]?.total);
+  const listValues = [...values, limit, offset];
   const result = await db.query(
     `
-      WITH report_rows AS (
-        SELECT
-          a.id,
-          a.scope_id,
-          a.title,
-          a.status,
-          a.model_provider_id,
-          a.model,
-          a.content_markdown,
-          LEFT(a.content_markdown, 500) AS report_excerpt,
-          a.content_json,
-          a.source_json,
-          a.created_at,
-          a.updated_at,
-          COALESCE(
-            CASE WHEN (a.content_json::jsonb ->> 'legacy_arxiv_paper_id') ~ '^[0-9]+$'
-              THEN (a.content_json::jsonb ->> 'legacy_arxiv_paper_id')::bigint
-            END,
-            CASE WHEN (a.source_json::jsonb ->> 'legacy_arxiv_paper_id') ~ '^[0-9]+$'
-              THEN (a.source_json::jsonb ->> 'legacy_arxiv_paper_id')::bigint
-            END
-          ) AS legacy_arxiv_paper_id
-        FROM artifacts a
-        WHERE a.scope_type = 'paper'
-          AND a.artifact_type = $1
-          AND a.status != 'removed'
-      )
+      ${reportRowsSql}
       SELECT
         rr.id,
         rr.scope_id,
@@ -389,11 +443,12 @@ export async function getReaderPapers(params = {}, db = { query }) {
         ap.categories_json,
         ap.published_at,
         ap.link,
-        ap.text_status
+        ap.text_status,
+        CASE WHEN ${manualSourceSql} THEN 'manual' ELSE 'daily' END AS source
       FROM report_rows rr
       JOIN arxiv_papers ap ON ap.id = rr.legacy_arxiv_paper_id
       WHERE 1 = 1
-        ${searchSql}
+        ${filterSql}
       ORDER BY
         CASE rr.status
           WHEN 'processing' THEN 0
@@ -405,9 +460,10 @@ export async function getReaderPapers(params = {}, db = { query }) {
         END,
         rr.updated_at DESC,
         rr.id DESC
-      LIMIT $${values.length}
+      LIMIT $${listValues.length - 1}
+      OFFSET $${listValues.length}
     `,
-    values
+    listValues
   );
   const paperIds = (result.rows || []).map((row) => Number(row.arxiv_paper_id)).filter(Boolean);
   const links = await projectLinksByPaper(paperIds, db);
@@ -434,6 +490,7 @@ export async function getReaderPapers(params = {}, db = { query }) {
       published_at: row.published_at || "",
       link: row.link || "",
       text_status: row.text_status || "",
+      source: row.source || "daily",
       project_count: sourceProjectIds.length,
       project_ids: sourceProjectIds,
       project_names: sourceNames.get(paperId) || [],
@@ -458,8 +515,56 @@ export async function getReaderPapers(params = {}, db = { query }) {
   });
   return {
     stats: await paperReportStats(db),
+    total,
+    limit,
+    offset,
     items
   };
+}
+
+export async function updateReaderPaperTitle(paperId, payload = {}) {
+  const id = positiveId(paperId, "paper_id");
+  const title = text(payload.title);
+  if (!title) throw new ValidationError("title is required");
+  await withTransaction(async (client) => {
+    const now = nowIso();
+    const legacyResult = await client.query(
+      "UPDATE arxiv_papers SET title = $1, updated_at = $2 WHERE id = $3 RETURNING id",
+      [title, now, id]
+    );
+    if (!legacyResult.rowCount) throw new NotFoundError(`Paper not found: ${id}`);
+    await client.query(
+      `
+        UPDATE papers
+        SET title = $1, updated_at = $2
+        WHERE arxiv_id = (SELECT arxiv_id FROM arxiv_papers WHERE id = $3)
+           OR id IN (
+             SELECT ps.paper_id
+             FROM paper_sources ps
+             JOIN arxiv_papers ap ON ap.id = $3
+             WHERE ps.source_identifier = ap.arxiv_id
+           )
+      `,
+      [title, now, id]
+    );
+    await client.query(
+      `
+        UPDATE artifacts
+        SET title = $1, updated_at = $2
+        WHERE scope_type = 'paper'
+          AND artifact_type = $3
+          AND status != 'removed'
+          AND COALESCE(
+            CASE WHEN (content_json::jsonb ->> 'legacy_arxiv_paper_id') ~ '^[0-9]+$'
+              THEN (content_json::jsonb ->> 'legacy_arxiv_paper_id')::bigint END,
+            CASE WHEN (source_json::jsonb ->> 'legacy_arxiv_paper_id') ~ '^[0-9]+$'
+              THEN (source_json::jsonb ->> 'legacy_arxiv_paper_id')::bigint END
+          ) = $4
+      `,
+      [title, now, PAPER_REPORT_ARTIFACT_TYPE, id]
+    );
+  });
+  return { ...(await getReaderPaperDetail(id)), ok: true };
 }
 
 async function findLegacyPaper(db, paperId) {

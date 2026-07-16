@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 
 import {
   api,
@@ -256,9 +257,15 @@ function LinkedPapersPanel({ linkedPapers, onUnlinkPaper }) {
         {linkedPapers.length ? linkedPapers.map((paper) => (
           <article className="project-detail-resource-item" key={paper.id}>
             <div>
-              <strong>{paper.title}</strong>
-              <p>{PROJECT_PAPER_RELATION_LABELS[paper.relation] || paper.relation} · {paper.arxiv_id}{paper.project_score ? ` · 匹配 ${fmtScore(paper.project_score)}` : ""}</p>
-              {paper.note ? <small>{paper.note}</small> : null}
+              <Link
+                aria-label={`打开论文报告：${paper.title}`}
+                className="project-detail-resource-link"
+                to={`/papers/reports/${encodeURIComponent(String(paper.id))}`}
+              >
+                <strong>{paper.title}</strong>
+                <p>{PROJECT_PAPER_RELATION_LABELS[paper.relation] || paper.relation} · {paper.arxiv_id}{paper.project_score ? ` · 匹配 ${fmtScore(paper.project_score)}` : ""}</p>
+                {paper.note ? <small>{paper.note}</small> : null}
+              </Link>
             </div>
             <button type="button" onClick={() => onUnlinkPaper(paper.id)}>移除</button>
           </article>

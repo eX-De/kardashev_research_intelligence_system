@@ -84,6 +84,19 @@ test("paper report aggregate events also mark artifacts", () => {
   assert.ok(cache.stale.some((target) => Array.isArray(target) && target.join("/") === "artifacts"));
 });
 
+test("reader paper updates invalidate linked project detail caches", () => {
+  const cache = createCacheRecorder();
+  applyServerEvent(cache, {
+    type: SERVER_EVENTS.READER_PAPER_UPDATED,
+    data: { paper_id: 41, project_ids: [7, 9] }
+  });
+
+  assert.ok(cache.stale.some((target) => Array.isArray(target) && target.join("/") === "reader/paper/41"));
+  assert.ok(cache.stale.some((target) => Array.isArray(target) && target.join("/") === "projects"));
+  assert.ok(cache.stale.some((target) => Array.isArray(target) && target.join("/") === "project/7"));
+  assert.ok(cache.stale.some((target) => Array.isArray(target) && target.join("/") === "project/9"));
+});
+
 test("task events mark job, report, reader, health, and notification namespaces", () => {
   const cache = createCacheRecorder();
   applyServerEvent(cache, {

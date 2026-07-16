@@ -197,6 +197,8 @@ export function applyServerEvent(cache, event) {
 
   if (READER_PAPER_EVENTS.has(type)) {
     markPaperChanged(cache, paperId);
+    const projectIds = Array.isArray(data?.project_ids) ? data.project_ids : [];
+    for (const id of projectIds) markProjectChanged(cache, id);
     return;
   }
 

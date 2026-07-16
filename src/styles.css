@@ -13725,17 +13725,6 @@ html[data-theme="dark"],
   letter-spacing: 0.06em;
 }
 
-.vision-reports .inbox-project-link-select {
-  width: 100%;
-  min-height: 42px;
-  appearance: none;
-  padding: 8px 36px 8px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  border-radius: 13px;
-  color: var(--vision-muted-strong);
-  background: rgba(5, 7, 18, 0.24);
-}
-
 .vision-reports .inbox-project-link-control::after,
 .vision-reports .reader-chat-model-control::after {
   position: absolute;
@@ -14371,8 +14360,7 @@ html[data-theme="dark"],
 }
 
 :root[data-theme="light"] .vision-reports .reader-composer textarea,
-:root[data-theme="light"] .vision-reports .reader-reference-body > input,
-:root[data-theme="light"] .vision-reports .inbox-project-link-select {
+:root[data-theme="light"] .vision-reports .reader-reference-body > input {
   color: #222c46;
   background: rgba(247, 248, 252, 0.82);
 }
@@ -16881,6 +16869,9 @@ html[data-theme="dark"],
 
 .project-detail-resource-item { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 13px; border: 1px solid rgba(255, 255, 255, 0.065); border-radius: 15px; background: rgba(255, 255, 255, 0.025); }
 .project-detail-resource-item > div { min-width: 0; }
+.project-detail-resource-link { display: block; min-width: 0; border-radius: 10px; color: inherit; text-decoration: none; }
+.project-detail-resource-link:hover strong { color: #b7c2ff; }
+.project-detail-resource-link:focus-visible { outline: 2px solid rgba(151, 166, 246, 0.72); outline-offset: 4px; }
 .project-detail-resource-item strong { display: block; color: #eef0fb; font-size: 11px; line-height: 1.4; }
 .project-detail-resource-item p { margin: 5px 0 0; overflow: hidden; color: var(--vision-muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .project-detail-resource-item small { display: -webkit-box; margin-top: 7px; overflow: hidden; color: rgba(183, 189, 212, 0.62); font-size: 9px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
@@ -16986,6 +16977,7 @@ html[data-theme="dark"],
 :root[data-theme="light"] .project-detail-resource-item strong,
 :root[data-theme="light"] .project-detail-report-head strong,
 :root[data-theme="light"] .project-detail-empty strong { color: #202a44; }
+:root[data-theme="light"] .project-detail-resource-link:hover strong { color: #5269b9; }
 :root[data-theme="light"] .project-detail-paper-reason { border-color: rgba(45, 54, 82, 0.07); color: #58647d; }
 :root[data-theme="light"] .project-detail-evidence p,
 :root[data-theme="light"] .project-detail-report-preview { color: #64708a; background: rgba(237, 240, 248, 0.82); }
@@ -18704,4 +18696,222 @@ html[data-theme="dark"],
 :root[data-theme="dark"] .workspace-primary-action:active {
   box-shadow: 0 7px 17px rgba(72, 69, 151, 0.2);
   transform: translateY(0);
+}
+
+/* Report queue controls share the library components and keep their overlays unclipped. */
+.vision-reports .reader-queue-filter-panel {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  overflow: visible;
+}
+
+.vision-reports .reader-queue-filter-panel > .inbox-filter-control {
+  min-width: 0;
+  flex: 1 1 160px;
+}
+
+.vision-reports .reader-queue-filter-panel > .reader-queue-search-control {
+  flex: 2 1 260px;
+}
+
+.vision-reports .reader-queue-filter-panel .workspace-select,
+.vision-reports .inbox-project-link-control .workspace-select {
+  width: 100%;
+}
+
+.vision-reports .report-queue-list-panel > .workspace-pagination {
+  margin: 8px 10px 12px;
+}
+
+.vision-reports .reader-queue-filter-summary {
+  flex-wrap: wrap;
+}
+
+.vision-reports .reader-queue-filter-summary .workspace-pagination {
+  margin: 0;
+}
+
+.vision-reports .reader-detail-card .reader-project-section {
+  position: relative;
+  z-index: 2;
+  overflow: visible;
+}
+
+.vision-reports .reader-project-section .workspace-select.is-open {
+  z-index: 3;
+}
+
+.vision-reports .inbox-project-link-control::after {
+  content: none;
+}
+
+.vision-reports .inbox-project-link-control .workspace-select-trigger {
+  min-height: 42px;
+  border-radius: 13px;
+  background: rgba(5, 7, 18, 0.24);
+}
+
+.vision-reports .reader-project-section .linked-project-evidence {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.vision-reports .reader-project-section .linked-project-evidence > div {
+  min-width: 0;
+}
+
+.vision-reports .reader-project-section .reader-project-unlink {
+  min-height: 32px;
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  border-color: rgba(235, 119, 128, 0.22);
+  color: #f1a7ac;
+  background: rgba(207, 83, 98, 0.08);
+  font-size: 10px;
+}
+
+/* The conversation viewport can be resized without changing message-card flow. */
+.vision-reports .reader-messages-shell {
+  position: relative;
+  height: clamp(540px, 78vh, 840px);
+  min-height: 280px;
+  max-height: min(88vh, 920px);
+  overflow: hidden;
+  resize: vertical;
+}
+
+.vision-reports .reader-messages-shell::after {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 10px;
+  height: 10px;
+  content: "";
+  pointer-events: none;
+  background: linear-gradient(135deg, transparent 45%, rgba(158, 170, 247, 0.55) 46%, rgba(158, 170, 247, 0.55) 55%, transparent 56%);
+}
+
+.vision-reports .reader-meta-label-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.vision-reports .reader-meta-label-row > span {
+  color: var(--vision-muted);
+  font-size: 9px;
+  font-weight: 730;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.vision-reports .reader-meta-edit-button,
+:root[data-theme="light"] .vision-reports .reader-meta-edit-button,
+:root[data-theme="dark"] .vision-reports .reader-meta-edit-button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgba(151, 165, 241, 0.18);
+  border-radius: 10px;
+  color: #aebaff;
+  background: rgba(117, 134, 220, 0.08);
+  box-shadow: none;
+}
+
+.vision-reports .reader-meta-edit-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.vision-reports .reader-title-editor {
+  display: grid;
+  gap: 9px;
+}
+
+.vision-reports .reader-title-editor input {
+  width: 100%;
+  min-height: 42px;
+  padding: 9px 11px;
+  border: 1px solid rgba(151, 165, 241, 0.25);
+  border-radius: 12px;
+  color: var(--vision-ink);
+  background: rgba(5, 7, 18, 0.24);
+  outline: none;
+}
+
+.vision-reports .reader-title-editor input:focus {
+  border-color: rgba(151, 165, 241, 0.58);
+  box-shadow: 0 0 0 3px rgba(108, 127, 220, 0.1);
+}
+
+.vision-reports .reader-title-editor > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.vision-reports .reader-title-editor button {
+  min-height: 32px;
+  padding: 6px 11px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 10px;
+  color: var(--vision-muted-strong);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.vision-reports .reader-title-editor button.primary {
+  color: #fff;
+  background: linear-gradient(135deg, #687dd2, #8b69c8);
+}
+
+:root[data-theme="light"] .vision-reports .inbox-project-link-control .workspace-select-trigger,
+:root[data-theme="light"] .vision-reports .reader-title-editor input {
+  border-color: rgba(66, 80, 116, 0.14);
+  color: #273148;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+:root[data-theme="light"] .vision-reports .reader-project-section .reader-project-unlink {
+  border-color: rgba(190, 80, 91, 0.18);
+  color: #b24c5a;
+  background: rgba(198, 78, 91, 0.07);
+}
+
+@media (max-width: 960px) {
+  .vision-reports .reader-queue-filter-panel {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .vision-reports .reader-queue-search-control {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 620px) {
+  .vision-reports .reader-queue-filter-panel {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .vision-reports .reader-queue-search-control {
+    grid-column: auto;
+  }
+
+  .vision-reports .reader-project-section .linked-project-evidence {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .vision-reports .reader-messages-shell {
+    height: clamp(450px, 72dvh, 720px);
+    min-height: 360px;
+    max-height: min(86dvh, 760px);
+  }
 }

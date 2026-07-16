@@ -12,10 +12,12 @@ import {
 } from "../lib/dashboard.js";
 import { cacheNamespace, useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { friendlyObsidianMessage, postObsidianJson, useObsidianCapability } from "../lib/obsidianCapability.js";
+import { resolveReaderQueueSelection } from "../lib/paperSelection.js";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
 import { InlineLoader, LoadingPanel } from "./Loading.jsx";
 import { WorkspaceDialog } from "./WorkspaceDialog.jsx";
+import { WorkspacePagination } from "./WorkspacePagination.jsx";
 import { WorkspaceSelect } from "./WorkspaceSelect.jsx";
 
 const REPORT_STATUS_LABELS = {
@@ -39,10 +41,20 @@ function reportStatusLabel(status) {
   return REPORT_STATUS_LABELS[status] || status || "Missing";
 }
 
-function useDebouncedValue(value, delay = 300) {
+function useDebouncedValue(value, delay = 700, onCommit) {
   const [debounced, setDebounced] = useState(value);
+  const debouncedRef = useRef(value);
+  const onCommitRef = useRef(onCommit);
   useEffect(() => {
-    const timer = window.setTimeout(() => setDebounced(value), delay);
+    onCommitRef.current = onCommit;
+  }, [onCommit]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      if (Object.is(debouncedRef.current, value)) return;
+      debouncedRef.current = value;
+      onCommitRef.current?.(value);
+      setDebounced(value);
+    }, delay);
     return () => window.clearTimeout(timer);
   }, [delay, value]);
   return debounced;
@@ -338,27 +350,27 @@ function ChatMessage({ deleting, message, onDelete }) {
 
 function ProjectLinkControl({ linkedProjects, linking, onLink, paperId, projects }) {
   const linkedProjectIds = new Set((linkedProjects || []).map((item) => Number(item.project_id)));
-  const linkedProjectNames = (linkedProjects || []).map((item) => item.project_name).filter(Boolean);
   const label = !projects.length ? "暂无项目" : linking ? "关联中..." : "手动关联到项目";
+  const options = [
+    ["", label],
+    ...projects.map((project) => ({
+      disabled: linkedProjectIds.has(Number(project.id)),
+      label: linkedProjectIds.has(Number(project.id)) ? `已关联 ${project.name}` : project.name,
+      value: String(project.id)
+    }))
+  ];
   return (
-    <label className="project-link-control inbox-project-link-control">
+    <div className="project-link-control inbox-project-link-control">
       <span>手动关联</span>
-      <select
-        aria-label="手动关联项目"
-        className="project-link-select inbox-project-link-select"
+      <WorkspaceSelect
+        ariaLabel="手动关联项目"
+        className="inbox-project-link-select"
         disabled={!projects.length || linking}
-        onChange={(event) => onLink(paperId, event.target.value)}
-        title="手动关联到项目"
+        onChange={(value) => onLink(paperId, value)}
+        options={options}
         value=""
-      >
-        <option value="">{label}</option>
-        {projects.map((project) => (
-          <option disabled={linkedProjectIds.has(Number(project.id))} key={project.id} value={project.id}>
-            {linkedProjectIds.has(Number(project.id)) ? `已关联 ${project.name}` : project.name}
-          </option>
-        ))}
-      </select>
-    </label>
+      />
+    </div>
   );
 }
 
@@ -378,12 +390,14 @@ function ReaderDetail({
   onGenerate,
   onProjectContextChange,
   onProjectLink,
+  onProjectUnlink,
   onReferencePapersSave,
   onRetry,
   onSave,
   onSendMessage,
   onSendQuestion,
   onTabChange,
+  onTitleSave,
   projects,
   projectContextEnabled,
   referenceCandidates,
@@ -401,6 +415,9 @@ function ReaderDetail({
   const [referenceQuery, setReferenceQuery] = useState("");
   const [draftReferenceIds, setDraftReferenceIds] = useState([]);
   const [messageScroll, setMessageScroll] = useState({ max: 0, top: 0 });
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [savingTitle, setSavingTitle] = useState(false);
   const messagesRef = useRef(null);
 
   const updateMessageScroll = useCallback(() => {
@@ -548,6 +565,29 @@ function ReaderDetail({
     ? chatModelValue
     : "";
 
+  function beginTitleEdit() {
+    setTitleDraft(paper.title || "");
+    setEditingTitle(true);
+  }
+
+  function cancelTitleEdit() {
+    setTitleDraft(paper.title || "");
+    setEditingTitle(false);
+  }
+
+  async function saveTitle(event) {
+    event.preventDefault();
+    const nextTitle = titleDraft.trim();
+    if (!nextTitle || nextTitle === String(paper.title || "").trim()) {
+      cancelTitleEdit();
+      return;
+    }
+    setSavingTitle(true);
+    const saved = await onTitleSave(paper.id, nextTitle);
+    setSavingTitle(false);
+    if (saved) setEditingTitle(false);
+  }
+
   function resetFollowUpSelection() {
     setSelectedText("");
     setSelectionContext(null);
@@ -694,6 +734,33 @@ function ReaderDetail({
 
         {activeTab === "analysis" ? (
           <div className="reader-tab-panel reader-analysis-panel" role="tabpanel">
+            <section className="section inbox-content-section reader-project-section">
+              <header className="inbox-section-heading">
+                <div><span>阅读上下文</span><h3>项目关联</h3></div>
+                <em>{linkedProjects.length + recommendations.length}</em>
+              </header>
+              <ProjectLinkControl linkedProjects={linkedProjects} linking={linkingProject} onLink={onProjectLink} paperId={paper.id} projects={projects} />
+              <div className="evidence-list">
+                {linkedProjects.map((project) => (
+                  <article className="evidence linked-project-evidence" key={`linked-${project.project_id}`}>
+                    <div>
+                      <strong>{project.project_name} · {project.relation} · 已关联</strong>
+                      <p>{project.note || "手动关联到项目。"}</p>
+                    </div>
+                    <button
+                      className="reader-project-unlink"
+                      disabled={linkingProject}
+                      onClick={() => onProjectUnlink(paper.id, project.project_id)}
+                      type="button"
+                    >取消关联</button>
+                  </article>
+                ))}
+                {recommendations.map((recommendation) => (
+                  <article className="evidence" key={`${recommendation.project_id}-${recommendation.state}`}><strong>{recommendation.project_name} · {recommendation.relation_type} · {recommendation.state}</strong><p>{recommendation.reason || "暂无推荐理由。"}</p></article>
+                ))}
+                {!linkedProjects.length && !recommendations.length ? <p className="summary">暂无项目级推荐。</p> : null}
+              </div>
+            </section>
             <section className="section inbox-content-section reader-report-section">
               <header className="inbox-section-heading">
                 <div><span>深度阅读</span><h3>全文报告</h3></div>
@@ -723,22 +790,6 @@ function ReaderDetail({
               {!obsidianCapability?.available ? <p className="inbox-decision-hint capability-hint">{obsidianHint}</p> : null}
               <div className="reader-report-content">
                 {ready ? <LazyMarkdownReport markdown={report.report_markdown} /> : <p className="muted">报告尚未生成。</p>}
-              </div>
-            </section>
-            <section className="section inbox-content-section reader-project-section">
-              <header className="inbox-section-heading">
-                <div><span>推荐依据</span><h3>项目关联</h3></div>
-                <em>{linkedProjects.length + recommendations.length}</em>
-              </header>
-              <ProjectLinkControl linkedProjects={linkedProjects} linking={linkingProject} onLink={onProjectLink} paperId={paper.id} projects={projects} />
-              <div className="evidence-list">
-                {linkedProjects.map((project) => (
-                  <article className="evidence" key={`linked-${project.project_id}`}><strong>{project.project_name} · {project.relation} · 已关联</strong><p>{project.note || "手动关联到项目。"}</p></article>
-                ))}
-                {recommendations.map((recommendation) => (
-                  <article className="evidence" key={`${recommendation.project_id}-${recommendation.state}`}><strong>{recommendation.project_name} · {recommendation.relation_type} · {recommendation.state}</strong><p>{recommendation.reason || "暂无推荐理由。"}</p></article>
-                ))}
-                {!linkedProjects.length && !recommendations.length ? <p className="summary">暂无项目级推荐。</p> : null}
               </div>
             </section>
           </div>
@@ -953,8 +1004,29 @@ function ReaderDetail({
             </header>
             <div className="reader-meta-grid">
             <div className="reader-meta-item wide">
-              <span>标题</span>
-              <strong>{paper.title || "未记录"}</strong>
+              <div className="reader-meta-label-row">
+                <span>标题</span>
+                {!editingTitle ? (
+                  <button aria-label="编辑论文标题" className="reader-meta-edit-button" onClick={beginTitleEdit} title="编辑标题" type="button">
+                    <svg aria-hidden="true" fill="none" viewBox="0 0 20 20" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7"><path d="m4 14.8.7-3.3L13 3.2a1.7 1.7 0 0 1 2.4 0l1.4 1.4a1.7 1.7 0 0 1 0 2.4l-8.3 8.3-3.3.7Z" /><path d="m11.8 4.4 3.8 3.8M4.7 11.5l3.8 3.8" /></svg>
+                  </button>
+                ) : null}
+              </div>
+              {editingTitle ? (
+                <form className="reader-title-editor" onSubmit={saveTitle}>
+                  <input
+                    aria-label="论文标题"
+                    autoFocus
+                    disabled={savingTitle}
+                    onChange={(event) => setTitleDraft(event.target.value)}
+                    value={titleDraft}
+                  />
+                  <div>
+                    <button disabled={savingTitle} onClick={cancelTitleEdit} type="button">取消</button>
+                    <button className="primary" disabled={savingTitle || !titleDraft.trim()} type="submit">{savingTitle ? "保存中…" : "保存"}</button>
+                  </div>
+                </form>
+              ) : <strong>{paper.title || "未记录"}</strong>}
             </div>
             <div className="reader-meta-item">
               <span>arXiv</span>
@@ -994,6 +1066,8 @@ function ReaderDetail({
 
 export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, targetPaperKey }) {
   const cache = useApiCacheClient();
+  const queueNavigationRef = useRef(false);
+  const internalRouteSelectionRef = useRef(null);
   const [activePaperId, setActivePaperId] = useState(null);
   const [activeTab, setActiveTab] = useState("analysis");
   const [message, setMessage] = useState("");
@@ -1003,7 +1077,10 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
   const [importBusy, setImportBusy] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState("all");
+  const [projectFilter, setProjectFilter] = useState("all");
+  const [sourceFilter, setSourceFilter] = useState("all");
   const [queueQuery, setQueueQuery] = useState("");
+  const [queuePage, setQueuePage] = useState(0);
   const [queueFiltersOpen, setQueueFiltersOpen] = useState(false);
   const [pendingUser, setPendingUser] = useState(null);
   const [streamingAssistant, setStreamingAssistant] = useState(null);
@@ -1013,16 +1090,31 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
   const [savingChatModel, setSavingChatModel] = useState(false);
   const [projectContextPreferences, setProjectContextPreferences] = useState({});
   const [savingReferencePapers, setSavingReferencePapers] = useState(false);
-  const debouncedQueueQuery = useDebouncedValue(queueQuery);
+  const queuePageSize = 10;
+  const debouncedQueueQuery = useDebouncedValue(queueQuery, 700, () => {
+    queueNavigationRef.current = true;
+    setQueuePage(0);
+  });
   const queueSearchQuery = debouncedQueueQuery.trim();
   const readerListQueryString = useMemo(() => {
-    const params = new URLSearchParams({ limit: "300" });
+    const params = new URLSearchParams({
+      limit: String(queuePageSize),
+      offset: String(queuePage * queuePageSize)
+    });
     if (queueSearchQuery) params.set("q", queueSearchQuery);
+    if (statusFilter !== "all") params.set("status", statusFilter);
+    if (projectFilter !== "all") params.set("project_id", projectFilter);
+    if (sourceFilter !== "all") params.set("source", sourceFilter);
     return params.toString();
-  }, [queueSearchQuery]);
+  }, [projectFilter, queuePage, queueSearchQuery, sourceFilter, statusFilter]);
   const readerListQuery = useCachedApi(
     ["reader", "papers", readerListQueryString],
     () => api(`/api/reader/papers?${readerListQueryString}`),
+    { staleTime: 60000 }
+  );
+  const referenceCandidatesQuery = useCachedApi(
+    ["reader", "papers", "reference-candidates"],
+    () => api("/api/reader/papers?limit=300&offset=0"),
     { staleTime: 60000 }
   );
   const paperReportsSummaryQuery = useCachedApi(["paper-reports", "summary"], () => api("/api/paper-reports/summary"), { staleTime: 15000 });
@@ -1040,6 +1132,10 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
   const stats = paperReportsSummaryQuery.data?.stats || listData.stats || {};
   const queueStatus = jobStatusQuery.data?.scheduler?.paper_report_queue || {};
   const projects = projectsQuery.data?.items || [];
+  const projectFilterOptions = useMemo(() => [
+    ["all", "全部项目"],
+    ...projects.map((project) => [String(project.id), project.name])
+  ], [projects]);
   const readerSettings = settingsQuery.data?.settings || null;
   const obsidianCapability = useObsidianCapability({ settings: readerSettings, onError: handleCapabilityError });
 
@@ -1067,13 +1163,53 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
     }
     return messages;
   }, [baseMessages, detailPaperId, pendingUser, streamingAssistant]);
-  const visibleItems = useMemo(() => (
-    statusFilter === "all" ? items : items.filter((item) => item.status === statusFilter)
-  ), [items, statusFilter]);
-  const hasQueueSearch = Boolean(queueSearchQuery);
+  const visibleItems = items;
+  const queueTotal = Number(listData.total ?? (queuePage * queuePageSize + items.length));
+  const resolvedQueuePageCount = Math.max(1, Math.ceil(queueTotal / queuePageSize));
+  const queuePageCount = readerListQuery.hasData
+    ? resolvedQueuePageCount
+    : Math.max(queuePage + 1, resolvedQueuePageCount);
+  const queueCurrentPage = queuePage + 1;
+  const hasQueueFilters = Boolean(
+    queueSearchQuery || statusFilter !== "all" || projectFilter !== "all" || sourceFilter !== "all"
+  );
   const queueSearchPending = queueQuery.trim() !== queueSearchQuery;
-  const queueActiveFilterCount = [queueQuery.trim(), statusFilter !== "all"].filter(Boolean).length;
+  const queueActiveFilterCount = [
+    queueQuery.trim(),
+    statusFilter !== "all",
+    projectFilter !== "all",
+    sourceFilter !== "all"
+  ].filter(Boolean).length;
   const activeReportCount = Number(stats.queued || 0) + Number(stats.processing || 0);
+
+  function changeQueueFilter(setter, value) {
+    queueNavigationRef.current = true;
+    setQueuePage(0);
+    setter(value);
+  }
+
+  function changeQueuePage(nextPage) {
+    const normalizedPage = Math.max(0, Math.min(queuePageCount - 1, nextPage));
+    if (normalizedPage === queuePage) return;
+    queueNavigationRef.current = true;
+    setQueuePage(normalizedPage);
+  }
+
+  function selectQueuePaper(paperId, options = {}) {
+    const numericPaperId = Number(paperId);
+    if (!numericPaperId) return;
+    if (onSelectPaper) {
+      internalRouteSelectionRef.current = numericPaperId;
+      onSelectPaper(numericPaperId, options);
+    }
+    setActivePaperId(numericPaperId);
+  }
+
+  useEffect(() => {
+    if (!readerListQuery.hasData || readerListQuery.loading) return;
+    if (queuePage + 1 <= queuePageCount) return;
+    setQueuePage(Math.max(0, queuePageCount - 1));
+  }, [queuePage, queuePageCount, readerListQuery.hasData, readerListQuery.loading]);
 
   const refresh = useCallback(async () => {
     const [data] = await Promise.all([
@@ -1083,6 +1219,11 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
       activePaperId ? detailQuery.refresh({ force: true }) : Promise.resolve(null)
     ]);
     const nextItems = data.items || [];
+    const pendingRouteId = Number(internalRouteSelectionRef.current || 0);
+    if (pendingRouteId && nextItems.some((item) => Number(item.paper_id) === pendingRouteId)) {
+      setActivePaperId(pendingRouteId);
+      return;
+    }
     const routePaperId = Number(targetPaperId || 0);
     const routePaperVisible = routePaperId && nextItems.some((item) => item.paper_id === routePaperId);
     if (routePaperId && (!queueSearchQuery || routePaperVisible)) {
@@ -1095,8 +1236,7 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
       ? currentActiveId
       : nextItems[0]?.paper_id;
     if (nextId) {
-      onSelectPaper?.(nextId, { replace: true });
-      setActivePaperId(Number(nextId));
+      selectQueuePaper(nextId, { replace: true });
     } else {
       setActivePaperId(null);
     }
@@ -1117,14 +1257,21 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
     const nextItems = data.items || [];
     const routePaperId = Number(targetPaperId || 0);
     const currentActiveId = Number(activePaperId || 0);
-    const activeStillExists = currentActiveId && nextItems.some((item) => item.paper_id === currentActiveId);
-    const routePaperVisible = routePaperId && nextItems.some((item) => item.paper_id === routePaperId);
-    const nextId = routePaperId && (!queueSearchQuery || routePaperVisible)
-      ? routePaperId
-      : (activeStillExists ? currentActiveId : nextItems[0]?.paper_id);
+    const pendingRouteId = Number(internalRouteSelectionRef.current || 0);
+    const navigatingQueue = queueNavigationRef.current;
+    const nextId = resolveReaderQueueSelection({
+      activeId: currentActiveId,
+      allowRouteOutsideItems: !queueSearchQuery,
+      items: nextItems,
+      pendingRouteId,
+      routePaperId,
+      selectFirst: navigatingQueue
+    });
+    if (navigatingQueue) queueNavigationRef.current = false;
     if (nextId) {
-      if (!routePaperId) onSelectPaper?.(nextId, { replace: true });
-      setActivePaperId(Number(nextId));
+      if (pendingRouteId === nextId && !navigatingQueue) setActivePaperId(Number(nextId));
+      else if (!routePaperId || navigatingQueue) selectQueuePaper(nextId, { replace: true });
+      else setActivePaperId(Number(nextId));
       return;
     }
     setActivePaperId(null);
@@ -1138,7 +1285,17 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
   useEffect(() => {
     const numericPaperId = Number(targetPaperId || 0);
     if (!numericPaperId) return;
+    if (internalRouteSelectionRef.current === numericPaperId) {
+      internalRouteSelectionRef.current = null;
+      setActivePaperId(numericPaperId);
+      return;
+    }
+    queueNavigationRef.current = false;
+    setQueuePage(0);
     setStatusFilter("all");
+    setProjectFilter("all");
+    setSourceFilter("all");
+    setQueueQuery("");
     setActivePaperId(numericPaperId);
   }, [targetPaperId, targetPaperKey]);
 
@@ -1363,6 +1520,61 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
     }
   }
 
+  async function unlinkPaperFromProject(paperId, projectId) {
+    const numericPaperId = Number(paperId);
+    const numericProjectId = Number(projectId);
+    if (!numericPaperId || !numericProjectId) return;
+    setLinkingProjectPaperId(numericPaperId);
+    try {
+      const project = projects.find((item) => Number(item.id) === numericProjectId);
+      await api(`/api/projects/${numericProjectId}/papers/${numericPaperId}`, { method: "DELETE" });
+      cache.markStale(cacheNamespace("reader", "papers"));
+      cache.markStale(["reader", "paper", String(numericPaperId)]);
+      cache.markStale(["project", String(numericProjectId)]);
+      cache.markStale(["projects"]);
+      setStatusMessage(`已取消项目关联${project?.name ? `：${project.name}` : ""}`);
+      await refresh();
+    } catch (error) {
+      setStatusMessage(error.message);
+    } finally {
+      setLinkingProjectPaperId(null);
+    }
+  }
+
+  async function savePaperTitle(paperId, title) {
+    const numericPaperId = Number(paperId);
+    try {
+      const data = await api(`/api/reader/papers/${numericPaperId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title })
+      });
+      cache.setCache(["reader", "paper", String(numericPaperId)], data);
+      readerListQuery.patch((current) => ({
+        ...(current || {}),
+        items: (current?.items || []).map((item) => (
+          Number(item.paper_id) === numericPaperId ? { ...item, title } : item
+        ))
+      }));
+      referenceCandidatesQuery.patch((current) => ({
+        ...(current || {}),
+        items: (current?.items || []).map((item) => (
+          Number(item.paper_id) === numericPaperId ? { ...item, title } : item
+        ))
+      }));
+      cache.markStale(cacheNamespace("reader", "papers"));
+      Promise.all([
+        readerListQuery.refresh({ force: true }),
+        detailQuery.refresh({ force: true })
+      ]).catch((error) => setStatusMessage(error.message));
+      setStatusMessage("论文标题已更新");
+      return true;
+    } catch (error) {
+      setStatusMessage(error.message);
+      return false;
+    }
+  }
+
   async function sendMessage(event) {
     event.preventDefault();
     const nextMessage = message.trim();
@@ -1523,7 +1735,15 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
               >
                 {queueFiltersOpen ? "收起筛选" : `筛选${queueActiveFilterCount ? ` (${queueActiveFilterCount})` : ""}`}
               </button>
-              <em>{loading || queueSearchPending ? "…" : visibleItems.length}</em>
+              <em>{loading || queueSearchPending ? "…" : queueTotal}</em>
+              <WorkspacePagination
+                compact
+                currentPage={queueCurrentPage}
+                loading={readerListQuery.status === "loading" || queueSearchPending}
+                onNext={() => changeQueuePage(queuePage + 1)}
+                onPrevious={() => changeQueuePage(queuePage - 1)}
+                pageCount={queuePageCount}
+              />
             </div>
           </header>
           {queueFiltersOpen ? (
@@ -1532,9 +1752,27 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
                 <span>状态</span>
                 <WorkspaceSelect
                   ariaLabel="筛选报告状态"
-                  onChange={setStatusFilter}
+                  onChange={(value) => changeQueueFilter(setStatusFilter, value)}
                   options={REPORT_FILTERS}
                   value={statusFilter}
+                />
+              </div>
+              <div className="inbox-filter-control reader-queue-project-control">
+                <span>所属项目</span>
+                <WorkspaceSelect
+                  ariaLabel="筛选所属项目"
+                  onChange={(value) => changeQueueFilter(setProjectFilter, value)}
+                  options={projectFilterOptions}
+                  value={projectFilter}
+                />
+              </div>
+              <div className="inbox-filter-control reader-queue-source-control">
+                <span>来源</span>
+                <WorkspaceSelect
+                  ariaLabel="筛选论文来源"
+                  onChange={(value) => changeQueueFilter(setSourceFilter, value)}
+                  options={[["all", "全部来源"], ["daily", "每日任务"], ["manual", "手动导入"]]}
+                  value={sourceFilter}
                 />
               </div>
               <label className="inbox-filter-control inbox-filter-search reader-queue-search-control">
@@ -1560,28 +1798,40 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
                 key={item.paper_id}
                 onDelete={(paperId) => deleteReport(paperId)}
                 onSelect={(paperId) => {
-                  if (onSelectPaper) {
-                    onSelectPaper(paperId);
-                    return;
-                  }
-                  setActivePaperId(Number(paperId));
+                  selectQueuePaper(paperId);
                 }}
               />
             )) : (
               <div className="queue-empty-state">
-                <h2>{items.length ? "当前筛选下没有任务" : hasQueueSearch ? "没有匹配的报告" : "暂无全文报告任务"}</h2>
+                <h2>{hasQueueFilters ? "没有匹配的报告" : "暂无全文报告任务"}</h2>
                 <p>
-                  {items.length
-                    ? "切换状态筛选查看其它报告。"
-                    : hasQueueSearch
-                      ? "换一个关键词或清空搜索。"
-                      : "项目级推荐通过后会自动进入这里，也可以导入 URL 或 PDF。"}
+                  {hasQueueFilters
+                    ? "调整关键词、状态、所属项目或来源后重试。"
+                    : "项目级推荐通过后会自动进入这里，也可以导入 URL 或 PDF。"}
                 </p>
-                {!items.length && hasQueueSearch ? <button type="button" onClick={() => setQueueQuery("")}>清空搜索</button> : null}
-                {!items.length && !hasQueueSearch ? <button type="button" onClick={() => setImportOpen(true)}>导入论文</button> : null}
+                {hasQueueFilters ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      queueNavigationRef.current = true;
+                      setQueuePage(0);
+                      setQueueQuery("");
+                      setStatusFilter("all");
+                      setProjectFilter("all");
+                      setSourceFilter("all");
+                    }}
+                  >清空筛选</button>
+                ) : <button type="button" onClick={() => setImportOpen(true)}>导入论文</button>}
               </div>
             )}
           </div>
+          <WorkspacePagination
+            currentPage={queueCurrentPage}
+            loading={readerListQuery.status === "loading" || queueSearchPending}
+            onNext={() => changeQueuePage(queuePage + 1)}
+            onPrevious={() => changeQueuePage(queuePage - 1)}
+            pageCount={queuePageCount}
+          />
         </section>
 
         <section className="detail-panel inbox-detail-panel reader-detail-panel" aria-label="报告队列详情">
@@ -1612,15 +1862,17 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
                 setProjectContextPreferences((current) => ({ ...current, [detailPaperId]: enabled }));
               }}
               onProjectLink={linkPaperToProject}
+              onProjectUnlink={unlinkPaperFromProject}
               onReferencePapersSave={saveReferencePapers}
               onRetry={retryReport}
               onSave={saveToObsidian}
               onSendQuestion={(question) => sendReaderMessage(question, { restoreOnFailure: false })}
               onSendMessage={sendMessage}
               onTabChange={setActiveTab}
+              onTitleSave={savePaperTitle}
               projects={projects}
               projectContextEnabled={projectContextEnabled}
-              referenceCandidates={items}
+              referenceCandidates={referenceCandidatesQuery.data?.items || items}
               savingChatModel={savingChatModel}
               savingReferencePapers={savingReferencePapers}
               setMessage={setMessage}
