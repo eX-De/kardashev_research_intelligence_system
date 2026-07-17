@@ -1,6 +1,7 @@
 import { NavLink } from "react-router-dom";
 
 import { ThemeControl } from "./ThemeControl.jsx";
+import "../styles/Sidebar.css";
 
 const NAV_ICONS = {
   home: <><path d="M4 10.5 12 4l8 6.5" /><path d="M6.5 9.5V20h11V9.5" /><path d="M10 20v-6h4v6" /></>,

@@ -4,10 +4,11 @@ import { api, fmtDate } from "../lib/dashboard.js";
 import { cacheNamespace, useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { friendlyObsidianMessage, postObsidianJson, useObsidianCapability } from "../lib/obsidianCapability.js";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
-import { LoadingPanel } from "./Loading.jsx";
+import { WorkspacePaneLoader } from "./WorkspacePaneLoader.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
 import { WORKSPACE_PAGE_SIZE_OPTIONS, WorkspacePagination } from "./WorkspacePagination.jsx";
 import { WorkspaceSelect } from "./WorkspaceSelect.jsx";
+import "../styles/ArtifactsView.css";
 
 const TYPES = [
   ["", "全部类型"],
@@ -310,7 +311,7 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
 
           <div className="library-list paper-library-list artifacts-list">
             {listLoading ? (
-              <LoadingPanel compact rows={8} title="读取产物列表" />
+              <WorkspacePaneLoader rows={6} title="读取产物列表" variant="list" />
             ) : items.length ? items.map((item) => {
               const typeLabel = labelFor(TYPE_LABELS, item.artifact_type);
               const scopeLabel = labelFor(SCOPE_LABELS, item.scope_type);
@@ -364,11 +365,11 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
 
         <section className="detail-panel library-detail-panel artifact-detail-panel">
           {detailPanelLoading ? (
-            <LoadingPanel
+            <WorkspacePaneLoader
               className="artifact-detail-loading"
               description={detailLoading ? "正在读取所选产物的正文、状态和同步信息。" : "正在读取产物列表和首个产物正文。"}
-              rows={8}
               title={detailLoading ? "打开产物详情" : "读取产物详情"}
+              variant="detail"
             />
           ) : detail ? (
             <article className="inbox-detail-card library-paper-detail artifact-paper-detail library-detail-transition" key={detail.id}>

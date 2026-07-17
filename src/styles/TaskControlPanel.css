@@ -1,0 +1,307 @@
+/* Styles owned by TaskControlPanel.jsx. */
+
+/* Legacy task controls. */
+.task-control-panel {
+  display: grid;
+  gap: 16px;
+}
+
+.task-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.mode-card {
+  min-height: 132px;
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  text-align: left;
+}
+
+.mode-card span {
+  width: fit-content;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #eef2f6;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.mode-card strong {
+  font-size: 15px;
+  line-height: 1.25;
+}
+
+.mode-card p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.mode-card.active {
+  border-color: #94cfc4;
+  background: #f5fffb;
+  box-shadow: inset 0 0 0 1px rgba(15, 118, 110, 0.18), var(--shadow-soft);
+}
+
+.mode-card.active span {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.task-action-panel {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.42fr) minmax(260px, 0.58fr);
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.task-recovery-banner {
+  display: grid;
+  gap: 4px;
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid #ead093;
+  border-radius: 8px;
+  background: var(--gold-soft);
+}
+
+.task-recovery-banner p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.run-now-button {
+  min-height: 46px;
+}
+
+.task-shortcuts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.task-shortcuts button {
+  min-height: 46px;
+  background: #fff;
+}
+
+@media (max-width: 1050px) {
+  .task-mode-grid,
+  .task-action-panel,
+  .task-shortcuts {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Refreshed task-control appearance. */
+.task-mode-grid {
+  gap: 9px;
+}
+
+.mode-card {
+  border-color: #dce3eb;
+  background: linear-gradient(180deg, #ffffff, #f8fafc);
+}
+
+.mode-card:hover {
+  border-color: #bac7d7;
+}
+
+.mode-card.active {
+  border-color: #9ccdc2;
+  background: linear-gradient(180deg, #f7fffb, #effaf6);
+  box-shadow: inset 0 0 0 1px rgba(17, 116, 97, 0.16), var(--shadow-soft);
+}
+
+.task-action-panel {
+  grid-template-columns: minmax(210px, 0.32fr) minmax(150px, 0.22fr) minmax(150px, 0.22fr) minmax(300px, 1fr);
+  align-items: stretch;
+}
+
+.task-shortcuts {
+  grid-template-columns: repeat(5, minmax(108px, 1fr));
+}
+
+@media (max-width: 1320px) and (min-width: 1051px) {
+  .task-action-panel,
+  .task-shortcuts {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 1050px) {
+  .task-mode-grid,
+  .task-action-panel,
+  .task-shortcuts {
+    grid-template-columns: 1fr;
+  }
+}
+
+.mode-card:hover {
+  transform: none;
+}
+
+.mode-card span {
+  letter-spacing: 0;
+}
+
+.task-action-panel > button {
+  min-height: 48px;
+}
+
+.task-shortcuts button {
+  min-height: 40px;
+  padding-inline: 10px;
+  font-size: 12px;
+}
+
+:root[data-theme="dark"] .task-recovery-banner {
+  border-color: rgba(227, 185, 98, 0.42);
+  background: var(--gold-soft);
+}
+
+:root[data-theme="dark"] .mode-card {
+  border-color: var(--line);
+  background: #20262c;
+  color: #d7dfdc;
+}
+
+:root[data-theme="dark"] .mode-card {
+  border-color: var(--line);
+  background: #151a1e;
+  color: var(--ink);
+  box-shadow: var(--shadow-soft);
+}
+
+:root[data-theme="dark"] .mode-card.active {
+  border-color: rgba(67, 179, 143, 0.46);
+  background: #1e2a29;
+  color: var(--ink);
+  box-shadow: inset 4px 0 0 var(--accent), var(--shadow-soft);
+}
+
+/* Settings-center task controls. */
+.vision-settings .task-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.vision-settings .mode-card {
+  min-width: 0;
+  min-height: 124px;
+  padding: 15px;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 17px;
+  color: var(--settings-ink);
+  background: rgba(255, 255, 255, 0.035);
+  box-shadow: none;
+  text-align: left;
+  transition: transform 180ms ease, border-color 180ms ease, background 180ms ease;
+}
+
+.vision-settings .mode-card:hover {
+  border-color: rgba(164, 178, 255, 0.3);
+  background: rgba(255, 255, 255, 0.07);
+  transform: translateY(-2px);
+}
+
+.vision-settings .mode-card.active {
+  border-color: rgba(154, 171, 255, 0.48);
+  background: linear-gradient(145deg, rgba(126, 143, 255, 0.2), rgba(180, 122, 255, 0.1));
+  box-shadow: inset 0 0 0 1px rgba(181, 190, 255, 0.08);
+}
+
+.vision-settings .mode-card span { color: #aebaff; font-size: 10px; }
+.vision-settings .mode-card strong { color: #f6f7ff; font-size: 13px; line-height: 1.3; }
+.vision-settings .mode-card p { color: var(--settings-muted); font-size: 10px; line-height: 1.45; }
+
+.vision-settings .task-action-panel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.vision-settings .task-action-panel > button,
+.vision-settings .task-shortcuts button {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 11px;
+  color: #dce0f2;
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: none;
+  font-size: 11px;
+}
+
+.vision-settings .task-action-panel > button.primary {
+  border-color: rgba(169, 183, 255, 0.42);
+  color: #fff;
+  background: linear-gradient(135deg, rgba(124, 145, 255, 0.58), rgba(180, 112, 255, 0.42));
+}
+
+.vision-settings .task-action-panel button:hover:not(:disabled) { border-color: rgba(194, 202, 255, 0.45); transform: translateY(-1px); }
+.vision-settings .task-shortcuts { display: flex; flex-wrap: wrap; gap: 7px; width: 100%; }
+
+:root[data-theme="light"] .vision-settings .mode-card strong { color: #172033; }
+:root[data-theme="light"] .vision-settings .mode-card p { color: #687188; }
+:root[data-theme="light"] .vision-settings .mode-card { border-color: rgba(54, 67, 99, 0.1); background: rgba(67, 82, 119, 0.035); }
+:root[data-theme="light"] .vision-settings .mode-card.active { border-color: rgba(102, 120, 210, 0.35); background: linear-gradient(145deg, rgba(113, 133, 225, 0.11), rgba(157, 113, 216, 0.065)); }
+:root[data-theme="light"] .vision-settings .mode-card span { color: #6576c5; }
+
+@media (max-width: 620px) {
+  .vision-settings .task-mode-grid { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vision-settings .mode-card { transition: none; }
+}
+
+/* Later light-theme task-button refinements. */
+:root[data-theme="light"] .vision-settings .task-action-panel > button,
+:root[data-theme="light"] .vision-settings .task-shortcuts button {
+  border-color: rgba(58, 72, 108, 0.14);
+  color: #44506c;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 5px 14px rgba(65, 76, 110, 0.055);
+}
+
+:root[data-theme="light"] .vision-settings .task-action-panel > button:hover:not(:disabled),
+:root[data-theme="light"] .vision-settings .task-shortcuts button:hover:not(:disabled) {
+  border-color: rgba(93, 111, 194, 0.34);
+  color: #35446f;
+  background: rgba(239, 242, 255, 0.96);
+}
+
+:root[data-theme="light"] .vision-settings .task-action-panel > button.primary {
+  border-color: rgba(91, 111, 210, 0.42);
+  color: #ffffff;
+  background: linear-gradient(135deg, #647ce5, #8862c6);
+  box-shadow: 0 8px 20px rgba(92, 108, 197, 0.2);
+}
+
+:root[data-theme="light"] .vision-settings .task-action-panel > button.primary:hover:not(:disabled) {
+  border-color: rgba(75, 94, 190, 0.5);
+  color: #ffffff;
+  background: linear-gradient(135deg, #5872df, #7e58bd);
+}
+
+:root[data-theme="light"] .vision-settings .task-action-panel button:disabled,
+:root[data-theme="light"] .vision-settings .task-shortcuts button:disabled {
+  border-color: rgba(72, 84, 115, 0.08);
+  color: #9aa1b2;
+  background: rgba(84, 96, 126, 0.045);
+  box-shadow: none;
+  opacity: 1;
+}

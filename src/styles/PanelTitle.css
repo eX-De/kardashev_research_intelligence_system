@@ -1,0 +1,39 @@
+.panel-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.panel-title {
+  margin-bottom: 14px;
+}
+
+.panel-title p {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.panel-title p {
+  color: var(--muted);
+}
+
+.panel-title {
+  align-items: start;
+  margin-bottom: 16px;
+}
+
+.panel-title h2 {
+  letter-spacing: 0;
+}
+
+@media (max-width: 760px) {
+  .panel-title {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
+:root[data-theme="dark"] .panel-title p {
+  color: var(--muted);
+}

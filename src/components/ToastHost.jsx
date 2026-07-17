@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import "../styles/ToastHost.css";
 
 const TOAST_LABELS = {
   error: "错误",

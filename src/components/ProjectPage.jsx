@@ -21,6 +21,7 @@ import { LoadingPanel } from "./Loading.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
 import { VisionMetric } from "./VisionMetric.jsx";
 import { WorkspaceSelect } from "./WorkspaceSelect.jsx";
+import "../styles/ProjectPage.css";
 
 const PROJECT_STATUS_LABELS = Object.fromEntries(PROJECT_STATUSES);
 const PROJECT_PAPER_RELATION_LABELS = Object.fromEntries(PROJECT_PAPER_RELATIONS);

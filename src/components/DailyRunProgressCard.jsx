@@ -1,4 +1,5 @@
 import { fmtDate } from "../lib/dashboard.js";
+import "../styles/DailyRunProgressCard.css";
 
 export function DailyRunProgressCard({ item }) {
   const progress = item?.progress || {};

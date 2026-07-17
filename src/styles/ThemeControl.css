@@ -1,0 +1,62 @@
+/* Styles owned by ThemeControl.jsx. */
+
+.theme-control {
+  width: fit-content;
+  display: inline-grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.03);
+}
+
+.theme-control button {
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  min-height: 24px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border-color: transparent;
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.theme-control button:hover {
+  transform: none;
+}
+
+.theme-control button.active {
+  border-color: #c9dfd9;
+  background: var(--panel);
+  color: var(--accent-strong);
+  box-shadow: 0 1px 2px rgba(22, 32, 46, 0.1);
+}
+
+:root[data-theme="dark"] .theme-control {
+  border-color: var(--line-soft);
+  background: linear-gradient(180deg, #1a2025, #151a1e);
+}
+
+:root[data-theme="dark"] .theme-control {
+  border-color: var(--line);
+  background: #12171b;
+}
+
+:root[data-theme="dark"] .theme-control button {
+  background: transparent;
+  color: var(--muted);
+}
+
+:root[data-theme="dark"] .theme-control button.active {
+  border-color: rgba(67, 179, 143, 0.42);
+  background: #222a30;
+  color: var(--accent-strong);
+}

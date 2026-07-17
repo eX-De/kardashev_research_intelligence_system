@@ -2,11 +2,11 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { DailyRunProgressCard } from "./DailyRunProgressCard.jsx";
-import { LoadingPanel } from "./Loading.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
 import { formatMetricCount, VisionMetric } from "./VisionMetric.jsx";
 import { api, fmtDate, postJson } from "../lib/dashboard.js";
 import { useCachedApi } from "../lib/apiCache.jsx";
+import "../styles/DashboardView.css";
 
 const SOURCE_UPDATE_COMMAND = `git pull
 npm install
@@ -14,6 +14,32 @@ npm run build
 npm run start:api`;
 
 const DEFAULT_DOCKER_SERVICE = "app";
+
+function DashboardRunSkeleton() {
+  return (
+    <div className="dashboard-run-skeleton" role="status" aria-label="读取今日状态" aria-live="polite">
+      <span className="dashboard-skeleton-bar is-kicker" />
+      <span className="dashboard-skeleton-bar is-run-title" />
+      <span className="dashboard-skeleton-bar is-run-copy" />
+      <div className="dashboard-skeleton-progress"><i /></div>
+      <div className="dashboard-skeleton-actions"><span /><span /></div>
+    </div>
+  );
+}
+
+function DashboardFeedSkeleton({ recent = false, rows = 3, title }) {
+  return (
+    <div className={`dashboard-feed-skeleton ${recent ? "is-recent" : ""}`} role="status" aria-label={title} aria-live="polite">
+      {Array.from({ length: rows }).map((_, index) => (
+        <div className="dashboard-feed-skeleton-row" key={index}>
+          {recent ? <span className="dashboard-skeleton-bar is-type" /> : null}
+          <span className="dashboard-skeleton-bar is-feed-title" />
+          <span className="dashboard-skeleton-bar is-feed-copy" />
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function dashboardRunState(currentJob, latestJob) {
   if (currentJob) {
@@ -415,7 +441,7 @@ export function DashboardView({ setStatusMessage, notify = () => {} }) {
           </div>
           <div className="vision-run-content">
             {loading ? (
-              <LoadingPanel compact rows={4} title="读取今日状态" />
+              <DashboardRunSkeleton />
             ) : dailyRunNotification ? (
               <DailyRunProgressCard item={dailyRunNotification} />
             ) : recoverableNotification ? (
@@ -482,7 +508,7 @@ export function DashboardView({ setStatusMessage, notify = () => {} }) {
             <em>{loading ? "同步中" : listNotifications.length ? `${listNotifications.length} 项` : "全部清晰"}</em>
           </header>
           {loading ? (
-            <LoadingPanel compact rows={4} title="读取通知" />
+            <DashboardFeedSkeleton rows={3} title="读取通知" />
           ) : (
             <div className="vision-feed-list">
               {listNotifications.map((item) => (
@@ -511,7 +537,7 @@ export function DashboardView({ setStatusMessage, notify = () => {} }) {
             </header>
           </div>
           {loading ? (
-            <LoadingPanel compact rows={5} title="读取最近更新" />
+            <DashboardFeedSkeleton recent rows={4} title="读取最近更新" />
           ) : (
             <div className="vision-feed-list vision-recent-list">
               {recentUpdates.length ? recentUpdates.map((item) => (

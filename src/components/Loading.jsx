@@ -1,3 +1,5 @@
+import "../styles/Loading.css";
+
 const DEFAULT_SKELETON_WIDTHS = ["92%", "78%", "86%", "64%"];
 
 function classes(...items) {

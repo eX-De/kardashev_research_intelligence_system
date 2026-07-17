@@ -1,0 +1,66 @@
+.app-shell {
+  margin-left: 248px;
+  min-height: 100vh;
+}
+
+@media (max-width: 900px) {
+  .app-shell {
+    margin-left: 0;
+  }
+}
+
+.app-shell {
+  margin-left: 280px;
+}
+
+@media (max-width: 900px) {
+  .app-shell {
+    margin-left: 0;
+  }
+}
+
+/* Authentication status */
+.auth-loading {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--bg);
+}
+
+.auth-loading-panel {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: #263243;
+  box-shadow: var(--shadow-soft);
+}
+
+:root[data-theme="dark"] .app-shell {
+  background: transparent;
+}
+
+:root[data-theme="dark"] .auth-loading-panel {
+  border-color: var(--line);
+  background: #151a1e;
+  color: var(--ink);
+  box-shadow: var(--shadow-soft);
+}
+
+:root[data-theme="dark"] .auth-loading-panel {
+  color: var(--ink);
+}
+
+.app-shell {
+  margin-left: 292px;
+}
+
+@media (max-width: 900px) {
+  .app-shell {
+    margin-left: 0;
+  }
+}

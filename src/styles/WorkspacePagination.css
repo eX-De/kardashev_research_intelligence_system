@@ -1,0 +1,86 @@
+/* Styles owned by WorkspacePagination.jsx. */
+
+.pagination-row {
+  display: grid;
+  grid-template-columns: minmax(88px, auto) 1fr minmax(88px, auto);
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.pagination-row span {
+  justify-self: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.paper-pagination-row {
+  margin-top: 0;
+}
+
+.paper-pagination-row span {
+  white-space: nowrap;
+}
+
+.workspace-pagination {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  margin: 0;
+  padding: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.workspace-pagination > button {
+  min-height: 34px;
+  border-color: rgba(255, 255, 255, 0.09);
+  border-radius: 11px;
+  color: var(--vision-muted-strong, var(--muted));
+  background: rgba(255, 255, 255, 0.055);
+  box-shadow: none;
+}
+
+.workspace-pagination > span {
+  display: grid;
+  place-items: center;
+  color: var(--vision-muted, var(--muted));
+  font-size: 10px;
+}
+
+.workspace-pagination.is-compact {
+  width: auto;
+  grid-template-columns: auto auto auto;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.workspace-pagination.is-compact > button {
+  min-width: 40px;
+  min-height: 32px;
+  padding: 0 8px;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.workspace-pagination.is-compact > span {
+  min-width: 42px;
+  font-variant-numeric: tabular-nums;
+}
+
+:root[data-theme="light"] .workspace-pagination > button {
+  border-color: rgba(57, 66, 96, 0.09);
+  color: #4c5870;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+@media (max-width: 620px) {
+  .paper-pagination-row:not(.is-compact) {
+    grid-template-columns: 1fr;
+  }
+
+  .paper-pagination-row:not(.is-compact) span {
+    order: -1;
+  }
+}

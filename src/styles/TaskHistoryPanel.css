@@ -1,0 +1,83 @@
+/* Styles owned by TaskHistoryPanel.jsx. */
+
+/* Legacy status and history-table styles. */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: #fafbf9;
+  white-space: nowrap;
+}
+
+.bad-pill {
+  border-color: #e5bcbc;
+  color: var(--red);
+}
+
+.history-table {
+  overflow-x: auto;
+}
+
+.pill {
+  min-height: 25px;
+  border-color: #d8e0e9;
+  background: #f7f9fb;
+  color: #5d6978;
+  font-weight: 700;
+}
+
+.pill {
+  letter-spacing: 0;
+}
+
+.history-table {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.history-table table {
+  min-width: 760px;
+}
+
+.history-table th,
+.history-table td {
+  padding: 11px 12px;
+}
+
+:root[data-theme="dark"] .history-table {
+  border-color: var(--line);
+  background: #151a1e;
+  color: var(--ink);
+  box-shadow: var(--shadow-soft);
+}
+
+:root[data-theme="dark"] .pill {
+  border-color: var(--line);
+  background: #20262c;
+  color: #d7dfdc;
+}
+
+:root[data-theme="dark"] .bad-pill {
+  border-color: rgba(240, 129, 140, 0.42);
+  background: var(--red-soft);
+  color: #ffc7cd;
+}
+
+/* Settings-center history table. */
+.vision-settings .history-table {
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 16px;
+  background: rgba(5, 7, 14, 0.3);
+}
+
+.vision-settings .history-table th { color: #969db8; background: rgba(255, 255, 255, 0.035); }
+.vision-settings .history-table td { border-color: rgba(255, 255, 255, 0.06); color: #d7daea; }
+
+:root[data-theme="light"] .vision-settings .history-table { border-color: rgba(54, 67, 99, 0.1); background: rgba(75, 89, 124, 0.025); }
+:root[data-theme="light"] .vision-settings .history-table th { color: #667087; background: rgba(75, 89, 124, 0.045); }
+:root[data-theme="light"] .vision-settings .history-table td { border-color: rgba(54, 67, 99, 0.075); color: #30394d; }

@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 import { InlineLoader } from "./Loading.jsx";
 import { useCachedApi } from "../lib/apiCache.jsx";
 import { api, chooseLocalPath, postJson } from "../lib/dashboard.js";
+import "../styles/OnboardingGate.css";
 
 const PROJECT_STATUSES = [
   ["active", "进行中"],

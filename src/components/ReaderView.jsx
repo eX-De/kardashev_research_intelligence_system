@@ -15,10 +15,12 @@ import { friendlyObsidianMessage, postObsidianJson, useObsidianCapability } from
 import { resolveReaderQueueSelection } from "../lib/paperSelection.js";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
-import { InlineLoader, LoadingPanel } from "./Loading.jsx";
+import { InlineLoader } from "./Loading.jsx";
 import { WorkspaceDialog } from "./WorkspaceDialog.jsx";
+import { WorkspacePaneLoader } from "./WorkspacePaneLoader.jsx";
 import { WorkspacePagination } from "./WorkspacePagination.jsx";
 import { WorkspaceSelect } from "./WorkspaceSelect.jsx";
+import "../styles/ReaderView.css";
 
 const REPORT_STATUS_LABELS = {
   queued: "排队",
@@ -1746,8 +1748,13 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
               />
             </div>
           </header>
-          {queueFiltersOpen ? (
-            <div className="inbox-list-filters reader-queue-filter-panel" id="reader-queue-filter-panel" aria-label="报告队列筛选">
+          <div
+            aria-hidden={!queueFiltersOpen}
+            className={`reader-queue-filter-collapse ${queueFiltersOpen ? "is-open" : ""}`}
+            id="reader-queue-filter-panel"
+            inert={!queueFiltersOpen}
+          >
+            <div className="inbox-list-filters reader-queue-filter-panel" aria-label="报告队列筛选">
               <div className="inbox-filter-control reader-queue-status-control">
                 <span>状态</span>
                 <WorkspaceSelect
@@ -1786,10 +1793,10 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
                 />
               </label>
             </div>
-          ) : null}
+          </div>
           <div className="paper-list inbox-paper-list report-queue-paper-list">
             {loading ? (
-              <LoadingPanel compact rows={8} title="读取队列列表" />
+              <WorkspacePaneLoader rows={6} title="读取队列列表" variant="list" />
             ) : visibleItems.length ? visibleItems.map((item) => (
               <ReaderRow
                 active={item.paper_id === activePaperId}
@@ -1836,10 +1843,10 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
 
         <section className="detail-panel inbox-detail-panel reader-detail-panel" aria-label="报告队列详情">
           {loading || detailLoading ? (
-            <LoadingPanel
+            <WorkspacePaneLoader
               description={detailLoading ? "正在读取所选论文的报告、Chat 记录和项目关联。" : "正在读取报告详情、阅读设置和项目关联。"}
-              rows={8}
               title={detailLoading ? "打开报告详情" : "读取报告详情"}
+              variant="report"
             />
           ) : (
             <ReaderDetail

@@ -24,6 +24,7 @@ import { ApiCacheProvider } from "./lib/apiCache.jsx";
 import { AUTH_REQUIRED_EVENT, api, postJson } from "./lib/dashboard.js";
 import { useServerEvents } from "./lib/serverEvents.js";
 import { ThemeProvider } from "./lib/theme.jsx";
+import "./styles/App.css";
 
 const TOAST_TYPES = new Set(["success", "error", "info", "warning"]);
 const NOTIFICATION_TOAST_TYPES = {
@@ -166,8 +167,8 @@ function AppRoutes({ notify, setStatusMessage }) {
       <Route path="/projects" element={<ProjectsRoute setStatusMessage={setStatusMessage} />} />
       <Route path="/projects/new" element={<ProjectPageRoute isNew setStatusMessage={setStatusMessage} />} />
       <Route path="/projects/:projectId" element={<ProjectPageRoute setStatusMessage={setStatusMessage} />} />
-      <Route path="/tasks" element={<Navigate to="/settings" replace />} />
-      <Route path="/settings" element={<ControlView setStatusMessage={setStatusMessage} notify={notify} />} />
+      <Route path="/tasks" element={<Navigate to="/settings/daily-tasks" replace />} />
+      <Route path="/settings/*" element={<ControlView setStatusMessage={setStatusMessage} notify={notify} />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

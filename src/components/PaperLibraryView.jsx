@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { LoadingPanel } from "./Loading.jsx";
 import { useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { api, fmtDate, postJson, snippet } from "../lib/dashboard.js";
 import { commitPaperListSelection, resolvePaperListSelection } from "../lib/paperSelection.js";
 import { RefreshButton } from "./RefreshButton.jsx";
+import { WorkspacePaneLoader } from "./WorkspacePaneLoader.jsx";
 import { WORKSPACE_PAGE_SIZE_OPTIONS, WorkspacePagination } from "./WorkspacePagination.jsx";
 import { WorkspaceSelect } from "./WorkspaceSelect.jsx";
+import "../styles/PaperLibraryView.css";
 
 const STATUSES = [
   ["", "全部"],
@@ -353,7 +354,7 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
           </div>
           <div className="library-list paper-library-list">
           {loading ? (
-            <LoadingPanel compact rows={8} title="读取论文列表" />
+            <WorkspacePaneLoader rows={6} title="读取论文列表" variant="list" />
           ) : (
             items.length ? items.map((item) => {
               const itemStatusTone = STATUS_TONES[item.library_status] || "slate";
@@ -412,7 +413,7 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
 
         <section className="detail-panel library-detail-panel">
         {detailLoading ? (
-          <LoadingPanel description="正在打开首篇论文的摘要、资产和正文片段。" rows={7} title="读取论文详情" />
+          <WorkspacePaneLoader description="正在打开首篇论文的摘要、资产和正文片段。" title="读取论文详情" variant="detail" />
         ) : paper ? (
           <article className="inbox-detail-card library-paper-detail library-detail-transition" key={paper.id}>
             <div className="detail-main library-detail-main">

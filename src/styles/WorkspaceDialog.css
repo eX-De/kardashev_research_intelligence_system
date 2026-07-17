@@ -1,0 +1,248 @@
+/*
+ * WorkspaceDialog-owned shell styles.
+ * Rules retain their relative cascade order from styles.css.
+ * Page-specific dimensions, forms, selectors, and reference-list content stay with callers.
+ */
+
+/* Shared dialog shell */
+.workspace-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  overflow: hidden;
+  background: rgba(5, 6, 16, 0.72);
+  backdrop-filter: blur(16px) saturate(0.86);
+  animation: workspace-backdrop-in 220ms ease-out both;
+}
+
+.workspace-dialog {
+  --dialog-ink: #f8f8ff;
+  --dialog-muted: #a9afc5;
+  --dialog-line: rgba(255, 255, 255, 0.085);
+  --dialog-surface: rgba(255, 255, 255, 0.035);
+  display: grid;
+  width: min(760px, calc(100vw - 32px));
+  max-height: min(88dvh, 880px);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid rgba(165, 174, 239, 0.18);
+  border-radius: 28px;
+  color: var(--dialog-ink);
+  background:
+    radial-gradient(circle at 92% 0%, rgba(124, 99, 202, 0.2), transparent 24rem),
+    linear-gradient(145deg, rgba(27, 27, 50, 0.99), rgba(10, 12, 25, 0.995));
+  box-shadow: 0 36px 100px rgba(0, 0, 0, 0.52);
+  font-family: Inter, Geist, "Segoe UI Variable", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
+  transform-origin: 50% 18%;
+  animation: workspace-dialog-in 360ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.workspace-dialog-header {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr) 38px;
+  align-items: start;
+  gap: 14px;
+  padding: 22px 24px 19px;
+  border-bottom: 1px solid var(--dialog-line);
+}
+
+.workspace-dialog-icon {
+  display: grid;
+  width: 46px;
+  height: 46px;
+  place-items: center;
+  border: 1px solid rgba(164, 175, 255, 0.24);
+  border-radius: 15px;
+  color: #c6ceff;
+  background: linear-gradient(145deg, rgba(111, 130, 220, 0.23), rgba(139, 92, 190, 0.16));
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.08);
+  font-size: 10px;
+  font-weight: 780;
+  letter-spacing: 0.08em;
+}
+
+.workspace-dialog-header > div {
+  min-width: 0;
+}
+
+.workspace-dialog-header > div > span {
+  display: block;
+  margin: 1px 0 5px;
+  color: #9ca9ed;
+  font-size: 9px;
+  font-weight: 760;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.workspace-dialog-header h2 {
+  margin: 0;
+  color: var(--dialog-ink);
+  font-size: clamp(22px, 2.5vw, 30px);
+  font-weight: 650;
+  letter-spacing: -0.05em;
+  line-height: 1.05;
+}
+
+.workspace-dialog-header p {
+  max-width: 590px;
+  margin: 7px 0 0;
+  color: var(--dialog-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.workspace-dialog .workspace-dialog-close,
+:root[data-theme="dark"] .workspace-dialog .workspace-dialog-close,
+:root[data-theme="light"] .workspace-dialog .workspace-dialog-close {
+  display: grid;
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  min-height: 36px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--dialog-line);
+  border-radius: 12px;
+  color: var(--dialog-muted);
+  background: var(--dialog-surface);
+  box-shadow: none;
+}
+
+.workspace-dialog-close svg { width: 17px; height: 17px; }
+
+.workspace-dialog .workspace-dialog-close:hover { border-color: rgba(176, 186, 255, 0.28); color: var(--dialog-ink); background: rgba(255, 255, 255, 0.075); transform: rotate(3deg); }
+
+.workspace-dialog-body {
+  min-height: 0;
+  padding: 22px 24px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: rgba(143, 155, 230, 0.42) transparent;
+  scrollbar-width: thin;
+}
+
+.workspace-dialog-footer {
+  display: flex;
+  min-height: 72px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 14px 24px;
+  border-top: 1px solid var(--dialog-line);
+  background: rgba(5, 7, 18, 0.22);
+}
+
+.workspace-dialog-footer > span {
+  color: var(--dialog-muted);
+  font-size: 9px;
+}
+
+.workspace-dialog-footer > span strong { color: #c9d0ff; font-size: 13px; }
+
+.workspace-dialog-footer > div { display: flex; align-items: center; gap: 8px; }
+
+.workspace-dialog-footer button,
+:root[data-theme="dark"] .workspace-dialog-footer button,
+:root[data-theme="light"] .workspace-dialog-footer button {
+  min-height: 39px;
+  padding: 0 14px;
+  border: 1px solid var(--dialog-line);
+  border-radius: 12px;
+  color: var(--dialog-muted);
+  background: rgba(255, 255, 255, 0.04);
+  box-shadow: none;
+  font-size: 10px;
+}
+
+.workspace-dialog-footer button:hover { border-color: rgba(175, 185, 247, 0.22); color: var(--dialog-ink); background: rgba(255, 255, 255, 0.075); }
+
+.workspace-dialog-footer .workspace-dialog-primary,
+:root[data-theme="dark"] .workspace-dialog-footer .workspace-dialog-primary,
+:root[data-theme="light"] .workspace-dialog-footer .workspace-dialog-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  border-color: rgba(176, 186, 255, 0.3);
+  color: #fff;
+  background: linear-gradient(135deg, #647bd2, #8767c7);
+  box-shadow: 0 10px 22px rgba(71, 67, 148, 0.24);
+}
+
+.workspace-dialog-footer .workspace-dialog-primary:hover { border-color: rgba(211, 216, 255, 0.55); color: #fff; background: linear-gradient(135deg, #7087de, #9574d4); transform: translateY(-1px); }
+
+/* Dialog motion and light theme */
+@keyframes workspace-backdrop-in { from { opacity: 0; } to { opacity: 1; } }
+
+@keyframes workspace-dialog-in { from { opacity: 0; transform: translateY(24px) scale(0.965); } to { opacity: 1; transform: translateY(0) scale(1); } }
+
+.workspace-dialog-backdrop.is-closing {
+  pointer-events: none;
+  animation: workspace-backdrop-out 200ms ease-in both;
+}
+
+.workspace-dialog-backdrop.is-closing .workspace-dialog {
+  animation: workspace-dialog-out 220ms cubic-bezier(0.4, 0, 1, 1) both;
+}
+
+@keyframes workspace-backdrop-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes workspace-dialog-out {
+  from { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); }
+  to { opacity: 0; transform: translateY(14px) scale(0.975); filter: blur(2px); }
+}
+
+:root[data-theme="light"] .workspace-dialog {
+  --dialog-ink: #18213a;
+  --dialog-muted: #68738b;
+  --dialog-line: rgba(42, 51, 78, 0.1);
+  --dialog-surface: rgba(51, 63, 101, 0.045);
+  border-color: rgba(47, 58, 91, 0.13);
+  background:
+    radial-gradient(circle at 92% 0%, rgba(133, 105, 205, 0.12), transparent 24rem),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.995), rgba(239, 242, 249, 0.995));
+  box-shadow: 0 36px 90px rgba(43, 50, 77, 0.24);
+}
+
+:root[data-theme="light"] .workspace-dialog-backdrop { background: rgba(34, 38, 57, 0.4); }
+
+:root[data-theme="light"] .workspace-dialog-icon { border-color: rgba(96, 112, 192, 0.18); color: #5f70b8; background: linear-gradient(145deg, rgba(103, 124, 218, 0.12), rgba(139, 92, 190, 0.08)); }
+
+:root[data-theme="light"] .workspace-dialog-header > div > span { color: #6678c1; }
+
+:root[data-theme="light"] .workspace-dialog-footer { background: rgba(233, 236, 245, 0.66); }
+
+:root[data-theme="light"] .workspace-dialog-footer > span strong { color: #5265b6; }
+
+/* Dialog responsive and reduced motion */
+@media (max-width: 640px) {
+  .workspace-dialog-backdrop { padding: 10px; }
+
+  .workspace-dialog { width: calc(100vw - 20px); max-height: calc(100dvh - 20px); border-radius: 22px; }
+
+  .workspace-dialog-header { grid-template-columns: 38px minmax(0, 1fr) 34px; gap: 10px; padding: 17px; }
+
+  .workspace-dialog-icon { width: 38px; height: 38px; border-radius: 12px; }
+
+  .workspace-dialog-header p { font-size: 10px; }
+
+  .workspace-dialog-body { padding: 17px; }
+
+  .workspace-dialog-footer { align-items: stretch; flex-direction: column; padding: 12px 17px 15px; }
+
+  .workspace-dialog-footer > div { display: grid; grid-template-columns: 0.7fr 1.3fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-dialog-backdrop,
+  .workspace-dialog {
+      animation: none !important;
+    }
+}

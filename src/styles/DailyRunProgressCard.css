@@ -1,0 +1,307 @@
+.vision-progress {
+  display: grid;
+  min-width: 0;
+  margin: 0;
+}
+
+.vision-progress {
+  gap: 14px;
+}
+
+.vision-progress-stage {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 24px;
+  animation: vision-stage-change 540ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.vision-progress-stage-copy {
+  min-width: 0;
+}
+
+.vision-progress-kicker {
+  display: block;
+  margin-bottom: 8px;
+  color: rgba(199, 208, 255, 0.76);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
+  font-weight: 680;
+  letter-spacing: 0.14em;
+  line-height: 1;
+}
+
+.vision-progress-stage-copy > strong {
+  display: block;
+  overflow: hidden;
+  color: #fff;
+  font-size: clamp(23px, 2.8vw, 34px);
+  font-weight: 650;
+  letter-spacing: -0.055em;
+  line-height: 1.02;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vision-progress-stage-copy p {
+  margin: 9px 0 0;
+  color: rgba(222, 226, 245, 0.65);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.vision-progress-value {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  min-width: 88px;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+  line-height: 0.8;
+}
+
+.vision-progress-value strong {
+  font-size: clamp(46px, 5vw, 64px);
+  font-weight: 520;
+  letter-spacing: -0.08em;
+}
+
+.vision-progress-value span {
+  margin: 4px 0 0 4px;
+  color: rgba(221, 226, 250, 0.66);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+}
+
+.vision-progress-bar {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.vision-progress-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #93a8ff 0%, #b58cff 55%, #ff9d90 100%);
+  box-shadow: 0 0 16px rgba(156, 169, 255, 0.5);
+  transition: width 500ms ease;
+}
+
+.vision-stage-track {
+  display: grid;
+  align-items: center;
+  gap: 6px;
+  height: 8px;
+}
+
+.vision-stage-segment {
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+  transition: height 220ms ease, background 220ms ease, box-shadow 220ms ease, transform 220ms ease;
+}
+
+.vision-stage-segment.completed {
+  background: linear-gradient(90deg, rgba(112, 218, 179, 0.72), rgba(146, 169, 255, 0.82));
+}
+
+.vision-stage-segment.running {
+  height: 7px;
+  background: linear-gradient(90deg, #91a8ff, #c08eff 58%, #ff9d90);
+  box-shadow: 0 0 18px rgba(158, 164, 255, 0.58);
+  transform: translateY(-1px);
+}
+
+.vision-stage-segment.failed {
+  height: 5px;
+  background: linear-gradient(90deg, #ff8d7f, #ff7097);
+  box-shadow: 0 0 14px rgba(255, 113, 135, 0.4);
+}
+
+.vision-cache-progress {
+  display: grid;
+  grid-template-columns: auto minmax(120px, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding-top: 2px;
+}
+
+.vision-cache-copy span,
+.vision-cache-copy strong {
+  display: block;
+}
+
+.vision-cache-copy span {
+  margin-bottom: 4px;
+  color: rgba(216, 221, 245, 0.58);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.vision-cache-copy strong {
+  color: #f7f8ff;
+  font-size: 16px;
+  font-weight: 620;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.04em;
+}
+
+.vision-cache-copy small {
+  color: rgba(218, 223, 244, 0.55);
+  font-size: 11px;
+  font-weight: 520;
+}
+
+.vision-cache-meter {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.vision-cache-meter .vision-progress-bar {
+  height: 3px;
+}
+
+.vision-cache-meter p {
+  margin: 0;
+  color: rgba(218, 223, 244, 0.57);
+  font-size: 10px;
+  line-height: 1.25;
+}
+
+.vision-cache-current {
+  max-width: 135px;
+  overflow: hidden;
+  color: rgba(224, 229, 251, 0.72);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vision-progress-summary {
+  display: flex;
+  gap: 9px;
+  align-items: baseline;
+  margin: -1px 0 0;
+  color: rgba(222, 226, 245, 0.68);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.vision-progress-summary span {
+  flex: 0 0 auto;
+  color: rgba(183, 195, 255, 0.82);
+  font-weight: 650;
+}
+
+@keyframes vision-stage-change {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+    filter: blur(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+@media (max-width: 620px) {
+  .vision-progress-stage {
+    gap: 14px;
+  }
+
+  .vision-progress-stage-copy > strong {
+    font-size: clamp(22px, 7vw, 30px);
+  }
+
+  .vision-progress-value {
+    min-width: 70px;
+  }
+
+  .vision-progress-value strong {
+    font-size: 46px;
+  }
+
+  .vision-cache-progress {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .vision-cache-current {
+    grid-column: 1 / -1;
+    max-width: 100%;
+  }
+}
+
+@media (max-width: 390px) {
+  .vision-progress-stage {
+    grid-template-columns: minmax(0, 1fr) 64px;
+  }
+
+  .vision-progress-stage-copy > strong {
+    white-space: normal;
+  }
+
+  .vision-progress-value strong {
+    font-size: 40px;
+  }
+
+  .vision-progress-summary {
+    display: block;
+  }
+
+  .vision-progress-summary span {
+    display: block;
+    margin-bottom: 2px;
+  }
+}
+
+:root[data-theme="light"] .vision-progress-stage-copy > strong,
+:root[data-theme="light"] .vision-progress-value,
+:root[data-theme="light"] .vision-progress-value strong {
+  color: #18213a;
+}
+
+:root[data-theme="light"] .vision-progress-stage-copy p,
+:root[data-theme="light"] .vision-progress-summary {
+  color: rgba(53, 63, 92, 0.68);
+}
+
+:root[data-theme="light"] .vision-progress-kicker,
+:root[data-theme="light"] .vision-progress-summary span {
+  color: rgba(80, 98, 173, 0.82);
+}
+
+:root[data-theme="light"] .vision-progress-value span,
+:root[data-theme="light"] .vision-cache-copy span,
+:root[data-theme="light"] .vision-cache-copy small,
+:root[data-theme="light"] .vision-cache-meter p,
+:root[data-theme="light"] .vision-cache-current {
+  color: rgba(61, 72, 104, 0.62);
+}
+
+:root[data-theme="light"] .vision-cache-copy strong {
+  color: #25304c;
+}
+
+:root[data-theme="light"] .vision-progress-bar {
+  background: rgba(63, 74, 111, 0.11);
+}
+
+:root[data-theme="light"] .vision-stage-segment {
+  background: rgba(61, 72, 108, 0.16);
+}
+
+:root[data-theme="light"] .vision-stage-segment.completed {
+  background: linear-gradient(90deg, rgba(53, 158, 120, 0.62), rgba(98, 119, 208, 0.72));
+}
+
+:root[data-theme="light"] .vision-stage-segment.running {
+  background: linear-gradient(90deg, #6d83df, #9472d9 58%, #d97f7a);
+  box-shadow: 0 0 16px rgba(108, 117, 190, 0.3);
+}

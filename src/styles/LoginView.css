@@ -1,0 +1,161 @@
+/*
+ * LoginView-owned styles.
+ * Rules retain their relative cascade order from styles.css.
+ * App auth-loading and generic control styles remain outside this file.
+ */
+
+/* Login surface */
+.login-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--bg);
+}
+
+.login-panel {
+  width: min(100%, 410px);
+  display: grid;
+  gap: 18px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.login-brand > div > strong,
+.login-brand > div > span {
+  display: block;
+}
+
+.login-brand > div > strong {
+  color: #121a26;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.login-brand > div > span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.login-form {
+  display: grid;
+  gap: 14px;
+}
+
+.login-field {
+  display: grid;
+  gap: 7px;
+}
+
+.login-field span {
+  color: #526071;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.login-field input {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #ffffff;
+  color: var(--ink);
+  padding: 0 11px;
+}
+
+.login-field input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  outline: none;
+}
+
+.login-field input[aria-invalid="true"] {
+  border-color: #ef9aa5;
+  background: #fffafa;
+}
+
+.login-error {
+  padding: 10px 11px;
+  border: 1px solid #efc3c7;
+  border-radius: 7px;
+  background: var(--red-soft);
+  color: var(--red);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.login-form button {
+  width: 100%;
+  min-height: 42px;
+}
+
+/* Dark logo treatment */
+:root[data-theme="dark"] .login-brand img {
+  filter: invert(1);
+}
+
+/* Dark panel surface */
+:root[data-theme="dark"] .login-panel {
+  border-color: var(--line);
+  background: rgba(23, 27, 31, 0.96);
+  color: var(--ink);
+  box-shadow: var(--shadow-soft);
+}
+
+/* Dark error state */
+:root[data-theme="dark"] .login-error {
+  border-color: rgba(240, 129, 140, 0.38);
+  background: var(--red-soft);
+  color: #ffc7cd;
+}
+
+/* Dark page and labels */
+:root[data-theme="dark"] .login-page {
+  background:
+    radial-gradient(circle at top, rgba(67, 179, 143, 0.12), transparent 360px),
+    #0f1214;
+}
+
+:root[data-theme="dark"] .login-brand strong {
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .login-brand span,
+:root[data-theme="dark"] .login-field span {
+  color: var(--muted);
+}
+
+/* Dark password input */
+:root[data-theme="dark"] .login-field input {
+  border-color: var(--line);
+  background: #11161a;
+  color: var(--ink);
+  box-shadow: none;
+}
+
+/* Dark invalid password state */
+:root[data-theme="dark"] .login-field input[aria-invalid="true"] {
+  border-color: rgba(240, 129, 140, 0.42);
+  background: var(--red-soft);
+  color: #ffc7cd;
+}
+
+/* Late dark label coverage */
+:root[data-theme="dark"] .login-field span {
+  color: var(--muted);
+}

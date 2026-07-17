@@ -1,4 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
+import "../styles/WorkspaceSelect.css";
 
 function normalizeOptions(options) {
   return options.map((option) => {

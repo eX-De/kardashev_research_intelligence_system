@@ -1,0 +1,28 @@
+/* Layout unique to the daily-tasks settings page. Shared fields and cards use SettingsForm.css. */
+
+.daily-tasks-settings-view {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-auto-flow: row;
+  gap: 18px;
+  min-width: 0;
+}
+
+.daily-tasks-settings-view > * {
+  min-width: 0;
+  grid-column: 1;
+}
+
+.vision-settings .daily-tasks-settings-view > .task-control-panel,
+.vision-settings .daily-tasks-settings-view > .task-history-panel {
+  grid-area: auto;
+  width: 100%;
+}
+
+.daily-tasks-settings-form {
+  margin: 0;
+}
+
+.daily-tasks-settings-form .daily-tasks-settings-section:first-child {
+  padding-top: 24px;
+}

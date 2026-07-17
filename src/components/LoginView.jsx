@@ -1,4 +1,5 @@
 import { useState } from "react";
+import "../styles/LoginView.css";
 
 export function LoginView({ onLogin }) {
   const [error, setError] = useState("");

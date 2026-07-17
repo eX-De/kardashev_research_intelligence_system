@@ -1,0 +1,183 @@
+/* Styles owned by WorkspaceSelect.jsx. */
+
+.workspace-select {
+  --workspace-select-bg: rgba(255, 255, 255, 0.045);
+  --workspace-select-bg-hover: rgba(255, 255, 255, 0.075);
+  --workspace-select-border: rgba(255, 255, 255, 0.1);
+  --workspace-select-border-active: rgba(147, 160, 239, 0.5);
+  --workspace-select-ink: #d8ddef;
+  --workspace-select-muted: #9da5bd;
+  --workspace-select-menu: rgba(20, 23, 34, 0.98);
+  --workspace-select-option: rgba(255, 255, 255, 0.055);
+  --workspace-select-selected: rgba(112, 119, 213, 0.18);
+  position: relative;
+  min-width: 0;
+}
+
+.workspace-select-trigger,
+:root[data-theme="dark"] .workspace-select-trigger,
+:root[data-theme="light"] .workspace-select-trigger {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 11px 0 12px;
+  border: 1px solid var(--workspace-select-border);
+  border-radius: 12px;
+  color: var(--workspace-select-ink);
+  background: var(--workspace-select-bg);
+  box-shadow: none;
+  font-size: 10px;
+  font-weight: 650;
+  text-align: left;
+  outline: none;
+  transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+
+.workspace-select-trigger > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-select-trigger svg {
+  width: 17px;
+  min-width: 17px;
+  color: var(--workspace-select-muted);
+  transition: color 160ms ease, transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.workspace-select-trigger:hover {
+  border-color: rgba(156, 168, 240, 0.3);
+  color: var(--workspace-select-ink);
+  background: var(--workspace-select-bg-hover);
+}
+
+.workspace-select-trigger:focus-visible,
+.workspace-select.is-open .workspace-select-trigger {
+  border-color: var(--workspace-select-border-active);
+  background: var(--workspace-select-bg-hover);
+  box-shadow: 0 0 0 3px rgba(108, 127, 220, 0.1);
+}
+
+.workspace-select.is-open .workspace-select-trigger svg {
+  color: #b9c2ff;
+  transform: rotate(180deg);
+}
+
+.workspace-select-trigger:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.workspace-select-menu {
+  position: absolute;
+  z-index: 120;
+  top: calc(100% + 7px);
+  right: 0;
+  left: 0;
+  display: grid;
+  max-height: 248px;
+  gap: 3px;
+  padding: 6px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 1px solid rgba(160, 171, 235, 0.16);
+  border-radius: 14px;
+  background: var(--workspace-select-menu);
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.34), 0 2px 8px rgba(0, 0, 0, 0.2);
+  backdrop-filter: blur(18px);
+  scrollbar-color: rgba(143, 155, 230, 0.42) transparent;
+  scrollbar-width: thin;
+  transform-origin: top center;
+  animation: workspace-select-menu-in 170ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.workspace-select-menu > button,
+:root[data-theme="dark"] .workspace-select-menu > button,
+:root[data-theme="light"] .workspace-select-menu > button {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  grid-template-columns: minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 10px;
+  padding: 0 9px 0 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  color: var(--workspace-select-muted);
+  background: transparent;
+  box-shadow: none;
+  font-size: 10px;
+  font-weight: 620;
+  text-align: left;
+}
+
+.workspace-select-menu > button > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-select-menu > button > i {
+  color: #b7c1ff;
+  font-size: 11px;
+  font-style: normal;
+  text-align: center;
+  opacity: 0;
+  transform: scale(0.7);
+  transition: opacity 150ms ease, transform 150ms ease;
+}
+
+.workspace-select-menu > button:is(:hover, .is-active) {
+  border-color: rgba(160, 171, 235, 0.1);
+  color: var(--workspace-select-ink);
+  background: var(--workspace-select-option);
+}
+
+.workspace-select-menu > button.is-selected {
+  border-color: rgba(145, 158, 237, 0.2);
+  color: #e1e5ff;
+  background: var(--workspace-select-selected);
+}
+
+.workspace-select-menu > button.is-selected > i {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.workspace-select-menu > button:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+:root[data-theme="light"] .workspace-select {
+  --workspace-select-bg: rgba(255, 255, 255, 0.7);
+  --workspace-select-bg-hover: rgba(255, 255, 255, 0.96);
+  --workspace-select-border: rgba(48, 57, 84, 0.13);
+  --workspace-select-border-active: rgba(91, 105, 186, 0.48);
+  --workspace-select-ink: #26304b;
+  --workspace-select-muted: #68738b;
+  --workspace-select-menu: rgba(250, 251, 255, 0.98);
+  --workspace-select-option: rgba(79, 94, 165, 0.07);
+  --workspace-select-selected: rgba(93, 108, 193, 0.12);
+}
+
+:root[data-theme="light"] .workspace-select.is-open .workspace-select-trigger svg,
+:root[data-theme="light"] .workspace-select-menu > button > i { color: #5e6fba; }
+:root[data-theme="light"] .workspace-select-menu { border-color: rgba(48, 57, 84, 0.13); box-shadow: 0 18px 42px rgba(44, 51, 78, 0.18); }
+:root[data-theme="light"] .workspace-select-menu > button.is-selected { border-color: rgba(91, 105, 186, 0.16); color: #34416c; }
+
+@keyframes workspace-select-menu-in {
+  from { opacity: 0; transform: translateY(-6px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-select-menu,
+  .workspace-select-trigger svg { animation: none; transition: none; }
+}

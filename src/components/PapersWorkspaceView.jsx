@@ -1,6 +1,7 @@
 import { InboxView } from "./InboxView.jsx";
 import { PaperLibraryView } from "./PaperLibraryView.jsx";
 import { ReportQueueView } from "./ReportQueueView.jsx";
+import "../styles/PapersWorkspaceView.css";
 
 const PAPER_SECTIONS = {
   inbox: {

@@ -1,4 +1,5 @@
 import { THEME_LABELS, useTheme } from "../lib/theme.jsx";
+import "../styles/ThemeControl.css";
 
 const THEME_ICONS = {
   light: "☀",

@@ -1,3 +1,5 @@
+import "../styles/PanelTitle.css";
+
 export function PanelTitle({ title, subtitle }) {
   return (
     <div className="panel-title">

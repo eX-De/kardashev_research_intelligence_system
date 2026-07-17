@@ -1,0 +1,200 @@
+/*
+ * OnboardingGate-owned styles.
+ * Rules retain their relative cascade order from styles.css.
+ * Loading internals and global control foundations remain outside this file.
+ */
+
+/* First-run onboarding */
+.onboarding-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(17, 24, 39, 0.36);
+  backdrop-filter: blur(3px);
+}
+
+.onboarding-dialog {
+  width: min(100%, 760px);
+  max-height: min(760px, calc(100vh - 48px));
+  display: grid;
+  gap: 18px;
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.22);
+  overflow: auto;
+}
+
+.onboarding-header {
+  display: grid;
+  gap: 7px;
+}
+
+.onboarding-header span {
+  width: fit-content;
+  padding: 3px 8px;
+  border: 1px solid #c9d9f1;
+  border-radius: 999px;
+  background: var(--blue-soft);
+  color: var(--blue);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.onboarding-header h2 {
+  font-size: 22px;
+}
+
+.onboarding-header p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.onboarding-tabs {
+  width: fit-content;
+  display: inline-flex;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+}
+
+.onboarding-tabs button {
+  min-height: 34px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  box-shadow: none;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.onboarding-tabs button.active {
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: var(--shadow-soft);
+}
+
+.onboarding-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+}
+
+.onboarding-form label,
+.onboarding-actions {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.onboarding-form label:first-child,
+.onboarding-project-form .wide,
+.onboarding-actions {
+  grid-column: 1 / -1;
+}
+
+.onboarding-form label > span {
+  color: #526071;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.onboarding-form input,
+.onboarding-form select,
+.onboarding-form textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #ffffff;
+  color: var(--ink);
+  padding: 8px 10px;
+}
+
+.onboarding-form input,
+.onboarding-form select {
+  min-height: 38px;
+}
+
+.onboarding-form textarea {
+  resize: vertical;
+}
+
+.onboarding-form input:focus,
+.onboarding-form select:focus,
+.onboarding-form textarea:focus {
+  border-color: #86bdb4;
+  outline: 2px solid rgba(15, 118, 110, 0.14);
+}
+
+.onboarding-actions {
+  justify-items: start;
+}
+
+.onboarding-actions button {
+  min-width: 180px;
+}
+
+.onboarding-busy {
+  min-height: 28px;
+  color: var(--muted);
+}
+
+@media (max-width: 700px) {
+  .onboarding-tabs,
+  .onboarding-form {
+      width: 100%;
+    }
+
+  .onboarding-tabs {
+      display: grid;
+      grid-template-columns: 1fr;
+    }
+
+  .onboarding-form {
+      grid-template-columns: 1fr;
+    }
+}
+
+/* Dark onboarding surfaces */
+:root[data-theme="dark"] .onboarding-dialog,
+:root[data-theme="dark"] .onboarding-form {
+  border-color: var(--line);
+  background: #151a1e;
+  color: var(--ink);
+  box-shadow: var(--shadow-soft);
+}
+
+/* Dark onboarding controls */
+:root[data-theme="dark"] .onboarding-tabs button,
+:root[data-theme="dark"] .onboarding-form input,
+:root[data-theme="dark"] .onboarding-form select,
+:root[data-theme="dark"] .onboarding-form textarea {
+  border-color: var(--line);
+  background: #11161a;
+  color: var(--ink);
+  box-shadow: none;
+}
+
+:root[data-theme="dark"] .onboarding-tabs button.active {
+  border-color: rgba(67, 179, 143, 0.46);
+  background: #202a2e;
+  color: var(--accent-strong);
+  box-shadow: inset 0 -3px 0 var(--accent);
+}
+
+/* Late dark onboarding labels */
+:root[data-theme="dark"] .onboarding-header p,
+:root[data-theme="dark"] .onboarding-form label > span {
+  color: var(--muted);
+}

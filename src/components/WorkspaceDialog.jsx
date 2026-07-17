@@ -1,5 +1,6 @@
 import { useEffect, useId, useState } from "react";
 import { createPortal } from "react-dom";
+import "../styles/WorkspaceDialog.css";
 
 const DIALOG_EXIT_MS = 220;
 

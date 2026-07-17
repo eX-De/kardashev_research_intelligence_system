@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import "katex/dist/katex.min.css";
 import { normalizeMathDelimiters } from "../lib/markdownMath.js";
+import "../styles/MarkdownReport.css";
 
 const remarkPlugins = [
   remarkGfm,

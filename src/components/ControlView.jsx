@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Link, useLocation } from "react-router-dom";
 
-import { LoadingPanel } from "./Loading.jsx";
-import { PanelTitle } from "./PanelTitle.jsx";
-import { normalizeProviders, providerPayload, SettingsForm } from "./SettingsForm.jsx";
+import { DailyTasksSettingsView } from "./DailyTasksSettingsView.jsx";
+import { DataStorageSettingsView } from "./DataStorageSettingsView.jsx";
+import { ModelRoutingSettingsView } from "./ModelRoutingSettingsView.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
-import { TaskControlPanel } from "./TaskControlPanel.jsx";
-import { TaskHistoryPanel } from "./TaskHistoryPanel.jsx";
 import { useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { api, chooseLocalPath, postJson } from "../lib/dashboard.js";
 import { friendlyObsidianMessage, obsidianCapabilityFrom } from "../lib/obsidianCapability.js";
+import { normalizeProviders, providerPayload } from "../lib/settingsProviders.js";
+import "../styles/ControlView.css";
 
 const AUTO_SAVE_DELAY_MS = 850;
 const QUICK_SAVE_DELAY_MS = 150;
@@ -17,13 +18,16 @@ const QUICK_SAVE_FIELDS = new Set([
   "rag_prefilter_enabled"
 ]);
 const SUCCESS_TOAST_THROTTLE_MS = 2500;
-const CONTROL_SAVE_STATUS_LABELS = {
-  idle: "配置已同步",
-  dirty: "等待保存",
-  saving: "正在保存",
-  saved: "已保存",
-  error: "保存失败"
+const SETTINGS_PAGES = {
+  "/settings/daily-tasks": { key: "daily-tasks", eyebrow: "自动化工作区", title: "每日任务" },
+  "/settings/data": { key: "data", eyebrow: "数据工作区", title: "数据与存储" },
+  "/settings/models": { key: "models", eyebrow: "模型工作区", title: "模型与路由" }
 };
+const SETTINGS_ENTRIES = [
+  { to: "/settings/daily-tasks", index: "01", type: "daily", eyebrow: "AUTOMATION", label: "每日任务", description: "配置调度、论文抓取、检索推荐与任务恢复。" },
+  { to: "/settings/data", index: "02", type: "data", eyebrow: "KNOWLEDGE", label: "数据与存储", description: "管理 Obsidian、知识库范围与论文存储目录。" },
+  { to: "/settings/models", index: "03", type: "models", eyebrow: "INTELLIGENCE", label: "模型与路由", description: "维护 Provider，并为不同研究任务分配模型。" }
+];
 const DAILY_JOB_TYPES = new Set(["run-daily", "resume-daily", "retry-daily"]);
 const ABOUT_LINKS = [
   {
@@ -63,23 +67,36 @@ function settingsSignature(settings, providers) {
   return JSON.stringify(settingsPayload(settings, providers));
 }
 
-function HealthItem({ label, value, state = "neutral" }) {
+function HealthItem({ label, loading = false, value, state = "neutral" }) {
   return (
-    <div className={`health-item ${state}`}>
+    <div
+      className={`health-item ${loading ? "loading" : state}`}
+      aria-busy={loading || undefined}
+      aria-label={loading ? `${label} 正在检查` : undefined}
+    >
       <span>{label}</span>
-      <strong>{value}</strong>
+      <strong>{loading ? <i className="health-checking-skeleton" aria-hidden="true" /> : value}</strong>
     </div>
   );
 }
 
-function HealthGrid({ health, settings }) {
+function SettingsEntryIcon({ type }) {
+  const paths = {
+    daily: <><circle cx="12" cy="12" r="7.5" /><path d="M12 7.5v5l3.2 1.8M7 3.8 4.5 6.2M17 3.8l2.5 2.4" /></>,
+    data: <><ellipse cx="12" cy="5.5" rx="7.5" ry="3" /><path d="M4.5 5.5v6c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-6M4.5 11.5v6c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-6" /></>,
+    models: <><circle cx="6" cy="12" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="18" cy="18" r="2.5" /><path d="m8.4 10.9 7.2-3.8M8.4 13.1l7.2 3.8" /></>
+  };
+  return <svg aria-hidden="true" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.6">{paths[type]}</svg>;
+}
+
+function HealthGrid({ health, loading = false, settings }) {
   const obsidianCapability = obsidianCapabilityFrom({ health, settings });
   const llmState = health?.llm?.configured ? "ok" : "warn";
   return (
     <div className="health-grid">
-      <HealthItem label="Database" value={health?.database?.ok ? "OK" : "Error"} state={health?.database?.ok ? "ok" : "bad"} />
-      <HealthItem label="Obsidian" value={obsidianCapability.label} state={obsidianCapability.state} />
-      <HealthItem label="LLM" value={health?.llm?.configured ? `${health.llm.providers?.length || 0} providers` : "Not configured"} state={llmState} />
+      <HealthItem label="Database" loading={loading} value={health?.database?.ok ? "OK" : "Error"} state={health?.database?.ok ? "ok" : "bad"} />
+      <HealthItem label="Obsidian" loading={loading} value={obsidianCapability.label} state={obsidianCapability.state} />
+      <HealthItem label="LLM" loading={loading} value={health?.llm?.configured ? `${health.llm.providers?.length || 0} providers` : "Not configured"} state={llmState} />
     </div>
   );
 }
@@ -163,6 +180,8 @@ function dailyRecoveryFromHistory(history = []) {
 }
 
 export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) {
+  const location = useLocation();
+  const currentPage = SETTINGS_PAGES[location.pathname] || { key: "overview", eyebrow: "系统工作区", title: "设置中心" };
   const [settings, setSettings] = useState({});
   const [providers, setProviders] = useState([]);
   const [saveStatus, setSaveStatus] = useState("idle");
@@ -239,11 +258,11 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
   }, [jobStatusQuery.data, setStatusMessage]);
 
   useEffect(() => {
-    if (taskDetailsLoadedRef.current) return undefined;
+    if (currentPage.key !== "daily-tasks" || taskDetailsLoadedRef.current) return undefined;
     taskDetailsLoadedRef.current = true;
     refreshHistoryCache({ force: true }).catch((error) => setStatusMessage(error.message));
     return undefined;
-  }, [refreshHistoryCache, setStatusMessage]);
+  }, [currentPage.key, refreshHistoryCache, setStatusMessage]);
 
   useEffect(() => {
     const error = settingsQuery.error || jobStatusQuery.error || jobsSummaryQuery.error || historyQuery.error || healthQuery.error;
@@ -459,7 +478,7 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
   }
 
   function saveSettings(event) {
-    event.preventDefault();
+    event?.preventDefault();
     if (saveTimerRef.current) {
       clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
@@ -490,20 +509,67 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
     });
   }
 
-  return (
-    <section className="view control-view vision-settings">
-      <header className="vision-topbar settings-topbar">
-        <div className="vision-brand">
-          <span>系统工作区</span>
-          <h1>设置中心</h1>
-        </div>
-        <div className="vision-top-actions">
-          <span className={`vision-live-state ${systemHealthy ? "ready" : "attention"}`}><i aria-hidden="true" />{healthQuery.hasData ? (systemHealthy ? "服务就绪" : "需要配置") : "同步状态"}</span>
-          <RefreshButton className="vision-refresh" busy={refreshBusy} label="刷新状态" onClick={() => refreshControl({ hydrate: false, includeTaskHistory: true }).catch((error) => setStatusMessage(error.message))} />
-        </div>
-      </header>
+  const taskControlProps = {
+    scheduler,
+    recovery: dailyRecovery,
+    onStartStartup: () => setSchedulerMode("startup"),
+    onStartScheduler: () => setSchedulerMode("scheduler"),
+    onStopScheduler: () => setSchedulerMode("off"),
+    onRunNow: () => runJob("run-daily", "/api/jobs/run-now"),
+    onResumeDaily: () => runJob("resume-daily", "/api/jobs/resume-daily"),
+    onRetryDaily: () => runJob("retry-daily", "/api/jobs/retry-daily"),
+    onRunJob: runJob
+  };
 
-      <main className="settings-workspace">
+  const taskHistoryProps = {
+    history,
+    loading: tasksLoading,
+    refreshing: historyQuery.refreshing
+  };
+
+  function renderSettingsPage() {
+    if (currentPage.key === "daily-tasks") {
+      return (
+        <DailyTasksSettingsView
+          settings={settings}
+          onSettingChange={updateSetting}
+          onSubmit={saveSettings}
+          saveStatus={saveStatus}
+          taskControlProps={taskControlProps}
+          taskHistoryProps={taskHistoryProps}
+        />
+      );
+    }
+
+    if (currentPage.key === "data") {
+      return (
+        <DataStorageSettingsView
+          settings={settings}
+          onSettingChange={updateSetting}
+          onPickPath={pickPath}
+          onSubmit={saveSettings}
+          saveStatus={saveStatus}
+        />
+      );
+    }
+
+    if (currentPage.key === "models") {
+      return (
+        <ModelRoutingSettingsView
+          settings={settings}
+          providers={providers}
+          onSettingChange={updateSetting}
+          onProviderChange={updateProvider}
+          onAddProvider={addProvider}
+          onRemoveProvider={removeProvider}
+          onSubmit={saveSettings}
+          saveStatus={saveStatus}
+        />
+      );
+    }
+
+    return (
+      <>
         <section className="settings-overview-card">
           <header className="settings-card-heading">
             <div>
@@ -513,49 +579,59 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
             </div>
             <em>{healthQuery.hasData ? (systemHealthy ? "ALL SYSTEMS READY" : "ACTION NEEDED") : "SYNCING"}</em>
           </header>
-          <HealthGrid health={health} settings={settings} />
+          <HealthGrid health={health} loading={(!healthQuery.hasData && !healthQuery.error) || healthQuery.refreshing} settings={settings} />
         </section>
+        <nav className="settings-entry-grid" aria-label="设置二级页面">
+          {SETTINGS_ENTRIES.map((entry) => (
+            <Link className={`settings-entry-card is-${entry.type}`} key={entry.to} to={entry.to}>
+              <span className="settings-entry-index">{entry.index}</span>
+              <span className="settings-entry-icon"><SettingsEntryIcon type={entry.type} /></span>
+              <span className="settings-entry-copy">
+                <small>{entry.eyebrow}</small>
+                <strong>{entry.label}</strong>
+                <p>{entry.description}</p>
+              </span>
+              <span className="settings-entry-action">进入设置 <i aria-hidden="true">→</i></span>
+            </Link>
+          ))}
+        </nav>
+        <AboutPanel />
+      </>
+    );
+  }
 
-        {tasksLoading ? (
-          <LoadingPanel className="settings-task-loading" description="正在同步调度器和任务摘要。" rows={5} title="读取任务状态" />
-        ) : (
-          <TaskControlPanel
-            scheduler={scheduler}
-            recovery={dailyRecovery}
-            onStartStartup={() => setSchedulerMode("startup")}
-            onStartScheduler={() => setSchedulerMode("scheduler")}
-            onStopScheduler={() => setSchedulerMode("off")}
-            onRunNow={() => runJob("run-daily", "/api/jobs/run-now")}
-            onResumeDaily={() => runJob("resume-daily", "/api/jobs/resume-daily")}
-            onRetryDaily={() => runJob("retry-daily", "/api/jobs/retry-daily")}
-            onRunJob={runJob}
+  return (
+    <section className="view control-view vision-settings">
+      <header className="vision-topbar settings-topbar">
+        <div className="vision-brand">
+          <span>{currentPage.eyebrow}</span>
+          <h1>{currentPage.title}</h1>
+        </div>
+        <div className="vision-top-actions">
+          <span className={`vision-live-state ${systemHealthy ? "ready" : "attention"}`}><i aria-hidden="true" />{healthQuery.hasData ? (systemHealthy ? "服务就绪" : "需要配置") : "同步状态"}</span>
+          <RefreshButton
+            className="vision-refresh"
+            busy={refreshBusy}
+            label="刷新状态"
+            onClick={() => refreshControl({ hydrate: false, includeTaskHistory: currentPage.key === "daily-tasks" }).catch((error) => setStatusMessage(error.message))}
           />
-        )}
+        </div>
+      </header>
 
-      <section className="settings-config-shell">
-        <header className="settings-card-heading settings-config-heading">
-          <div>
-            <span>配置中心</span>
-            <h2>系统配置</h2>
-            <p>连接、来源、检索与自动化参数会自动保存，并作用于下一次任务。</p>
-          </div>
-          <em>{CONTROL_SAVE_STATUS_LABELS[saveStatus] || saveStatus}</em>
-        </header>
-        <SettingsForm
-          settings={settings}
-          providers={providers}
-          onSettingChange={updateSetting}
-          onProviderChange={updateProvider}
-          onAddProvider={addProvider}
-          onRemoveProvider={removeProvider}
-          onPickPath={pickPath}
-          onSubmit={saveSettings}
-          saveStatus={saveStatus}
-        />
-      </section>
+      {currentPage.key !== "overview" ? (
+        <div className="settings-subpage-nav-row">
+          <Link className="settings-overview-back" to="/settings">
+            <span aria-hidden="true">←</span>
+            返回设置概览
+          </Link>
+          <button className="settings-subpage-save-button" disabled={saveStatus === "saving"} onClick={saveSettings} type="button">
+            {saveStatus === "saving" ? "保存中" : "立即保存"}
+          </button>
+        </div>
+      ) : null}
 
-      <TaskHistoryPanel history={history} loading={tasksLoading} refreshing={historyQuery.refreshing} />
-      <AboutPanel />
+      <main className={`settings-workspace settings-workspace-${currentPage.key}`}>
+        {renderSettingsPage()}
       </main>
     </section>
   );

@@ -3,8 +3,9 @@ import { useEffect, useState } from "react";
 import { cacheNamespace, useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { api, fmtScore, postJson } from "../lib/dashboard.js";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
-import { LoadingPanel } from "./Loading.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
+import { WorkspacePaneLoader } from "./WorkspacePaneLoader.jsx";
+import "../styles/InboxView.css";
 
 const REPORT_STATUS_LABELS = {
   queued: "报告排队中",
@@ -423,7 +424,7 @@ export function InboxView({ onOpenReportQueue, onSelectPaper, selectedPaperId, s
           </header>
           <div className="paper-list inbox-paper-list">
           {inboxLoading ? (
-            <LoadingPanel compact rows={8} title="读取待判断论文" />
+            <WorkspacePaneLoader rows={6} title="读取待判断论文" variant="list" />
           ) : (
             <PaperList
               papers={papers}
@@ -442,10 +443,10 @@ export function InboxView({ onOpenReportQueue, onSelectPaper, selectedPaperId, s
 
         <section className="detail-panel inbox-detail-panel" aria-label="论文详情">
         {detailPanelLoading ? (
-          <LoadingPanel
+          <WorkspacePaneLoader
             description={detailLoading ? "正在读取所选论文的摘要、项目判定和全文报告。" : "正在读取待判断论文列表和首篇论文详情。"}
-            rows={8}
             title={detailLoading ? "打开论文详情" : "读取论文详情"}
+            variant="detail"
           />
         ) : (
           <div className="inbox-detail-transition" key={detail?.paper?.id || "empty"}>

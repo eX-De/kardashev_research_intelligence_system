@@ -1,6 +1,7 @@
 import { LoadingPanel } from "./Loading.jsx";
 import { PanelTitle } from "./PanelTitle.jsx";
 import { fmtDate, summarizeMeta } from "../lib/dashboard.js";
+import "../styles/TaskHistoryPanel.css";
 
 function HistoryTable({ history }) {
   if (!history.length) return <p className="muted">暂无任务记录。</p>;

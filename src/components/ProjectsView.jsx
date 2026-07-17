@@ -8,6 +8,7 @@ import { formatMetricCount, VisionMetric } from "./VisionMetric.jsx";
 import { api, chooseLocalPath, fmtDate, postJson, PROJECT_STATUSES, statusLabel } from "../lib/dashboard.js";
 import { useCachedApi } from "../lib/apiCache.jsx";
 import { friendlyObsidianMessage, useObsidianCapability } from "../lib/obsidianCapability.js";
+import "../styles/ProjectsView.css";
 
 const ACTIVE_STATUSES = new Set(["active", "exploring", "writing"]);
 

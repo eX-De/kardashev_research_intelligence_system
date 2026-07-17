@@ -1,0 +1,36 @@
+/* Page-specific layout for DataStorageSettingsView.jsx. Shared form controls live in SettingsForm.css. */
+
+.data-storage-settings-view {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+}
+
+.data-storage-settings-form {
+  margin: 0;
+}
+
+.data-storage-settings-form .data-storage-section:first-child {
+  padding-top: 24px;
+}
+
+.data-storage-settings-view .data-storage-section {
+  scroll-margin-top: 24px;
+}
+
+.data-storage-remote-note {
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid rgba(153, 171, 255, 0.16);
+  border-radius: 12px;
+  color: var(--settings-muted, var(--muted));
+  background: rgba(137, 155, 255, 0.06);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+
+:root[data-theme="light"] .data-storage-remote-note {
+  border-color: rgba(54, 67, 99, 0.12);
+  background: rgba(67, 82, 119, 0.045);
+}

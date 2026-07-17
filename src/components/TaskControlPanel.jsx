@@ -1,4 +1,5 @@
 import { fmtDate } from "../lib/dashboard.js";
+import "../styles/TaskControlPanel.css";
 
 function schedulerMode(scheduler) {
   if (scheduler?.enabled) return "scheduler";

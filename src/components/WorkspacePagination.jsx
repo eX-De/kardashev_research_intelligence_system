@@ -1,3 +1,5 @@
+import "../styles/WorkspacePagination.css";
+
 export const WORKSPACE_PAGE_SIZE_OPTIONS = [
   ["10", "10/页"],
   ["25", "25/页"],
