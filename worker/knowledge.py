@@ -56,13 +56,31 @@ def _split_block(heading: str, text: str, max_chars: int) -> list[dict[str, str]
     chunks: list[dict[str, str]] = []
     current = ""
     for paragraph in paragraphs:
-        candidate = f"{current}\n\n{paragraph}".strip() if current else paragraph
-        if len(candidate) <= max_chars:
-            current = candidate
-            continue
-        if current:
-            chunks.append({"heading": heading, "text": current})
-        current = paragraph[:max_chars]
+        remaining = paragraph
+        while remaining:
+            available = max_chars - len(current) - (2 if current else 0)
+            if available > 0 and len(remaining) <= available:
+                current = f"{current}\n\n{remaining}".strip() if current else remaining
+                remaining = ""
+                continue
+            if current:
+                chunks.append({"heading": heading, "text": current})
+                current = ""
+                continue
+            split_at = min(max_chars, len(remaining))
+            if split_at < len(remaining):
+                whitespace = remaining.rfind(" ", max(0, int(max_chars * 0.6)), split_at)
+                if whitespace > 0:
+                    split_at = whitespace
+                tail_length = len(remaining) - split_at
+                if 0 < tail_length < 40:
+                    earlier = remaining.rfind(" ", 0, max(1, len(remaining) - 40))
+                    if earlier > 0:
+                        split_at = earlier
+            piece = remaining[:split_at].strip()
+            remaining = remaining[split_at:].strip()
+            if piece:
+                chunks.append({"heading": heading, "text": piece})
     if current:
         chunks.append({"heading": heading, "text": current})
     return chunks

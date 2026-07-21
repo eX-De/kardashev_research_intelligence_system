@@ -18,6 +18,7 @@ ENV NODE_ENV=production \
     PORT=3000 \
     PYTHONUNBUFFERED=1 \
     PYTHONUTF8=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     PATH="/opt/venv/bin:${PATH}" \
     PYTHON_BIN=/opt/venv/bin/python \
     ARXIV_PDF_DIR=/data/arxiv_pdfs \
@@ -35,10 +36,13 @@ RUN python3 -m venv /opt/venv \
 COPY package*.json ./
 RUN npm ci --omit=dev \
     && node --input-type=module -e "import 'pg'" \
+    && npx playwright install --with-deps chromium \
+    && chmod -R a+rX /ms-playwright \
     && npm cache clean --force
 
 COPY --chown=node:node server.js ./
 COPY --chown=node:node server ./server
+COPY --chown=node:node scripts/extract-web-content.mjs ./scripts/extract-web-content.mjs
 COPY --chown=node:node worker ./worker
 COPY --from=frontend-build --chown=node:node /app/dist ./dist
 

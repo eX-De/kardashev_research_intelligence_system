@@ -11,7 +11,7 @@ from typing import Any, Callable
 from .config import Settings
 from .db import clean_unicode, utc_now
 from .embeddings import ensure_missing_arxiv_chunk_embeddings
-from .papers import replace_paper_chunks_for_arxiv_paper, upsert_paper_from_arxiv
+from .papers import paper_id_for_arxiv_id, replace_existing_paper_chunks_for_arxiv_paper, upsert_paper_from_arxiv
 
 PDF_429_RETRY_SECONDS = 20
 PDF_429_MAX_RETRIES = 1
@@ -193,7 +193,7 @@ def replace_arxiv_chunks_for_paper(
                 now,
             ),
         )
-    replace_paper_chunks_for_arxiv_paper(conn, paper, normalized_chunks)
+    replace_existing_paper_chunks_for_arxiv_paper(conn, paper, normalized_chunks)
     return len(normalized_chunks)
 
 
@@ -336,7 +336,8 @@ def cache_arxiv_full_texts(
                 (str(pdf_path), str(text_path), str(exc)[:1000], int(row["id"])),
             )
             refreshed = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (int(row["id"]),)).fetchone()
-            upsert_paper_from_arxiv(conn, refreshed)
+            if paper_id_for_arxiv_id(conn, str(refreshed["arxiv_id"])) is not None:
+                upsert_paper_from_arxiv(conn, refreshed)
             failed += 1
         conn.commit()
         emit_progress(index + 1, str(row["arxiv_id"]))

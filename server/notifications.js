@@ -114,7 +114,9 @@ function activityTime(item = {}) {
 
 function notificationSortKey(item) {
   return [
-    ACTIVE_NOTIFICATION_TYPES.has(item?.type) ? 1 : 0,
+    item?.type === "daily_run_completed" && safeInt(item?.source?.artifact_id)
+      ? 2
+      : ACTIVE_NOTIFICATION_TYPES.has(item?.type) ? 1 : 0,
     String(item?.created_at || ""),
     SEVERITY_RANK[String(item?.severity || "")] || 0
   ];
@@ -149,6 +151,27 @@ async function activityRows(limit = 20) {
     message: row.message,
     meta: parseJson(row.meta_json, {})
   }));
+}
+
+async function latestDailyRun() {
+  const result = await query(`
+    SELECT id, job_type, status, started_at, finished_at, message, meta_json
+    FROM job_runs
+    WHERE job_type IN ('run-daily', 'resume-daily', 'retry-daily')
+    ORDER BY id DESC
+    LIMIT 1
+  `);
+  const row = result.rows?.[0];
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    job_type: row.job_type,
+    status: row.status,
+    started_at: row.started_at,
+    finished_at: row.finished_at,
+    message: row.message,
+    meta: parseJson(row.meta_json, {})
+  };
 }
 
 async function paperReportStats() {
@@ -486,9 +509,10 @@ registerNotificationBuilder("job_failed", "最近失败任务", async (context) 
 });
 
 registerNotificationBuilder("daily_run_completed", "每日流程完成摘要", async (context) => {
-  const completedDaily = completed(context.activities, (_meta, item) => DAILY_JOB_TYPES.has(item.job_type));
-  if (!completedDaily) return [];
+  const completedDaily = context.latest_daily_run;
+  if (!completedDaily || completedDaily.status !== "completed") return [];
   const meta = completedDaily.meta || {};
+  const artifactId = safeInt(meta.daily_report_artifact_id);
   const parts = [];
   const newPapers = metaNumber(meta, ["arxiv_papers_inserted", "papers_inserted"]);
   const projectMatches = metaNumber(meta, ["project_paper_matches_created", "daily_report_project_matches"]);
@@ -510,7 +534,11 @@ registerNotificationBuilder("daily_run_completed", "每日流程完成摘要", a
       parts.length ? parts.join("，") : completedDaily.message || "流程已完成",
       {
         createdAt: completedDaily.finished_at,
-        source: { job_id: completedDaily.id, job_type: completedDaily.job_type }
+        source: {
+          job_id: completedDaily.id,
+          job_type: completedDaily.job_type,
+          ...(artifactId ? { artifact_id: artifactId } : {})
+        }
       }
     )
   ];
@@ -712,6 +740,7 @@ export async function getNotifications(limit = 5) {
   const normalizedLimit = normalizeNotificationLimit(limit, 5);
   const context = {
     activities: await activityRows(20),
+    latest_daily_run: await latestDailyRun(),
     paper_report_stats: await paperReportStats(),
     experiment_reports: await experimentReportRows(Math.min(normalizedLimit, 10)),
     app_update_status: await readUpdateStatus(),

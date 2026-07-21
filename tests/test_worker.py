@@ -59,7 +59,7 @@ from worker.paper_reports import (
     queue_paper_report,
 )
 from worker.artifacts import content_hash, upsert_artifact
-from worker.papers import paper_id_for_arxiv_paper_id
+from worker.papers import paper_id_for_arxiv_paper_id, promote_arxiv_paper_to_library
 from worker.paper_reader import (
     READER_MESSAGE_COLUMNS,
     _build_chat_messages,
@@ -69,6 +69,7 @@ from worker.paper_reader import (
     import_reader_pdfs,
     import_reader_pdf,
     import_reader_urls,
+    import_reader_webpages,
     paper_reader_chat_stream,
     save_reader_note_to_obsidian,
     retry_reader_report,
@@ -223,11 +224,10 @@ def seed_paper_report_artifact(
     started_at: str | None = None,
     finished_at: str | None = None,
 ) -> dict[str, object]:
-    library_paper_id = paper_id_for_arxiv_paper_id(conn, int(paper_id))
+    library_paper_id = promote_arxiv_paper_to_library(conn, int(paper_id))
     paper = conn.execute("SELECT title, arxiv_id, link FROM arxiv_papers WHERE id = ?", (int(paper_id),)).fetchone()
     content = {
         "paper_id": library_paper_id,
-        "legacy_arxiv_paper_id": int(paper_id),
         "arxiv_id": paper["arxiv_id"] if paper else "",
         "link": paper["link"] if paper else "",
         "prompt": prompt,
@@ -247,12 +247,11 @@ def seed_paper_report_artifact(
         content_json=content,
         status=status,
         source_json={
-            "source_key": f"paper_report:{int(paper_id)}",
+            "source_key": f"paper_report:{int(library_paper_id or paper_id)}",
             "generated_from": "test",
-            "legacy_arxiv_paper_id": int(paper_id),
             "source_text_hash": source_text_hash,
         },
-        source_key=f"paper_report:{int(paper_id)}",
+        source_key=f"paper_report:{int(library_paper_id or paper_id)}",
         model_provider_id=model_provider_id,
         model=model,
         input_hash=source_text_hash or content_hash(report_markdown, content),
@@ -731,6 +730,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(result["papers_inserted"], 1)
         arxiv_ids = [row["arxiv_id"] for row in conn.execute("SELECT arxiv_id FROM arxiv_papers")]
         self.assertEqual(arxiv_ids, ["2605.00001"])
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM papers").fetchone()["count"], 0)
 
     def test_fetch_arxiv_skips_tombstoned_papers(self) -> None:
         conn = connect_test_db()
@@ -781,6 +781,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(result["papers_tombstone_skipped"], 1)
         arxiv_ids = [row["arxiv_id"] for row in conn.execute("SELECT arxiv_id FROM arxiv_papers")]
         self.assertEqual(arxiv_ids, ["2605.00002"])
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM papers").fetchone()["count"], 0)
         tombstone = conn.execute(
             "SELECT seen_count, last_seen_at FROM arxiv_paper_tombstones WHERE arxiv_id = '2605.00001'"
         ).fetchone()
@@ -1119,6 +1120,7 @@ class WorkerTests(unittest.TestCase):
             """
         )
         paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
+        paper_id = promote_arxiv_paper_to_library(conn, int(paper_id))
         conn.execute(
             """
             INSERT INTO arxiv_text_chunks(paper_id, chunk_index, source, text, token_count, char_count, created_at)
@@ -1534,6 +1536,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(recommendation["state"], "pending")
         self.assertEqual(recommendation["importance"], "")
         self.assertEqual(recommendation["relation_type"], "direct")
+        self.assertIsNotNone(paper_id_for_arxiv_paper_id(conn, int(paper_id)))
 
     def test_paper_report_queue_uses_paper_reader_prompt_and_full_text(self) -> None:
         conn = connect_test_db()
@@ -1591,6 +1594,9 @@ class WorkerTests(unittest.TestCase):
         result = ensure_paper_reports_for_recommendations(conn, [int(paper_id)])
 
         self.assertEqual(result["paper_reports_queued"], 1)
+        library_paper_id = int(
+            conn.execute("SELECT scope_id FROM artifacts WHERE artifact_type = 'paper_report'").fetchone()["scope_id"]
+        )
         captured: dict[str, object] = {}
 
         def fake_chat(
@@ -1611,11 +1617,11 @@ class WorkerTests(unittest.TestCase):
             )
 
         with patch("worker.paper_reports._call_chat_text", side_effect=fake_chat):
-            process_result = process_paper_report_queue(conn, chat_settings(test_settings()), [int(paper_id)])
+            process_result = process_paper_report_queue(conn, chat_settings(test_settings()), [library_paper_id])
 
         self.assertEqual(process_result["paper_reports_done"], 1)
-        report = paper_report_payload(conn, int(paper_id))
-        paper = conn.execute("SELECT title FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
+        report = paper_report_payload(conn, library_paper_id)
+        paper = conn.execute("SELECT title FROM papers WHERE id = ?", (library_paper_id,)).fetchone()
         self.assertEqual(report["status"], "done")
         self.assertEqual(report["prompt"], PAPER_READER_DEFAULT_PROMPT)
         self.assertEqual(report["report_markdown"], "# 全文报告\n\n完整报告内容")
@@ -1654,7 +1660,7 @@ class WorkerTests(unittest.TestCase):
             (str(text_path),),
         )
         paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
-        seed_paper_report_artifact(
+        artifact = seed_paper_report_artifact(
             conn,
             paper_id,
             status="done",
@@ -1662,6 +1668,7 @@ class WorkerTests(unittest.TestCase):
             report_markdown="# 报告\n\n已有解读报告",
             finished_at="now",
         )
+        paper_id = int(artifact["scope_id"])
         conn.commit()
         captured: dict[str, object] = {}
 
@@ -1713,7 +1720,7 @@ class WorkerTests(unittest.TestCase):
         )
         self.assertIn("后续对话都应优先基于这份文本回答。", messages[1]["content"])
         self.assertIn("--- page 1 ---\nMethod details for chat.", messages[1]["content"])
-        self.assertEqual(messages[2]["content"], "我已收到完整 PDF 解析文本。")
+        self.assertEqual(messages[2]["content"], "我已收到完整的文档正文。")
         self.assertEqual(messages[3], {"role": "user", "content": PAPER_READER_DEFAULT_PROMPT})
         self.assertEqual(messages[4]["role"], "assistant")
         self.assertIn("已有解读报告", messages[4]["content"])
@@ -1748,14 +1755,34 @@ class WorkerTests(unittest.TestCase):
         report = paper_report_payload(conn, paper_id)
         self.assertIsNotNone(report)
         self.assertEqual(report["status"], "queued")
-        paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
-        self.assertTrue(str(paper["arxiv_id"]).startswith("reader-upload-"))
-        self.assertEqual(paper["text_status"], "complete")
-        self.assertIn("Reader import extraction works", Path(paper["text_path"]).read_text(encoding="utf-8"))
+        source = conn.execute("SELECT * FROM paper_sources WHERE paper_id = ?", (paper_id,)).fetchone()
+        text_asset = conn.execute(
+            "SELECT * FROM paper_assets WHERE paper_id = ? AND asset_type = 'text'", (paper_id,)
+        ).fetchone()
+        self.assertTrue(str(source["source_identifier"]).startswith("reader-upload-"))
+        self.assertEqual(text_asset["status"], "complete")
+        self.assertIn("Reader import extraction works", Path(text_asset["path"]).read_text(encoding="utf-8"))
         self.assertGreater(
-            conn.execute("SELECT COUNT(*) AS count FROM arxiv_text_chunks WHERE paper_id = ?", (paper_id,)).fetchone()["count"],
+            conn.execute("SELECT COUNT(*) AS count FROM paper_chunks WHERE paper_id = ?", (paper_id,)).fetchone()["count"],
             0,
         )
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM arxiv_papers").fetchone()["count"], 0)
+
+        with patch(
+            "worker.paper_reports._call_chat_text",
+            return_value=json.dumps(
+                {"title": "Reader Upload", "markdown": "# 全文报告\n\nImported report body."},
+                ensure_ascii=False,
+            ),
+        ):
+            process_result = process_paper_report_queue(conn, test_settings(), [paper_id])
+
+        self.assertEqual(process_result["paper_reports_done"], 1)
+        self.assertEqual(len(process_result["paper_reports_completed"]), 1)
+        completed = process_result["paper_reports_completed"][0]
+        self.assertEqual(completed["paper_id"], paper_id)
+        self.assertEqual(completed["source_type"], "upload")
+        self.assertTrue(completed["manual_import"])
 
     def test_import_reader_url_downloads_direct_pdf_and_queues_report(self) -> None:
         conn = connect_test_db()
@@ -1782,9 +1809,71 @@ class WorkerTests(unittest.TestCase):
         paper_id = int(result["imported"][0]["paper_id"])
         report = paper_report_payload(conn, paper_id)
         self.assertEqual(report["status"], "queued")
-        paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
-        self.assertTrue(str(paper["arxiv_id"]).startswith("reader-url-"))
-        self.assertEqual(paper["pdf_link"], "https://example.test/paper.pdf")
+        source = conn.execute("SELECT * FROM paper_sources WHERE paper_id = ?", (paper_id,)).fetchone()
+        pdf_asset = conn.execute(
+            "SELECT * FROM paper_assets WHERE paper_id = ? AND asset_type = 'pdf'", (paper_id,)
+        ).fetchone()
+        self.assertTrue(str(source["source_identifier"]).startswith("reader-url-"))
+        self.assertEqual(pdf_asset["url"], "https://example.test/paper.pdf")
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM arxiv_papers").fetchone()["count"], 0)
+
+    def test_import_reader_webpage_stores_only_cleaned_markdown_without_pdf_asset(self) -> None:
+        conn = connect_test_db()
+        init_db(conn)
+        extracted = {
+            "ok": True,
+            "results": [
+                {
+                    "ok": True,
+                    "url": "https://example.test/article#section",
+                    "final_url": "https://example.test/article#section",
+                    "title": "A Web Research Article",
+                    "byline": "Researcher",
+                    "excerpt": "A concise article summary.",
+                    "site_name": "Example Research",
+                    "lang": "en",
+                    "markdown": "## Main finding\n\nHuman memory can be modeled with structured retrieval.",
+                    "text": "Human memory can be modeled with structured retrieval.",
+                    "extraction_method": "static",
+                }
+            ],
+        }
+
+        with patch("worker.paper_reader.extract_web_documents", return_value=extracted):
+            result = import_reader_webpages(
+                conn,
+                test_settings(),
+                {"urls": "https://example.test/article#section"},
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["errors"], [])
+        paper_id = int(result["imported"][0]["paper_id"])
+        source = conn.execute("SELECT * FROM paper_sources WHERE paper_id = ?", (paper_id,)).fetchone()
+        text_asset = conn.execute(
+            "SELECT * FROM paper_assets WHERE paper_id = ? AND asset_type = 'text'", (paper_id,)
+        ).fetchone()
+        self.assertTrue(str(source["source_identifier"]).startswith("reader-web-"))
+        self.assertEqual(source["source_url"], "https://example.test/article")
+        self.assertTrue(str(text_asset["path"]).endswith(".md"))
+        stored_text = Path(text_asset["path"]).read_text(encoding="utf-8")
+        self.assertIn("Human memory can be modeled", stored_text)
+        self.assertNotIn("<html", stored_text.lower())
+        source = conn.execute(
+            "SELECT source_type FROM paper_sources WHERE source_identifier = ?",
+            (source["source_identifier"],),
+        ).fetchone()
+        self.assertEqual(source["source_type"], "web")
+        self.assertEqual(
+            conn.execute("SELECT COUNT(*) AS count FROM paper_assets WHERE asset_type = 'pdf'").fetchone()["count"],
+            0,
+        )
+        self.assertGreater(
+            conn.execute("SELECT COUNT(*) AS count FROM paper_chunks WHERE paper_id = ?", (paper_id,)).fetchone()["count"],
+            0,
+        )
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM arxiv_papers").fetchone()["count"], 0)
+        self.assertIn("网页正文", paper_report_payload(conn, paper_id)["prompt"])
 
     def test_import_reader_pdfs_batches_uploads(self) -> None:
         conn = connect_test_db()
@@ -1897,7 +1986,7 @@ class WorkerTests(unittest.TestCase):
             (str(pdf_path),),
         )
         paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
-        seed_paper_report_artifact(
+        artifact = seed_paper_report_artifact(
             conn,
             paper_id,
             status="done",
@@ -1905,16 +1994,17 @@ class WorkerTests(unittest.TestCase):
             report_markdown="# 报告\n\n保存这份解读",
             finished_at="now",
         )
+        paper_id = int(artifact["scope_id"])
         conn.execute(
             """
-            INSERT INTO paper_reader_messages(paper_id, role, content, source, created_at)
+            INSERT INTO paper_reader_messages(library_paper_id, role, content, source, created_at)
             VALUES (?, 'user', '解释贡献。', 'chat', 'now')
             """,
             (paper_id,),
         )
         conn.execute(
             """
-            INSERT INTO paper_reader_messages(paper_id, role, content, source, model, created_at)
+            INSERT INTO paper_reader_messages(library_paper_id, role, content, source, model, created_at)
             VALUES (?, 'assistant', '贡献是统一阅读器。', 'chat', 'test-chat-model', 'now')
             """,
             (paper_id,),
@@ -2005,9 +2095,10 @@ class WorkerTests(unittest.TestCase):
             """
         )
         paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
+        paper_id = promote_arxiv_paper_to_library(conn, int(paper_id))
         conn.execute(
             """
-            INSERT INTO paper_reader_messages(paper_id, role, content, source, model, created_at)
+            INSERT INTO paper_reader_messages(library_paper_id, role, content, source, model, created_at)
             VALUES (?, 'assistant', '关键术语 X 代表统一阅读器中的追问生成机制。', 'chat', 'test-chat-model', 'now')
             """,
             (paper_id,),
@@ -2088,10 +2179,11 @@ class WorkerTests(unittest.TestCase):
             """
         )
         paper_id = conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"]
-        seed_paper_report_artifact(conn, paper_id, status="queued", prompt=PAPER_READER_DEFAULT_PROMPT)
+        artifact = seed_paper_report_artifact(conn, paper_id, status="queued", prompt=PAPER_READER_DEFAULT_PROMPT)
+        paper_id = int(artifact["scope_id"])
         conn.execute(
             """
-            INSERT INTO paper_reader_messages(paper_id, role, content, source, created_at)
+            INSERT INTO paper_reader_messages(library_paper_id, role, content, source, created_at)
             VALUES (?, 'assistant', '可删除消息。', 'chat', 'now')
             """,
             (paper_id,),
@@ -2212,7 +2304,7 @@ class WorkerTests(unittest.TestCase):
             """,
             (project_id, paper_id),
         )
-        seed_paper_report_artifact(
+        artifact = seed_paper_report_artifact(
             conn,
             paper_id,
             status="done",
@@ -2221,13 +2313,14 @@ class WorkerTests(unittest.TestCase):
             report_markdown="# 全文报告\n\n队列报告内容",
             finished_at="now",
         )
+        library_paper_id = int(artifact["scope_id"])
         conn.commit()
 
         result = paper_reports_queue(conn)
 
         self.assertEqual(result["stats"]["done"], 1)
         self.assertEqual(result["stats"]["total"], 1)
-        self.assertEqual(result["items"][0]["paper_id"], paper_id)
+        self.assertEqual(result["items"][0]["paper_id"], library_paper_id)
         self.assertEqual(result["items"][0]["status"], "done")
         self.assertEqual(result["items"][0]["source_project_ids"], [project_id])
         self.assertEqual(result["items"][0]["source_project_names"], ["Manual Queue Project"])
@@ -2336,7 +2429,7 @@ class WorkerTests(unittest.TestCase):
             """,
             (project_id, paper_id),
         )
-        seed_paper_report_artifact(
+        artifact = seed_paper_report_artifact(
             conn,
             paper_id,
             status="queued",
@@ -2345,7 +2438,7 @@ class WorkerTests(unittest.TestCase):
         )
         conn.commit()
 
-        result = remove_paper_report(conn, int(paper_id))
+        result = remove_paper_report(conn, int(artifact["scope_id"]))
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["paper_reports_removed"], 1)
@@ -2568,6 +2661,51 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(item_types[0], "paper_report_completed")
         self.assertIn("daily_run_completed", item_types)
         self.assertNotIn("job_failed", item_types)
+
+    def test_daily_report_notification_persists_until_next_daily_run_starts(self) -> None:
+        conn = connect_test_db()
+        init_db(conn)
+        artifact = upsert_artifact(
+            conn,
+            scope_type="system",
+            scope_id=None,
+            artifact_type="daily_report",
+            title="2026-07-21 科研情报日报",
+            content_markdown="# 日报",
+            content_json={},
+            status="ready",
+            source_json={"source_key": "daily_report:2026-07-21"},
+            source_key="daily_report:2026-07-21",
+            commit=False,
+        )
+        conn.execute(
+            """
+            INSERT INTO job_runs(job_type, status, started_at, finished_at, message, meta_json)
+            VALUES ('run-daily', 'completed', ?, ?, 'run-daily completed', ?)
+            """,
+            (
+                "2026-07-21T08:00:00+00:00",
+                "2026-07-21T08:30:00+00:00",
+                to_json({"daily_report_artifact_id": int(artifact["id"]), "daily_reports_created": 1}),
+            ),
+        )
+        conn.commit()
+
+        ready = notifications(conn, limit=1)["items"][0]
+        self.assertEqual(ready["type"], "daily_run_completed")
+        self.assertEqual(ready["source"]["artifact_id"], int(artifact["id"]))
+
+        conn.execute(
+            """
+            INSERT INTO job_runs(job_type, status, started_at, message, meta_json)
+            VALUES ('run-daily', 'running', ?, 'Daily run starting', '{}')
+            """,
+            ("2026-07-22T08:00:00+00:00",),
+        )
+        conn.commit()
+
+        item_types = {item["type"] for item in notifications(conn, limit=10)["items"]}
+        self.assertNotIn("daily_run_completed", item_types)
 
     def test_notifications_empty_fallback_shape(self) -> None:
         conn = connect_test_db()
@@ -3090,13 +3228,22 @@ class WorkerTests(unittest.TestCase):
         conn = connect_test_db()
         init_db(conn)
 
-        save_app_settings(conn, {"paper_report_queue_concurrency": 3, "embedding_concurrency": 12})
+        save_app_settings(
+            conn,
+            {
+                "paper_report_queue_concurrency": 3,
+                "embedding_concurrency": 12,
+                "project_judgment_concurrency": 4,
+            },
+        )
         payload = get_app_settings(conn, test_settings())["settings"]
         applied = apply_stored_settings(conn, test_settings())
 
         self.assertEqual(payload["paper_report_queue_concurrency"], 3)
         self.assertEqual(payload["embedding_concurrency"], 12)
+        self.assertEqual(payload["project_judgment_concurrency"], 4)
         self.assertEqual(applied.embedding_concurrency, 12)
+        self.assertEqual(applied.project_judgment_concurrency, 4)
         self.assertEqual(_embedding_concurrency(applied), 12)
 
     def test_stored_path_settings_remain_paths(self) -> None:
@@ -3495,6 +3642,77 @@ class WorkerTests(unittest.TestCase):
         judgment = conn.execute("SELECT confidence, suggested_action FROM project_paper_judgments").fetchone()
         self.assertAlmostEqual(float(judgment["confidence"]), 0.5)
         self.assertEqual(judgment["suggested_action"], "read")
+
+    def test_project_judgments_limit_parallel_requests_and_serialize_database_writes(self) -> None:
+        main_thread_id = threading.get_ident()
+        state = {"active": 0, "max_active": 0}
+        state_lock = threading.Lock()
+        progress: list[dict[str, int]] = []
+
+        class FakeConnection:
+            def __init__(self) -> None:
+                self.write_threads: list[int] = []
+                self.commit_threads: list[int] = []
+
+            def execute(self, _sql: str, _params: object = None) -> None:
+                self.write_threads.append(threading.get_ident())
+
+            def commit(self) -> None:
+                self.commit_threads.append(threading.get_ident())
+
+        candidates = [
+            {
+                "project_id": 1,
+                "paper_id": paper_id,
+                "retrieval_quality": 0.8,
+                "existing_input_hash": "",
+                "existing_prompt_version": "",
+            }
+            for paper_id in range(1, 7)
+        ]
+
+        def fake_call(_settings: Settings, _prompt: str) -> dict[str, object]:
+            with state_lock:
+                state["active"] += 1
+                state["max_active"] = max(state["max_active"], state["active"])
+            time.sleep(0.03)
+            with state_lock:
+                state["active"] -= 1
+            return {
+                "relation_type": "direct",
+                "relevance_score": 0.8,
+                "usefulness_score": 0.8,
+                "confidence": 0.8,
+                "suggested_action": "read_later",
+                "reason": "相关",
+                "evidence_mapping": [],
+                "missing_evidence": "",
+            }
+
+        settings = Settings(**{**test_settings().__dict__, "project_judgment_concurrency": 3})
+        conn = FakeConnection()
+        with (
+            patch("worker.llm._candidate_rows", return_value=candidates),
+            patch("worker.llm._judgment_payload", side_effect=lambda row: {"paper_id": row["paper_id"]}),
+            patch("worker.llm._input_hash", side_effect=lambda payload: f"hash:{payload['paper_id']}"),
+            patch("worker.llm._project_judgment_prompt", return_value="prompt"),
+            patch("worker.llm._call_chat", side_effect=fake_call),
+        ):
+            result = generate_missing_project_judgments(
+                conn,
+                settings,
+                progress_callback=lambda item: progress.append(dict(item)),
+            )
+
+        self.assertEqual(result["project_judgments_created"], 6)
+        self.assertEqual(result["project_judgment_concurrency"], 3)
+        self.assertEqual(state["max_active"], 3)
+        self.assertTrue(conn.write_threads)
+        self.assertEqual(set(conn.write_threads), {main_thread_id})
+        self.assertEqual(set(conn.commit_threads), {main_thread_id})
+        self.assertEqual(progress[-1]["completed"], 6)
+        self.assertEqual(progress[-1]["total"], 6)
+        self.assertEqual(progress[-1]["concurrency"], 3)
 
     def test_project_judgment_prompt_requires_chinese_values(self) -> None:
         prompt = _project_judgment_prompt(

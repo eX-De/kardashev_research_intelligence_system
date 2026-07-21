@@ -13,6 +13,7 @@ import {
 import { ArtifactsView } from "./components/ArtifactsView.jsx";
 import { ControlView } from "./components/ControlView.jsx";
 import { DashboardView } from "./components/DashboardView.jsx";
+import { GlobalSearchDialog } from "./components/GlobalSearchDialog.jsx";
 import { LoginView } from "./components/LoginView.jsx";
 import { OnboardingGate } from "./components/OnboardingGate.jsx";
 import { PapersWorkspaceView } from "./components/PapersWorkspaceView.jsx";
@@ -88,7 +89,7 @@ function safeNextPath(value, fallback = "/") {
   }
 }
 
-function PapersRoute({ section, setStatusMessage }) {
+function PapersRoute({ importOpen = false, notify, onClosePaperImport, onOpenPaperImport, section, setStatusMessage }) {
   const navigate = useNavigate();
   const { paperId } = useParams();
 
@@ -104,6 +105,10 @@ function PapersRoute({ section, setStatusMessage }) {
 
   return (
     <PapersWorkspaceView
+      importOpen={importOpen}
+      notify={notify}
+      onClosePaperImport={onClosePaperImport}
+      onOpenPaperImport={onOpenPaperImport}
       section={section}
       onOpenReportQueue={openReportQueue}
       onSelectPaper={selectPaper}
@@ -151,19 +156,19 @@ function ArtifactsRoute({ setStatusMessage }) {
   );
 }
 
-function AppRoutes({ notify, setStatusMessage }) {
+function AppRoutes({ importOpen, notify, onClosePaperImport, onOpenPaperImport, setStatusMessage }) {
   return (
     <Routes>
       <Route path="/" element={<DashboardView setStatusMessage={setStatusMessage} notify={notify} />} />
       <Route path="/artifacts" element={<ArtifactsRoute setStatusMessage={setStatusMessage} />} />
       <Route path="/artifacts/:artifactId" element={<ArtifactsRoute setStatusMessage={setStatusMessage} />} />
       <Route path="/papers" element={<Navigate to="/papers/inbox" replace />} />
-      <Route path="/papers/inbox" element={<PapersRoute section="inbox" setStatusMessage={setStatusMessage} />} />
-      <Route path="/papers/inbox/:paperId" element={<PapersRoute section="inbox" setStatusMessage={setStatusMessage} />} />
-      <Route path="/papers/library" element={<PapersRoute section="library" setStatusMessage={setStatusMessage} />} />
-      <Route path="/papers/library/:paperId" element={<PapersRoute section="library" setStatusMessage={setStatusMessage} />} />
-      <Route path="/papers/reports" element={<PapersRoute section="reports" setStatusMessage={setStatusMessage} />} />
-      <Route path="/papers/reports/:paperId" element={<PapersRoute section="reports" setStatusMessage={setStatusMessage} />} />
+      <Route path="/papers/inbox" element={<PapersRoute notify={notify} section="inbox" setStatusMessage={setStatusMessage} />} />
+      <Route path="/papers/inbox/:paperId" element={<PapersRoute notify={notify} section="inbox" setStatusMessage={setStatusMessage} />} />
+      <Route path="/papers/library" element={<PapersRoute notify={notify} section="library" setStatusMessage={setStatusMessage} />} />
+      <Route path="/papers/library/:paperId" element={<PapersRoute notify={notify} section="library" setStatusMessage={setStatusMessage} />} />
+      <Route path="/papers/reports" element={<PapersRoute importOpen={importOpen} notify={notify} onClosePaperImport={onClosePaperImport} onOpenPaperImport={onOpenPaperImport} section="reports" setStatusMessage={setStatusMessage} />} />
+      <Route path="/papers/reports/:paperId" element={<PapersRoute importOpen={importOpen} notify={notify} onClosePaperImport={onClosePaperImport} onOpenPaperImport={onOpenPaperImport} section="reports" setStatusMessage={setStatusMessage} />} />
       <Route path="/projects" element={<ProjectsRoute setStatusMessage={setStatusMessage} />} />
       <Route path="/projects/new" element={<ProjectPageRoute isNew setStatusMessage={setStatusMessage} />} />
       <Route path="/projects/:projectId" element={<ProjectPageRoute setStatusMessage={setStatusMessage} />} />
@@ -217,6 +222,33 @@ function ProtectedShell({ authInfo, authStatusLabel, notify, onLogout, setStatus
   const location = useLocation();
   const navigate = useNavigate();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [isPaperImportOpen, setIsPaperImportOpen] = useState(false);
+  const openSearch = useCallback(() => {
+    setIsPaperImportOpen(false);
+    setIsSearchOpen(true);
+  }, []);
+  const closeSearch = useCallback(() => setIsSearchOpen(false), []);
+  const closePaperImport = useCallback(() => setIsPaperImportOpen(false), []);
+  const openPaperImport = useCallback(() => {
+    setIsSearchOpen(false);
+    setIsPaperImportOpen(true);
+    if (!location.pathname.startsWith("/papers/reports")) navigate("/papers/reports");
+  }, [location.pathname, navigate]);
+
+  useEffect(() => {
+    if (!location.pathname.startsWith("/papers/reports")) setIsPaperImportOpen(false);
+  }, [location.pathname]);
+
+  useEffect(() => {
+    const handlePaperImportShortcut = (event) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.key.toLowerCase() !== "i") return;
+      event.preventDefault();
+      openPaperImport();
+    };
+    window.addEventListener("keydown", handlePaperImportShortcut);
+    return () => window.removeEventListener("keydown", handlePaperImportShortcut);
+  }, [openPaperImport]);
 
   const handleLogout = useCallback(async () => {
     if (isLoggingOut) return;
@@ -264,12 +296,26 @@ function ProtectedShell({ authInfo, authStatusLabel, notify, onLogout, setStatus
         authStatusLabel={authStatusLabel}
         isLoggingOut={isLoggingOut}
         onLogout={handleLogout}
+        onOpenPaperImport={openPaperImport}
+        onOpenSearch={openSearch}
         statusMessage={statusMessage}
+      />
+      <GlobalSearchDialog
+        isOpen={isSearchOpen}
+        onClose={closeSearch}
+        onOpen={openSearch}
+        setStatusMessage={setStatusMessage}
       />
       <ToastHost onDismiss={onDismissToast} toasts={toasts} />
       <OnboardingGate notify={notify} setStatusMessage={setStatusMessage} />
       <main className="app-shell">
-        <AppRoutes notify={notify} setStatusMessage={setStatusMessage} />
+        <AppRoutes
+          importOpen={isPaperImportOpen}
+          notify={notify}
+          onClosePaperImport={closePaperImport}
+          onOpenPaperImport={openPaperImport}
+          setStatusMessage={setStatusMessage}
+        />
       </main>
     </>
   );

@@ -4,9 +4,26 @@ import unittest
 from unittest.mock import Mock, patch
 
 from worker import service
+from worker.paper_reports import _paper_report_result
 
 
 class WorkerServiceDispatchTests(unittest.TestCase):
+    def test_paper_report_result_marks_reader_sources_as_manual_imports(self) -> None:
+        base = {
+            "paper_id": 7,
+            "artifact_id": 21,
+            "title": "Imported paper",
+            "status": "done",
+            "arxiv_id": "",
+            "finished_at": "2026-07-21T10:00:00+00:00",
+        }
+        for source_type in ("upload", "url", "web", "manual"):
+            result = _paper_report_result({**base, "source_type": source_type})
+            self.assertTrue(result["manual_import"], source_type)
+
+        automatic = _paper_report_result({**base, "source_type": "arxiv", "arxiv_id": "2607.00001"})
+        self.assertFalse(automatic["manual_import"])
+
     def test_dispatch_generate_paper_reports_parses_limit_payload(self) -> None:
         conn = object()
         settings = object()
@@ -114,6 +131,37 @@ class WorkerServiceDispatchTests(unittest.TestCase):
                 service.dispatch_worker_job(conn, settings, worker_job)
 
         run.assert_called_once_with(conn, settings, {"files": []})
+
+    def test_dispatch_reader_import_web_uses_payload_body(self) -> None:
+        conn = object()
+        settings = object()
+        worker_job = {
+            "id": 17,
+            "job_run_id": 52,
+            "job_type": "reader-import-web",
+            "payload": {"command": "reader-import-web", "body": {"urls": ["https://example.test/article"]}},
+        }
+        with patch("worker.service.import_reader_webpages", return_value={"ok": True, "imported": []}) as run:
+            self.assertEqual(
+                service.dispatch_worker_job(conn, settings, worker_job),
+                {"ok": True, "imported": []},
+            )
+
+        run.assert_called_once_with(conn, settings, {"urls": ["https://example.test/article"]})
+
+    def test_dispatch_reader_import_web_fails_when_no_page_was_imported(self) -> None:
+        worker_job = {
+            "id": 18,
+            "job_run_id": 53,
+            "job_type": "reader-import-web",
+            "payload": {"body": {"urls": ["https://example.test/article"]}},
+        }
+        with patch(
+            "worker.service.import_reader_webpages",
+            return_value={"ok": False, "errors": [{"error": "正文过短"}]},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "正文过短"):
+                service.dispatch_worker_job(object(), object(), worker_job)
 
     def test_dispatch_paper_report_uses_payload_body(self) -> None:
         conn = object()
@@ -308,6 +356,64 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         self.assertIsNone(payload["paper_id"])
         self.assertEqual(payload["status"], "done")
         self.assertEqual(payload["result"]["paper_reports_done"], 2)
+
+    def test_run_once_toasts_when_manual_import_report_completes(self) -> None:
+        conn = Mock()
+        worker_job = {
+            "id": 14,
+            "job_run_id": 49,
+            "job_type": "generate-paper-reports",
+            "payload": {"command": "generate-paper-reports", "source": "paper-report-queue", "args": ["--limit", "1"]},
+            "started_at": "2026-07-21T10:00:00+00:00",
+            "finished_at": None,
+        }
+        result_payload = {
+            "paper_reports_done": 2,
+            "paper_reports_failed": 0,
+            "paper_reports_completed": [
+                {
+                    "paper_id": 27,
+                    "artifact_id": 61,
+                    "title": "A Manually Imported Paper",
+                    "status": "done",
+                    "source_type": "upload",
+                    "manual_import": True,
+                    "updated_at": "2026-07-21T10:00:15+00:00",
+                    "error_message": "",
+                },
+                {
+                    "paper_id": 28,
+                    "artifact_id": 62,
+                    "title": "Daily Recommendation Paper",
+                    "status": "done",
+                    "source_type": "arxiv",
+                    "manual_import": False,
+                    "updated_at": "2026-07-21T10:00:16+00:00",
+                    "error_message": "",
+                },
+            ],
+            "paper_reports_failures": [],
+        }
+        with patch("worker.service.connect", return_value=conn), \
+            patch("worker.service.claim_next_worker_job", return_value={"worker_job": worker_job, "job_run": {}}), \
+            patch("worker.service.insert_app_event") as insert_event, \
+            patch("worker.service.load_settings", return_value=object()), \
+            patch("worker.service.apply_stored_settings", return_value=object()), \
+            patch("worker.service.dispatch_worker_job", return_value=result_payload), \
+            patch("worker.service.complete_worker_job", return_value={"worker_job": {**worker_job, "status": "completed"}, "job_run": {}}):
+            service.run_once("worker-test")
+
+        report_events = [call for call in insert_event.call_args_list if call.args[1] == "paper_report.updated"]
+        self.assertEqual(len(report_events), 2)
+        payload = next(call.args[2] for call in report_events if call.args[2]["paper_id"] == 27)
+        self.assertEqual(payload["paper_id"], 27)
+        self.assertEqual(payload["artifact_id"], 61)
+        self.assertEqual(payload["notification"]["channels"], ["toast"])
+        self.assertEqual(payload["notification"]["severity"], "ok")
+        self.assertEqual(payload["notification"]["title"], "论文报告生成完成")
+        self.assertEqual(payload["notification"]["detail"], "A Manually Imported Paper")
+        automatic_payload = next(call.args[2] for call in report_events if call.args[2]["paper_id"] == 28)
+        self.assertNotIn("notification", automatic_payload)
 
     def test_run_once_publishes_daily_result_domain_events(self) -> None:
         conn = Mock()

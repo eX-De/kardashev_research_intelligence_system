@@ -20,6 +20,10 @@ export function DailyRunProgressCard({ item }) {
   const cacheTotal = Number(cacheProgress?.total || 0);
   const cacheCurrent = Number(cacheProgress?.current || 0);
   const cachePercent = cacheTotal ? Math.max(0, Math.min(100, Math.round((cacheCurrent / cacheTotal) * 100))) : 0;
+  const judgmentProgress = progress.project_judgment_progress || null;
+  const judgmentTotal = Number(judgmentProgress?.total || 0);
+  const judgmentCompleted = Number(judgmentProgress?.completed || 0);
+  const judgmentPercent = judgmentTotal ? Math.max(0, Math.min(100, Math.round((judgmentCompleted / judgmentTotal) * 100))) : 0;
   const startedAt = item?.source?.started_at || item?.created_at;
   const latestSummaryStep = [...steps].reverse().find((step) => step.summary);
 
@@ -87,6 +91,21 @@ export function DailyRunProgressCard({ item }) {
             <p>PDF {cacheProgress.pdfs_downloaded || 0} · TXT {cacheProgress.texts_extracted || 0} · 失败 {cacheProgress.texts_failed || 0}</p>
           </div>
           {cacheProgress.current_arxiv_id ? <span className="vision-cache-current">{cacheProgress.current_arxiv_id}</span> : null}
+        </div>
+      ) : null}
+
+      {judgmentProgress && progress.current_key === "judge_project_papers" ? (
+        <div className="vision-cache-progress">
+          <div className="vision-cache-copy">
+            <span>项目级判定</span>
+            <strong>{judgmentCompleted}<small> / {judgmentTotal}</small></strong>
+          </div>
+          <div className="vision-cache-meter">
+            <div className="vision-progress-bar" role="progressbar" aria-label="项目级判定进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow={judgmentPercent}>
+              <span style={{ width: `${judgmentPercent}%` }} />
+            </div>
+            <p>并发 {judgmentProgress.concurrency || 0} · 已写入 {judgmentProgress.created || 0} · 已过滤 {judgmentProgress.filtered || 0} · 跳过 {judgmentProgress.skipped || 0}</p>
+          </div>
         </div>
       ) : null}
 

@@ -9,7 +9,7 @@ from .config import LLMProvider, Settings, normalize_provider_base_url
 from .db import from_json, to_json, utc_now
 from .env import env_value
 
-DEFAULT_PAPER_READER_PROMPT = """请阅读这篇论文 PDF，输出结构化解读：
+DEFAULT_PAPER_READER_PROMPT = """请阅读这份研究文档，输出结构化解读：
 
 1. 研究问题和背景
 2. 方法和实验设计
@@ -41,6 +41,7 @@ INT_FIELDS = {
     "paper_report_queue_concurrency",
     "embedding_concurrency",
     "project_chat_profile_concurrency",
+    "project_judgment_concurrency",
 }
 
 FLOAT_FIELDS = {
@@ -254,6 +255,18 @@ def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, An
             "project_chat_profile_concurrency",
             maximum=8,
         ),
+        "project_judgment_concurrency": _positive_int(
+            stored.get(
+                "project_judgment_concurrency",
+                env_value(
+                    "PROJECT_JUDGMENT_CONCURRENCY",
+                    str(settings.project_judgment_concurrency or 3),
+                ),
+            ),
+            settings.project_judgment_concurrency or 3,
+            "project_judgment_concurrency",
+            maximum=8,
+        ),
         "reader_chat_provider_id": str(
             stored.get("reader_chat_provider_id", settings.reader_chat_provider_id or "")
         ),
@@ -336,6 +349,10 @@ def apply_stored_settings(conn: Any, settings: Settings) -> Settings:
                 updates[field] = _positive_int(
                     stored[field], settings.project_chat_profile_concurrency or 2, field, maximum=8
                 )
+            elif field == "project_judgment_concurrency":
+                updates[field] = _positive_int(
+                    stored[field], settings.project_judgment_concurrency or 3, field, maximum=8
+                )
             else:
                 updates[field] = int(stored[field])
     for field in FLOAT_FIELDS:
@@ -394,6 +411,8 @@ def save_app_settings(conn: Any, payload: dict[str, Any]) -> dict[str, Any]:
                 raise RuntimeError("embedding_concurrency must be at least 1")
             if key == "project_chat_profile_concurrency" and not 1 <= value <= 8:
                 raise RuntimeError("project_chat_profile_concurrency must be between 1 and 8")
+            if key == "project_judgment_concurrency" and not 1 <= value <= 8:
+                raise RuntimeError("project_judgment_concurrency must be between 1 and 8")
         elif key in FLOAT_FIELDS:
             value = float(raw_value or 0)
         elif key in BOOL_FIELDS:

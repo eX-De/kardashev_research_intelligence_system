@@ -34,9 +34,36 @@ function createPapersFake() {
       fetched_batch_id: "batch-1"
     }
   ];
-  const papers = [];
+  const papers = [{
+    id: "201",
+    canonical_key: "arxiv:2607.00001",
+    title: "Migrated Paper",
+    authors_json: "[\"Ada\", \"Ben\"]",
+    abstract: "Paper abstract",
+    published_at: "2026-07-01T00:00:00Z",
+    arxiv_id: "2607.00001",
+    library_status: "candidate",
+    reading_state: "unread",
+    saved_at: null,
+    last_read_at: null,
+    created_at: T0,
+    updated_at: T0
+  }];
   const sources = [];
   const assets = [];
+  const arxivChunks = [
+    {
+      paper_id: "101",
+      chunk_index: "0",
+      source: "full_text",
+      page_start: "1",
+      page_end: "1",
+      text: "Cached full text for unified search.",
+      token_count: "7",
+      char_count: "35"
+    }
+  ];
+  const paperChunks = [];
   const feedback = [];
   const artifacts = [];
   const judgments = [
@@ -64,7 +91,8 @@ function createPapersFake() {
   const recommendations = [
     {
       project_id: "7",
-      paper_id: "101",
+      paper_id: "201",
+      source_arxiv_paper_id: "101",
       state: "accepted",
       importance: "high",
       relation_type: "direct",
@@ -197,6 +225,39 @@ function createPapersFake() {
       assets.push(asset);
       return { rows: [{ id: asset.id }] };
     }
+    if (normalized.startsWith("SELECT * FROM PAPERS WHERE ID = $1")) {
+      return { rows: papers.filter((paper) => Number(paper.id) === Number(params[0])) };
+    }
+    if (normalized.startsWith("SELECT CHUNK_INDEX, SOURCE, PAGE_START, PAGE_END, TEXT, TOKEN_COUNT, CHAR_COUNT FROM ARXIV_TEXT_CHUNKS")) {
+      return { rows: arxivChunks.filter((row) => Number(row.paper_id) === Number(params[0])) };
+    }
+    if (normalized.startsWith("DELETE FROM PAPER_CHUNKS WHERE PAPER_ID = $1")) {
+      for (let index = paperChunks.length - 1; index >= 0; index -= 1) {
+        if (Number(paperChunks[index].paper_id) === Number(params[0])) paperChunks.splice(index, 1);
+      }
+      return { rows: [], rowCount: 1 };
+    }
+    if (normalized.startsWith("INSERT INTO PAPER_CHUNKS(")) {
+      paperChunks.push({
+        paper_id: String(params[0]),
+        asset_id: params[1] === null ? null : String(params[1]),
+        chunk_index: params[2],
+        source: params[3],
+        page_start: params[4],
+        page_end: params[5],
+        text: params[6],
+        token_count: params[7],
+        char_count: params[8],
+        created_at: params[9]
+      });
+      return { rows: [], rowCount: 1 };
+    }
+    if (normalized.startsWith("INSERT INTO PAPER_EMBEDDINGS(")) {
+      return { rows: [], rowCount: 1 };
+    }
+    if (normalized.startsWith("INSERT INTO PAPER_CHUNK_EMBEDDINGS(")) {
+      return { rows: [], rowCount: 1 };
+    }
     if (normalized.startsWith("SELECT READING_STATE, SAVED_AT, LAST_READ_AT FROM PAPERS WHERE ID = $1")) {
       const paper = papers.find((row) => Number(row.id) === Number(params[0]));
       return { rows: paper ? [{ reading_state: paper.reading_state, saved_at: paper.saved_at, last_read_at: paper.last_read_at }] : [] };
@@ -215,10 +276,17 @@ function createPapersFake() {
       return {
         rows: judgments
           .filter((row) => !selectedIds || selectedIds.includes(Number(row.paper_id)))
-          .map((row) => ({
-            ...row,
-            existing_state: recommendations.find((rec) => rec.project_id === row.project_id && rec.paper_id === row.paper_id)?.state || ""
-          }))
+          .map((row) => {
+            const paper = arxivPapers.find((item) => Number(item.id) === Number(row.paper_id)) || {};
+            return {
+              ...row,
+              ...paper,
+              project_id: row.project_id,
+              paper_id: row.paper_id,
+              arxiv_updated_at: paper.updated_at,
+              existing_state: recommendations.find((rec) => rec.project_id === row.project_id && rec.source_arxiv_paper_id === row.paper_id)?.state || ""
+            };
+          })
       };
     }
     if (normalized.startsWith("INSERT INTO PROJECT_PAPER_RECOMMENDATIONS")) {
@@ -229,14 +297,16 @@ function createPapersFake() {
           paper_id: String(params[1]),
           state: "pending",
           importance: "",
-          created_at: params[5]
+          source_arxiv_paper_id: String(params[2]),
+          created_at: params[6]
         };
         recommendations.push(rec);
       }
-      rec.relation_type = params[2];
-      rec.reason = params[3];
-      rec.source_judgment_hash = params[4];
-      rec.updated_at = params[5];
+      rec.source_arxiv_paper_id = String(params[2]);
+      rec.relation_type = params[3];
+      rec.reason = params[4];
+      rec.source_judgment_hash = params[5];
+      rec.updated_at = params[6];
       return { rows: [], rowCount: 1 };
     }
     if (normalized.startsWith("SELECT PROJECT_ID FROM PROJECT_PAPER_RECOMMENDATIONS")) {
@@ -291,7 +361,7 @@ function createPapersFake() {
       return {
         rows: recommendations
           .filter((row) => ["pending", "accepted"].includes(row.state))
-          .filter((row) => !selectedIds || selectedIds.includes(Number(row.paper_id)))
+          .filter((row) => !selectedIds || selectedIds.includes(Number(row.paper_id)) || selectedIds.includes(Number(row.source_arxiv_paper_id)))
           .map((row) => ({ paper_id: row.paper_id, project_id: row.project_id }))
       };
     }
@@ -328,6 +398,8 @@ function createPapersFake() {
     papers,
     sources,
     assets,
+    arxivChunks,
+    paperChunks,
     feedback,
     artifacts,
     judgments,
@@ -351,21 +423,19 @@ function createPapersFake() {
   };
 }
 
-test("savePaperFeedback mirrors legacy arXiv paper and updates library status", async () => {
+test("savePaperFeedback updates canonical paper feedback and library status", async () => {
   const fake = createPapersFake();
   setPoolForTesting(fake.pool);
   try {
-    const result = await savePaperFeedback(101, "read_later", "Keep this");
+    const result = await savePaperFeedback(201, "read_later", "Keep this");
     assert.equal(result.ok, true);
-    assert.equal(result.paper_id, 101);
+    assert.equal(result.paper_id, 201);
     assert.equal(result.status, "read_later");
     assert.equal(fake.feedback.length, 1);
     assert.equal(fake.feedback[0].note, "Keep this");
     assert.equal(fake.papers.length, 1);
     assert.equal(fake.papers[0].canonical_key, "arxiv:2607.00001");
     assert.equal(fake.papers[0].library_status, "saved");
-    assert.equal(fake.sources[0].source_type, "arxiv");
-    assert.equal(fake.assets.length, 2);
     assert.deepEqual(fake.txCalls.slice(0, 2), ["BEGIN", "COMMIT"]);
   } finally {
     setPoolForTesting(null);
@@ -386,6 +456,8 @@ test("syncProjectPaperRecommendations preserves accepted state while refreshing 
     assert.equal(accepted.reason, "Updated accepted reason");
     assert.equal(created.state, "pending");
     assert.equal(created.reason, "New reason");
+    assert.equal(accepted.source_arxiv_paper_id, "101");
+    assert.equal(created.source_arxiv_paper_id, "101");
   } finally {
     setPoolForTesting(null);
   }
@@ -405,11 +477,13 @@ test("ensurePaperReportsForRecommendations creates queued report artifacts", asy
     assert.equal(artifact.status, "queued");
     assert.equal(artifact.artifact_type, "paper_report");
     const content = JSON.parse(artifact.content_json);
-    assert.equal(content.legacy_arxiv_paper_id, 101);
+    assert.equal(content.paper_id, 201);
+    assert.equal(content.legacy_arxiv_paper_id, undefined);
     assert.deepEqual(content.source_project_ids, [7]);
     assert.equal(content.prompt, DEFAULT_PAPER_READER_PROMPT);
     const source = JSON.parse(artifact.source_json);
-    assert.equal(source.source_key, "paper_report:101");
+    assert.equal(source.source_key, "paper_report:201");
+    assert.equal(source.legacy_arxiv_paper_id, undefined);
   } finally {
     setPoolForTesting(null);
   }
@@ -417,9 +491,21 @@ test("ensurePaperReportsForRecommendations creates queued report artifacts", asy
 
 test("updatePaperRecommendation discards pending recommendations and updates library status in Node", async () => {
   const fake = createPapersFake();
+  fake.recommendations.push({
+    project_id: "8",
+    paper_id: "201",
+    source_arxiv_paper_id: "101",
+    state: "pending",
+    importance: "",
+    relation_type: "indirect",
+    reason: "New reason",
+    source_judgment_hash: "hash-new",
+    created_at: T0,
+    updated_at: T0
+  });
   setPoolForTesting(fake.pool);
   try {
-    const result = await updatePaperRecommendation(101, { action: "discard" });
+    const result = await updatePaperRecommendation(201, { action: "discard" });
     assert.equal(result.ok, true);
     assert.equal(result.action, "discard");
     assert.equal(fake.papers[0].library_status, "discarded");

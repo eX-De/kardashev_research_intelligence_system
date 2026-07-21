@@ -14,9 +14,13 @@ function createNotificationsPool({
   experimentReports = [],
   updateStatus = null,
   latestCompletedDailyId = "0",
-  recoverableDaily = null
+  recoverableDaily = null,
+  latestDailyRun = undefined
 } = {}) {
   const calls = [];
+  const resolvedLatestDailyRun = latestDailyRun === undefined
+    ? activities.find((item) => ["run-daily", "resume-daily", "retry-daily"].includes(item.job_type)) || null
+    : latestDailyRun;
   return {
     calls,
     pool: {
@@ -28,6 +32,9 @@ function createNotificationsPool({
         }
         if (normalized.includes("SELECT COALESCE(MAX(ID), 0) AS ID FROM JOB_RUNS")) {
           return { rows: [{ id: latestCompletedDailyId }] };
+        }
+        if (normalized.includes("WHERE JOB_TYPE IN ('RUN-DAILY', 'RESUME-DAILY', 'RETRY-DAILY')") && normalized.includes("LIMIT 1")) {
+          return { rows: resolvedLatestDailyRun ? [resolvedLatestDailyRun] : [] };
         }
         if (normalized.includes("FROM JOB_RUNS") && normalized.includes("META_JSON") && normalized.includes("ORDER BY ID DESC")) {
           return { rows: activities.slice(0, Number(params[0] || 0)) };
@@ -114,6 +121,42 @@ test("running daily progress is surfaced and suppresses generic running job", as
     assert.deepEqual(result.items[0].progress, progress);
     assert.deepEqual(result.items[0].source, { job_id: 9, job_type: "run-daily" });
     assert.equal(itemTypes.includes("job_running"), false);
+  });
+});
+
+test("completed daily report stays pinned until the next daily run starts", async () => {
+  const completedDaily = {
+    id: "11",
+    job_type: "run-daily",
+    status: "completed",
+    started_at: "2026-07-21T08:00:00+00:00",
+    finished_at: "2026-07-21T08:30:00+00:00",
+    message: "run-daily completed",
+    meta_json: toJson({
+      daily_report_artifact_id: 77,
+      daily_reports_created: 1,
+      papers_inserted: 20
+    })
+  };
+  await withNotificationsPool({ activities: [completedDaily] }, async () => {
+    const result = await getNotifications(1);
+    assert.equal(result.items[0].type, "daily_run_completed");
+    assert.equal(result.items[0].source.artifact_id, 77);
+    assert.equal(result.items[0].source.job_id, 11);
+  });
+
+  const runningDaily = {
+    id: "12",
+    job_type: "run-daily",
+    status: "running",
+    started_at: "2026-07-22T08:00:00+00:00",
+    finished_at: null,
+    message: "Daily run starting",
+    meta_json: "{}"
+  };
+  await withNotificationsPool({ activities: [runningDaily, completedDaily] }, async () => {
+    const result = await getNotifications(10);
+    assert.equal(result.items.some((item) => item.type === "daily_run_completed"), false);
   });
 });
 

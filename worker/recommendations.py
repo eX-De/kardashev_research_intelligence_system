@@ -8,6 +8,7 @@ from .llm import (
     PROJECT_JUDGMENT_REPORT_USEFULNESS_THRESHOLD,
 )
 from .project_status import run_daily_project_status_sql
+from .papers import promote_arxiv_paper_to_library
 
 
 VALID_RECOMMENDATION_STATES = {"pending", "accepted", "discarded"}
@@ -52,7 +53,8 @@ def sync_project_paper_recommendations(
         JOIN arxiv_papers p ON p.id = j.paper_id
         JOIN research_projects rp ON rp.id = j.project_id
         LEFT JOIN project_paper_recommendations r
-          ON r.project_id = j.project_id AND r.paper_id = j.paper_id
+          ON r.project_id = j.project_id
+         AND r.source_arxiv_paper_id = j.paper_id
         WHERE j.relation_type IN ({placeholders})
           AND j.suggested_action != 'ignore'
           AND j.confidence >= ?
@@ -86,6 +88,9 @@ def sync_project_paper_recommendations(
     preserved = 0
     for row in rows:
         existing_state = str(row["existing_state"] or "")
+        library_paper_id = promote_arxiv_paper_to_library(conn, int(row["paper_id"]))
+        if library_paper_id is None:
+            raise RuntimeError(f"Cannot promote recommendation paper: {row['paper_id']}")
         if existing_state in {"accepted", "discarded"}:
             preserved += 1
         elif existing_state:
@@ -95,11 +100,12 @@ def sync_project_paper_recommendations(
         conn.execute(
             """
             INSERT INTO project_paper_recommendations(
-              project_id, paper_id, state, importance, relation_type, reason,
+              project_id, paper_id, source_arxiv_paper_id, state, importance, relation_type, reason,
               source_judgment_hash, created_at, updated_at
             )
-            VALUES (?, ?, 'pending', '', ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, 'pending', '', ?, ?, ?, ?, ?)
             ON CONFLICT(project_id, paper_id) DO UPDATE SET
+              source_arxiv_paper_id = excluded.source_arxiv_paper_id,
               relation_type = excluded.relation_type,
               reason = excluded.reason,
               source_judgment_hash = excluded.source_judgment_hash,
@@ -107,6 +113,7 @@ def sync_project_paper_recommendations(
             """,
             (
                 int(row["project_id"]),
+                int(library_paper_id),
                 int(row["paper_id"]),
                 row["relation_type"],
                 row["reason"],
@@ -135,7 +142,7 @@ def accept_recommendations_for_paper(
     selected_ids = sorted({int(project_id) for project_id in project_ids if int(project_id)})
     if not selected_ids:
         raise RuntimeError("At least one project must be selected")
-    if not conn.execute("SELECT id FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone():
+    if not conn.execute("SELECT id FROM papers WHERE id = ?", (paper_id,)).fetchone():
         raise RuntimeError(f"Paper not found: {paper_id}")
     placeholders = ", ".join("?" for _ in selected_ids)
     rows = conn.execute(
@@ -200,7 +207,7 @@ def discard_recommendations_for_paper(
     paper_id: int,
     project_ids: list[int] | None = None,
 ) -> None:
-    if not conn.execute("SELECT id FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone():
+    if not conn.execute("SELECT id FROM papers WHERE id = ?", (paper_id,)).fetchone():
         raise RuntimeError(f"Paper not found: {paper_id}")
     now = utc_now()
     if project_ids:
@@ -264,8 +271,8 @@ def project_recommendation_paper_rows(
           p.arxiv_id,
           p.title,
           p.published_at,
-          p.text_status,
-          p.link,
+          COALESCE(text_asset.status, 'pending') AS text_status,
+          COALESCE(source.source_url, '') AS link,
           r.state AS recommendation_state,
           r.importance,
           r.relation_type,
@@ -275,29 +282,26 @@ def project_recommendation_paper_rows(
           j.usefulness_score,
           j.confidence
         FROM project_paper_recommendations r
-        JOIN arxiv_papers p ON p.id = r.paper_id
+        JOIN papers p ON p.id = r.paper_id
+        LEFT JOIN LATERAL (
+          SELECT ps.source_url
+          FROM paper_sources ps
+          WHERE ps.paper_id = p.id
+          ORDER BY ps.updated_at DESC, ps.id DESC
+          LIMIT 1
+        ) source ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT pa.status
+          FROM paper_assets pa
+          WHERE pa.paper_id = p.id AND pa.asset_type = 'text'
+          ORDER BY pa.updated_at DESC, pa.id DESC
+          LIMIT 1
+        ) text_asset ON TRUE
         LEFT JOIN project_paper_judgments j
-          ON j.project_id = r.project_id AND j.paper_id = r.paper_id
+          ON j.project_id = r.project_id AND j.paper_id = r.source_arxiv_paper_id
         WHERE r.project_id = ?
           AND r.state IN ({state_placeholders})
-          AND NOT EXISTS (
-            SELECT 1 FROM arxiv_paper_tombstones t
-            WHERE t.arxiv_id = p.arxiv_id
-          )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM papers lp
-            WHERE lp.arxiv_id = p.arxiv_id
-              AND lp.library_status IN ('archived', 'discarded')
-          )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM paper_sources ps
-            JOIN papers lp ON lp.id = ps.paper_id
-            WHERE ps.source_type = 'arxiv'
-              AND ps.source_identifier = p.arxiv_id
-              AND lp.library_status IN ('archived', 'discarded')
-          )
+          AND p.library_status NOT IN ('archived', 'discarded')
           {linked_clause}
         ORDER BY
           CASE r.state WHEN 'pending' THEN 0 WHEN 'accepted' THEN 1 ELSE 2 END,

@@ -11,7 +11,7 @@ from worker.api import export_artifact
 from worker.artifacts import upsert_artifact
 from worker.obsidian import OBSIDIAN_NOT_CONFIGURED, ObsidianNotConfiguredError
 from worker.paper_reports import process_paper_report_queue, queue_paper_report
-from worker.papers import paper_id_for_arxiv_paper_id, upsert_manual_paper
+from worker.papers import promote_arxiv_paper_to_library, upsert_manual_paper, upsert_paper_asset
 from worker.reports import generate_daily_report
 
 
@@ -121,7 +121,8 @@ class ArtifactTests(unittest.TestCase):
             """,
             (str(text_path),),
         )
-        paper_id = int(conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"])
+        legacy_paper_id = int(conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"])
+        paper_id = int(promote_arxiv_paper_to_library(conn, legacy_paper_id) or 0)
         queue_paper_report(conn, paper_id, prompt="Summarize")
         queued = conn.execute("SELECT id, content_json FROM artifacts WHERE artifact_type = 'paper_report'").fetchone()
         content = json.loads(queued["content_json"])
@@ -139,9 +140,6 @@ class ArtifactTests(unittest.TestCase):
             result = process_paper_report_queue(conn, settings(), [paper_id])
 
         self.assertEqual(result["paper_reports_done"], 1)
-        library_paper_id = paper_id_for_arxiv_paper_id(conn, paper_id)
-        self.assertIsNotNone(library_paper_id)
-        self.assertNotEqual(library_paper_id, paper_id)
         artifact = conn.execute(
             """
             SELECT *
@@ -150,16 +148,51 @@ class ArtifactTests(unittest.TestCase):
               AND scope_id = ?
               AND artifact_type = 'paper_report'
             """,
-            (library_paper_id,),
+            (paper_id,),
         ).fetchone()
         self.assertIsNotNone(artifact)
         self.assertEqual(artifact["title"], "Artifact Mirror Paper")
         self.assertIn("Artifact markdown body", artifact["content_markdown"])
         content = json.loads(artifact["content_json"])
-        self.assertEqual(content["paper_id"], library_paper_id)
-        self.assertEqual(content["legacy_arxiv_paper_id"], paper_id)
+        self.assertEqual(content["paper_id"], paper_id)
+        self.assertNotIn("legacy_arxiv_paper_id", content)
         self.assertEqual(content["source_project_ids"], [7])
         self.assertEqual(json.loads(artifact["source_json"])["source_key"], f"paper_report:{paper_id}")
+
+    def test_manual_import_report_result_preserves_toast_identity(self) -> None:
+        conn = connect_test_db()
+        text_dir = Path.cwd() / ".test-tmp" / "manual-paper-report"
+        text_dir.mkdir(parents=True, exist_ok=True)
+        text_path = text_dir / "paper.txt"
+        text_path.write_text("Manual import full text for report generation.", encoding="utf-8")
+        paper_id = upsert_manual_paper(conn, title="Manual Import Report", abstract="Imported by the user.")
+        upsert_paper_asset(
+            conn,
+            paper_id,
+            asset_type="text",
+            path=str(text_path),
+            status="complete",
+            metadata={"char_count": text_path.stat().st_size},
+        )
+        queue_paper_report(conn, paper_id, prompt="Summarize")
+        conn.commit()
+
+        with patch(
+            "worker.paper_reports._call_chat_text",
+            return_value=json.dumps(
+                {"title": "Manual Import Report", "markdown": "# 报告\n\nManual report body."},
+                ensure_ascii=False,
+            ),
+        ):
+            result = process_paper_report_queue(conn, settings(), [paper_id])
+
+        self.assertEqual(result["paper_reports_done"], 1)
+        self.assertEqual(len(result["paper_reports_completed"]), 1)
+        completed = result["paper_reports_completed"][0]
+        self.assertEqual(completed["paper_id"], paper_id)
+        self.assertEqual(completed["source_type"], "manual")
+        self.assertTrue(completed["manual_import"])
+        self.assertEqual(completed["status"], "done")
 
 
 if __name__ == "__main__":

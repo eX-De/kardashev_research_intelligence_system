@@ -102,7 +102,11 @@ def _notification_sort_key(item: dict[str, Any]) -> tuple[int, str, int]:
         "paper_report_queue_processing",
     }
     severity_rank = {"bad": 3, "warn": 2, "ok": 1, "info": 1, "neutral": 0}
-    is_active = 1 if item.get("type") in active_types else 0
+    is_active = (
+        2
+        if item.get("type") == "daily_run_completed" and _safe_int((item.get("source") or {}).get("artifact_id"))
+        else 1 if item.get("type") in active_types else 0
+    )
     return (
         is_active,
         str(item.get("created_at") or ""),
@@ -132,6 +136,29 @@ def _activity_rows(conn: DbConnection, limit: int = 20) -> list[dict[str, Any]]:
         }
         for row in rows
     ]
+
+
+def _latest_daily_run(conn: DbConnection) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT id, job_type, status, started_at, finished_at, message, meta_json
+        FROM job_runs
+        WHERE job_type IN ('run-daily', 'resume-daily', 'retry-daily')
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": int(row["id"]),
+        "job_type": row["job_type"],
+        "status": row["status"],
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
+        "message": row["message"],
+        "meta": from_json(row["meta_json"], {}),
+    }
 
 
 def _paper_report_stats(conn: DbConnection) -> dict[str, int]:
@@ -448,13 +475,11 @@ def _job_failed(context: dict[str, Any]) -> list[dict[str, Any]]:
 
 @register_notification_builder("daily_run_completed", "每日流程完成摘要")
 def _daily_run_completed(context: dict[str, Any]) -> list[dict[str, Any]]:
-    completed_daily = _completed(
-        context["activities"],
-        lambda _meta, item: item["job_type"] in DAILY_JOB_TYPES,
-    )
-    if not completed_daily:
+    completed_daily = context.get("latest_daily_run")
+    if not completed_daily or completed_daily["status"] != "completed":
         return []
     meta = completed_daily.get("meta") or {}
+    artifact_id = _safe_int(meta.get("daily_report_artifact_id"))
     parts = []
     new_papers = _meta_number(meta, ["arxiv_papers_inserted", "papers_inserted"])
     project_matches = _meta_number(meta, ["project_paper_matches_created", "daily_report_project_matches"])
@@ -481,7 +506,11 @@ def _daily_run_completed(context: dict[str, Any]) -> list[dict[str, Any]]:
             "每日流程已完成",
             "，".join(parts) if parts else completed_daily["message"] or "流程已完成",
             created_at=completed_daily["finished_at"],
-            source={"job_id": completed_daily["id"], "job_type": completed_daily["job_type"]},
+            source={
+                "job_id": completed_daily["id"],
+                "job_type": completed_daily["job_type"],
+                **({"artifact_id": artifact_id} if artifact_id else {}),
+            },
         )
     ]
 
@@ -702,6 +731,7 @@ def notifications(conn: DbConnection, limit: int = 5) -> dict[str, Any]:
     context: dict[str, Any] = {
         "conn": conn,
         "activities": _activity_rows(conn, 20),
+        "latest_daily_run": _latest_daily_run(conn),
         "paper_report_stats": _paper_report_stats(conn),
         "experiment_reports": _experiment_report_rows(conn, min(max(1, int(limit or 5)), 10)),
         "app_update_status": read_update_status(conn),

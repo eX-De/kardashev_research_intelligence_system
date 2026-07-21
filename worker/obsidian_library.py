@@ -8,7 +8,6 @@ from typing import Any
 from .config import Settings
 from .artifacts import export_artifact_to_obsidian
 from .db import clean_unicode, from_json, utc_now
-from .papers import paper_id_for_arxiv_paper_id
 
 
 PROJECTS_START = "<!-- research-intelligence:projects:start -->"
@@ -121,6 +120,7 @@ def _serialize_frontmatter(frontmatter: dict[str, object]) -> str:
     preferred = [
         "tags",
         "source_as_link",
+        "paper_id",
         "arxiv_id",
         "link",
         "pdf_link",
@@ -189,13 +189,16 @@ def _paper_note_path(vault: Path, settings: Settings, paper: DbRow) -> tuple[Pat
         raise RuntimeError("Obsidian paper repository dir must be inside the vault") from exc
     repo.mkdir(parents=True, exist_ok=True)
 
-    arxiv_id = str(paper["arxiv_id"])
+    arxiv_id = str(paper["arxiv_id"] or "")
     for path in repo.glob("*.md"):
         frontmatter, _ = _split_frontmatter(_read_text(path))
-        if str(frontmatter.get("arxiv_id") or "").strip() == arxiv_id:
+        if str(frontmatter.get("paper_id") or "").strip() == str(paper["id"]):
+            return path, path.relative_to(vault).as_posix()
+        if arxiv_id and str(frontmatter.get("arxiv_id") or "").strip() == arxiv_id:
             return path, path.relative_to(vault).as_posix()
 
-    filename = f"{_safe_filename(str(paper['title']), arxiv_id)}.md"
+    fallback_name = arxiv_id or f"paper-{paper['id']}"
+    filename = f"{_safe_filename(str(paper['title']), fallback_name)}.md"
     path = repo / filename
     if path.exists():
         return path, path.relative_to(vault).as_posix()
@@ -219,7 +222,8 @@ def _copy_attachment(vault: Path, settings: Settings, paper: DbRow) -> str:
         raise RuntimeError("Obsidian paper attachment dir must be inside the vault") from exc
     attachment_dir.mkdir(parents=True, exist_ok=True)
     suffix = source.suffix or ".pdf"
-    target = attachment_dir / f"{_safe_filename(str(paper['arxiv_id']))}{suffix}"
+    attachment_name = str(paper["arxiv_id"] or "") or f"paper-{paper['id']}"
+    target = attachment_dir / f"{_safe_filename(attachment_name)}{suffix}"
     if not target.exists() or target.stat().st_size != source.stat().st_size:
         shutil.copy2(source, target)
     return target.relative_to(vault).as_posix()
@@ -310,6 +314,7 @@ def _update_frontmatter(
             source_links.append(pdf_link)
     updated["source_as_link"] = source_links
 
+    updated["paper_id"] = int(paper["id"])
     updated["arxiv_id"] = paper["arxiv_id"]
     updated["link"] = paper["link"]
     updated["pdf_link"] = paper["pdf_link"]
@@ -340,27 +345,21 @@ def _accepted_rows_for_paper(conn: DbConnection, paper_id: int) -> list[DbRow]:
 
 
 def _reading_report_for_paper(conn: DbConnection, paper_id: int) -> str:
-    scope_ids: list[int] = []
-    library_paper_id = paper_id_for_arxiv_paper_id(conn, paper_id)
-    if library_paper_id is not None:
-        scope_ids.append(int(library_paper_id))
-    scope_ids.append(int(paper_id))
-    for scope_id in dict.fromkeys(scope_ids):
-        artifact = conn.execute(
-            """
-            SELECT content_markdown
-            FROM artifacts
-            WHERE scope_type = 'paper'
-              AND scope_id = ?
-              AND artifact_type = 'paper_report'
-              AND status IN ('ready', 'done')
-            ORDER BY updated_at DESC, id DESC
-            LIMIT 1
-            """,
-            (scope_id,),
-        ).fetchone()
-        if artifact and clean_unicode(str(artifact["content_markdown"] or "")).strip():
-            return clean_unicode(str(artifact["content_markdown"] or "")).strip()
+    artifact = conn.execute(
+        """
+        SELECT content_markdown
+        FROM artifacts
+        WHERE scope_type = 'paper'
+          AND scope_id = ?
+          AND artifact_type = 'paper_report'
+          AND status IN ('ready', 'done')
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1
+        """,
+        (int(paper_id),),
+    ).fetchone()
+    if artifact and clean_unicode(str(artifact["content_markdown"] or "")).strip():
+        return clean_unicode(str(artifact["content_markdown"] or "")).strip()
     return ""
 
 
@@ -382,9 +381,16 @@ def _accepted_rows_for_project(conn: DbConnection, project_id: int) -> list[DbRo
           p.title,
           p.arxiv_id,
           p.published_at,
-          p.link
+          COALESCE(source.source_url, '') AS link
         FROM project_paper_recommendations r
-        JOIN arxiv_papers p ON p.id = r.paper_id
+        JOIN papers p ON p.id = r.paper_id
+        LEFT JOIN LATERAL (
+          SELECT ps.source_url
+          FROM paper_sources ps
+          WHERE ps.paper_id = p.id
+          ORDER BY ps.updated_at DESC, ps.id DESC
+          LIMIT 1
+        ) source ON TRUE
         WHERE r.project_id = ?
           AND r.state = 'accepted'
         ORDER BY
@@ -468,7 +474,33 @@ def sync_accepted_paper_to_obsidian(
     paper_id: int,
 ) -> dict[str, object]:
     vault = _vault(settings)
-    paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
+    paper = conn.execute(
+        """
+        SELECT
+          p.*,
+          p.abstract AS summary,
+          COALESCE(source.source_url, '') AS link,
+          COALESCE(source.metadata_json::jsonb ->> 'pdf_link', '') AS pdf_link,
+          COALESCE(pdf_asset.path, '') AS pdf_path
+        FROM papers p
+        LEFT JOIN LATERAL (
+          SELECT ps.source_url, ps.metadata_json
+          FROM paper_sources ps
+          WHERE ps.paper_id = p.id
+          ORDER BY ps.updated_at DESC, ps.id DESC
+          LIMIT 1
+        ) source ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT pa.path
+          FROM paper_assets pa
+          WHERE pa.paper_id = p.id AND pa.asset_type = 'pdf'
+          ORDER BY pa.updated_at DESC, pa.id DESC
+          LIMIT 1
+        ) pdf_asset ON TRUE
+        WHERE p.id = ?
+        """,
+        (paper_id,),
+    ).fetchone()
     if not paper:
         raise RuntimeError(f"Paper not found: {paper_id}")
     rows = _accepted_rows_for_paper(conn, paper_id)

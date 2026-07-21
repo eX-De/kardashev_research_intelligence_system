@@ -12,6 +12,15 @@ EMBEDDING_VECTOR_COLUMN = "embedding_vector"
 HNSW_INDEX_NAME = "idx_chunk_embeddings_embedding_vector_hnsw"
 IVFFLAT_INDEX_NAME = "idx_chunk_embeddings_embedding_vector_ivfflat"
 
+VECTOR_TABLES = {
+    "knowledge": ("chunk_embeddings", "chunk_id"),
+    "artifact": ("artifact_chunk_embeddings", "artifact_chunk_id"),
+    "paper": ("arxiv_paper_embeddings", "paper_id"),
+    "paper_chunk": ("arxiv_chunk_embeddings", "arxiv_chunk_id"),
+    "library_paper": ("paper_embeddings", "paper_id"),
+    "library_paper_chunk": ("paper_chunk_embeddings", "paper_chunk_id"),
+}
+
 
 @dataclass(frozen=True)
 class PgvectorSearchHit:
@@ -21,7 +30,13 @@ class PgvectorSearchHit:
     searcher: str = "embedding_search"
 
 
-def ensure_pgvector_indexes(conn: Any, dimensions: int | None = None) -> dict[str, object]:
+def ensure_pgvector_indexes(
+    conn: Any,
+    dimensions: int | None = None,
+    *,
+    table: str = CHUNK_EMBEDDING_TABLE,
+    id_column: str = CHUNK_ID_COLUMN,
+) -> dict[str, object]:
     """Install pgvector storage for note chunk embeddings.
 
     The original JSON embedding column is left intact. The vector column is a
@@ -30,23 +45,24 @@ def ensure_pgvector_indexes(conn: Any, dimensions: int | None = None) -> dict[st
     if not _is_postgres(conn):
         return {"supported": False, "reason": "non_postgres", "index_method": None}
 
-    normalized_dimensions = _validate_dimensions(dimensions) if dimensions is not None else _infer_dimensions(conn)
+    table, id_column = _validated_table(table, id_column)
+    normalized_dimensions = _validate_dimensions(dimensions) if dimensions is not None else _infer_dimensions(conn, table, id_column)
     vector_type = _vector_type_sql(normalized_dimensions)
     column_added = False
     column_altered = False
 
     try:
         conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        current_type = _embedding_vector_type(conn)
+        current_type = _embedding_vector_type(conn, table)
         if current_type is None:
-            conn.execute(f"ALTER TABLE {CHUNK_EMBEDDING_TABLE} ADD COLUMN {EMBEDDING_VECTOR_COLUMN} {vector_type}")
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {EMBEDDING_VECTOR_COLUMN} {vector_type}")
             column_added = True
         else:
             _ensure_vector_column_type(current_type)
             if normalized_dimensions is not None and not _vector_type_matches(current_type, normalized_dimensions):
                 conn.execute(
                     f"""
-                    ALTER TABLE {CHUNK_EMBEDDING_TABLE}
+                    ALTER TABLE {table}
                     ALTER COLUMN {EMBEDDING_VECTOR_COLUMN}
                     TYPE {vector_type}
                     USING {EMBEDDING_VECTOR_COLUMN}::{vector_type}
@@ -56,7 +72,7 @@ def ensure_pgvector_indexes(conn: Any, dimensions: int | None = None) -> dict[st
 
         backfill = conn.execute(
             f"""
-            UPDATE {CHUNK_EMBEDDING_TABLE}
+            UPDATE {table}
             SET {EMBEDDING_VECTOR_COLUMN} = {EMBEDDING_JSON_COLUMN}::{vector_type}
             WHERE {EMBEDDING_VECTOR_COLUMN} IS NULL
               AND NULLIF({EMBEDDING_JSON_COLUMN}, '') IS NOT NULL
@@ -71,7 +87,7 @@ def ensure_pgvector_indexes(conn: Any, dimensions: int | None = None) -> dict[st
     index_method = None
     index_error = ""
     if normalized_dimensions is not None:
-        index_method, index_error = _ensure_vector_index(conn)
+        index_method, index_error = _ensure_vector_index(conn, table)
 
     return {
         "supported": True,
@@ -82,7 +98,24 @@ def ensure_pgvector_indexes(conn: Any, dimensions: int | None = None) -> dict[st
         "embeddings_backfilled": backfilled,
         "index_method": index_method,
         "index_error": index_error,
+        "table": table,
     }
+
+
+def ensure_all_pgvector_indexes(conn: Any, dimensions: int | None = None) -> dict[str, object]:
+    results: dict[str, object] = {}
+    for source, (table, id_column) in VECTOR_TABLES.items():
+        try:
+            results[source] = ensure_pgvector_indexes(
+                conn,
+                dimensions,
+                table=table,
+                id_column=id_column,
+            )
+        except Exception as exc:
+            _rollback_quietly(conn)
+            results[source] = {"supported": False, "reason": "init_failed", "error": str(exc)[:500], "table": table}
+    return results
 
 
 def pgvector_embedding_search(
@@ -90,33 +123,45 @@ def pgvector_embedding_search(
     query_embedding: Sequence[float],
     chunk_ids: Iterable[int] | None,
     top_k: int,
+    *,
+    table: str = CHUNK_EMBEDDING_TABLE,
+    id_column: str = CHUNK_ID_COLUMN,
+    model: str = "",
 ) -> list[PgvectorSearchHit]:
     """Search only the provided chunk ids with pgvector cosine distance."""
     if not _is_postgres(conn) or top_k <= 0:
         return []
-    scoped_chunk_ids = _normalize_chunk_ids(chunk_ids)
-    if not scoped_chunk_ids:
+    table, id_column = _validated_table(table, id_column)
+    scoped_chunk_ids = _normalize_chunk_ids(chunk_ids) if chunk_ids is not None else None
+    if scoped_chunk_ids == []:
         return []
     vector = _coerce_embedding(query_embedding)
     if not vector:
         return []
 
     try:
-        if not _pgvector_search_ready(conn):
+        if not _pgvector_search_ready(conn, table):
             return []
         vector_literal = _vector_literal(vector)
+        filters = [f"{EMBEDDING_VECTOR_COLUMN} IS NOT NULL"]
+        filter_params: list[object] = []
+        if scoped_chunk_ids is not None:
+            filters.append(f"{id_column} = ANY(CAST(? AS integer[]))")
+            filter_params.append(scoped_chunk_ids)
+        if model:
+            filters.append("model = ?")
+            filter_params.append(model)
         rows = conn.execute(
             f"""
             SELECT
-              {CHUNK_ID_COLUMN},
+              {id_column},
               {EMBEDDING_VECTOR_COLUMN} <=> CAST(? AS vector) AS distance
-            FROM {CHUNK_EMBEDDING_TABLE}
-            WHERE {CHUNK_ID_COLUMN} = ANY(CAST(? AS integer[]))
-              AND {EMBEDDING_VECTOR_COLUMN} IS NOT NULL
+            FROM {table}
+            WHERE {' AND '.join(filters)}
             ORDER BY distance ASC
             LIMIT ?
             """,
-            (vector_literal, scoped_chunk_ids, int(top_k)),
+            (vector_literal, *filter_params, int(top_k)),
         ).fetchall()
     except Exception:
         _rollback_quietly(conn)
@@ -133,7 +178,7 @@ def pgvector_embedding_search(
         score = max(0.0, min(1.0, 1.0 - distance))
         hits.append(
             PgvectorSearchHit(
-                chunk_id=int(_row_value(row, CHUNK_ID_COLUMN)),
+                chunk_id=int(_row_value(row, id_column)),
                 score=score,
                 distance=distance,
             )
@@ -141,12 +186,14 @@ def pgvector_embedding_search(
     return sorted(hits, key=lambda hit: hit.distance)[: int(top_k)]
 
 
-def _ensure_vector_index(conn: Any) -> tuple[str | None, str]:
+def _ensure_vector_index(conn: Any, table: str) -> tuple[str | None, str]:
+    hnsw_index = f"idx_{table}_embedding_vector_hnsw"
+    ivfflat_index = f"idx_{table}_embedding_vector_ivfflat"
     try:
         conn.execute(
             f"""
-            CREATE INDEX IF NOT EXISTS {HNSW_INDEX_NAME}
-            ON {CHUNK_EMBEDDING_TABLE}
+            CREATE INDEX IF NOT EXISTS {hnsw_index}
+            ON {table}
             USING hnsw ({EMBEDDING_VECTOR_COLUMN} vector_cosine_ops)
             WHERE {EMBEDDING_VECTOR_COLUMN} IS NOT NULL
             """
@@ -160,8 +207,8 @@ def _ensure_vector_index(conn: Any) -> tuple[str | None, str]:
     try:
         conn.execute(
             f"""
-            CREATE INDEX IF NOT EXISTS {IVFFLAT_INDEX_NAME}
-            ON {CHUNK_EMBEDDING_TABLE}
+            CREATE INDEX IF NOT EXISTS {ivfflat_index}
+            ON {table}
             USING ivfflat ({EMBEDDING_VECTOR_COLUMN} vector_cosine_ops)
             WITH (lists = 100)
             WHERE {EMBEDDING_VECTOR_COLUMN} IS NOT NULL
@@ -174,10 +221,10 @@ def _ensure_vector_index(conn: Any) -> tuple[str | None, str]:
         return None, f"{hnsw_error}; ivfflat: {exc}"
 
 
-def _pgvector_search_ready(conn: Any) -> bool:
+def _pgvector_search_ready(conn: Any, table: str) -> bool:
     return _pgvector_extension_installed(conn) and _column_exists(
         conn,
-        CHUNK_EMBEDDING_TABLE,
+        table,
         EMBEDDING_VECTOR_COLUMN,
     )
 
@@ -210,7 +257,7 @@ def _column_exists(conn: Any, table: str, column: str) -> bool:
     return row is not None
 
 
-def _embedding_vector_type(conn: Any) -> str | None:
+def _embedding_vector_type(conn: Any, table: str) -> str | None:
     row = conn.execute(
         """
         SELECT format_type(a.atttypid, a.atttypmod) AS data_type
@@ -223,20 +270,20 @@ def _embedding_vector_type(conn: Any) -> str | None:
           AND NOT a.attisdropped
         LIMIT 1
         """,
-        (CHUNK_EMBEDDING_TABLE, EMBEDDING_VECTOR_COLUMN),
+        (table, EMBEDDING_VECTOR_COLUMN),
     ).fetchone()
     value = _row_value(row, "data_type")
     return str(value) if value else None
 
 
-def _infer_dimensions(conn: Any) -> int | None:
+def _infer_dimensions(conn: Any, table: str, id_column: str) -> int | None:
     try:
         row = conn.execute(
             f"""
             SELECT jsonb_array_length({EMBEDDING_JSON_COLUMN}::jsonb) AS dimensions
-            FROM {CHUNK_EMBEDDING_TABLE}
+            FROM {table}
             WHERE NULLIF({EMBEDDING_JSON_COLUMN}, '') IS NOT NULL
-            ORDER BY {CHUNK_ID_COLUMN}
+            ORDER BY {id_column}
             LIMIT 1
             """
         ).fetchone()
@@ -324,3 +371,11 @@ def _rollback_quietly(conn: Any) -> None:
         conn.rollback()
     except Exception:
         pass
+
+
+def _validated_table(table: str, id_column: str) -> tuple[str, str]:
+    allowed = set(VECTOR_TABLES.values())
+    pair = (str(table), str(id_column))
+    if pair not in allowed:
+        raise ValueError(f"Unsupported embedding table: {table}.{id_column}")
+    return pair

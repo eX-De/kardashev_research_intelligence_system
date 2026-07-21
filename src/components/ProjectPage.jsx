@@ -16,6 +16,7 @@ import {
 } from "../lib/dashboard.js";
 import { useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { friendlyObsidianMessage, postObsidianJson, useObsidianCapability } from "../lib/obsidianCapability.js";
+import { paperImportanceLabel } from "../lib/paperImportance.js";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
 import { LoadingPanel } from "./Loading.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
@@ -264,7 +265,7 @@ function LinkedPapersPanel({ linkedPapers, onUnlinkPaper }) {
                 to={`/papers/reports/${encodeURIComponent(String(paper.id))}`}
               >
                 <strong>{paper.title}</strong>
-                <p>{PROJECT_PAPER_RELATION_LABELS[paper.relation] || paper.relation} · {paper.arxiv_id}{paper.project_score ? ` · 匹配 ${fmtScore(paper.project_score)}` : ""}</p>
+                <p>{PROJECT_PAPER_RELATION_LABELS[paper.relation] || paper.relation} · {paper.arxiv_id}{paper.importance ? ` · 重要性 ${paperImportanceLabel(paper.importance)}` : ""}{paper.project_score ? ` · 匹配 ${fmtScore(paper.project_score)}` : ""}</p>
                 {paper.note ? <small>{paper.note}</small> : null}
               </Link>
             </div>

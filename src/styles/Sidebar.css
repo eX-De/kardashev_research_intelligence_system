@@ -584,6 +584,110 @@
   white-space: nowrap;
 }
 
+.sidebar-search-trigger {
+  position: relative;
+  display: grid;
+  width: calc(100% - 8px);
+  min-height: 46px;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  margin: 11px 4px 0;
+  padding: 7px 9px;
+  overflow: hidden;
+  border: 1px solid rgba(76, 86, 132, 0.13);
+  border-radius: 14px;
+  color: var(--side-ink);
+  background: rgba(255, 255, 255, 0.6);
+  box-shadow: 0 7px 20px rgba(58, 66, 108, 0.055);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+}
+
+.sidebar-search-trigger::after {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(105deg, transparent 55%, rgba(119, 100, 199, 0.08));
+  content: "";
+  pointer-events: none;
+}
+
+.sidebar-search-trigger:hover {
+  border-color: rgba(99, 120, 206, 0.32);
+  background: rgba(255, 255, 255, 0.84);
+  box-shadow: 0 10px 24px rgba(58, 66, 108, 0.09);
+  transform: translateY(-1px);
+}
+
+.sidebar-search-trigger:focus-visible {
+  outline: 3px solid rgba(99, 120, 206, 0.16);
+  outline-offset: 2px;
+}
+
+.sidebar-search-icon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid rgba(99, 120, 206, 0.12);
+  border-radius: 11px;
+  color: var(--side-accent);
+  background: rgba(99, 120, 206, 0.085);
+}
+
+.sidebar-search-icon .nav-icon { width: 17px; height: 17px; }
+
+.sidebar-search-copy {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--side-muted);
+  font-size: 10px;
+  font-weight: 610;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-search-trigger kbd {
+  position: relative;
+  z-index: 1;
+  padding: 3px 6px;
+  border: 1px solid rgba(67, 75, 112, 0.12);
+  border-bottom-width: 2px;
+  border-radius: 6px;
+  color: var(--side-muted);
+  background: rgba(255, 255, 255, 0.74);
+  font: 650 8px/1.2 Inter, system-ui, sans-serif;
+  white-space: nowrap;
+}
+
+.sidebar-import-trigger {
+  margin-top: 7px;
+  border-color: rgba(120, 96, 186, 0.2);
+  background: linear-gradient(135deg, rgba(111, 132, 218, .11), rgba(132, 97, 185, .13));
+}
+
+.sidebar-import-trigger::after {
+  background: linear-gradient(105deg, transparent 48%, rgba(119, 100, 199, .13));
+}
+
+.sidebar-import-trigger:hover {
+  border-color: rgba(112, 91, 185, .36);
+  background: linear-gradient(135deg, rgba(111, 132, 218, .17), rgba(132, 97, 185, .2));
+}
+
+.sidebar-import-trigger .sidebar-search-icon {
+  color: #765db0;
+  background: rgba(123, 99, 190, .12);
+}
+
+.sidebar-import-trigger .sidebar-search-copy {
+  color: #61527e;
+  font-weight: 720;
+}
+
 .sidebar-theme-row {
   display: flex;
   min-height: 48px;
@@ -942,10 +1046,40 @@
 :root[data-theme="dark"] .sidebar .brand,
 :root[data-theme="dark"] .sidebar .sidebar-session,
 :root[data-theme="dark"] .sidebar .status,
+:root[data-theme="dark"] .sidebar .sidebar-search-trigger,
 :root[data-theme="dark"] .sidebar .sidebar-theme-row,
 :root[data-theme="dark"] .sidebar .theme-control {
   border-color: var(--side-line);
   background: rgba(255, 255, 255, 0.025);
+}
+
+:root[data-theme="dark"] .sidebar .sidebar-search-trigger:hover {
+  border-color: rgba(158, 172, 255, 0.22);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+:root[data-theme="dark"] .sidebar .sidebar-import-trigger {
+  border-color: rgba(172, 146, 236, .16);
+  background: linear-gradient(135deg, rgba(111, 132, 218, .1), rgba(132, 97, 185, .13));
+}
+
+:root[data-theme="dark"] .sidebar .sidebar-import-trigger:hover {
+  border-color: rgba(184, 159, 245, .28);
+  background: linear-gradient(135deg, rgba(111, 132, 218, .16), rgba(132, 97, 185, .2));
+}
+
+:root[data-theme="dark"] .sidebar .sidebar-import-trigger .sidebar-search-copy {
+  color: #c7b7ed;
+}
+
+:root[data-theme="dark"] .sidebar .sidebar-search-icon {
+  border-color: rgba(158, 172, 255, 0.1);
+  background: rgba(158, 172, 255, 0.08);
+}
+
+:root[data-theme="dark"] .sidebar .sidebar-search-trigger kbd {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.045);
 }
 
 :root[data-theme="dark"] .sidebar .brand-mark {
@@ -1034,6 +1168,11 @@
       margin: 0;
       padding: 2px 4px;
       border-radius: 11px;
+    }
+
+  .sidebar-search-trigger {
+      width: calc(100% - 8px);
+      margin-top: 9px;
     }
 
   .sidebar-theme-row > span,

@@ -52,7 +52,7 @@ class FakePostgresConnection:
             )
         if lowered.startswith("update chunk_embeddings"):
             return FakeCursor(rowcount=2)
-        if lowered.startswith("select chunk_id"):
+        if lowered.startswith("select chunk_id") or lowered.startswith("select artifact_chunk_id"):
             return FakeCursor(self.search_rows)
         return FakeCursor()
 
@@ -95,6 +95,27 @@ class PgvectorSearchTests(unittest.TestCase):
         self.assertIn("chunk_id = ANY(CAST(? AS integer[]))", search_sql)
         self.assertIn("ORDER BY distance ASC", search_sql)
         self.assertEqual(search_params, ("[0.1,0.2,0.3]", [10, 20], 2))
+
+    def test_search_supports_unscoped_model_filtered_artifact_vectors(self) -> None:
+        conn = FakePostgresConnection()
+        conn.search_rows = [{"artifact_chunk_id": 30, "distance": 0.2}]
+
+        hits = pgvector_embedding_search(
+            conn,
+            [0.1, 0.2, 0.3],
+            None,
+            5,
+            table="artifact_chunk_embeddings",
+            id_column="artifact_chunk_id",
+            model="embed-v1",
+        )
+
+        self.assertEqual([hit.chunk_id for hit in hits], [30])
+        search_sql, search_params = conn.statements[-1]
+        self.assertIn("FROM artifact_chunk_embeddings", search_sql)
+        self.assertIn("model = ?", search_sql)
+        self.assertNotIn("ANY(CAST", search_sql)
+        self.assertEqual(search_params, ("[0.1,0.2,0.3]", "embed-v1", 5))
 
     def test_ensure_pgvector_indexes_adds_dimensioned_column_backfills_and_hnsw(self) -> None:
         conn = FakePostgresConnection()

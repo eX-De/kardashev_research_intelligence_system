@@ -317,18 +317,26 @@ def ensure_missing_note_chunk_embeddings(
     conn: DbConnection,
     settings: Settings,
     limit: int | None = None,
+    *,
+    excluded_source_types: set[str] | None = None,
 ) -> dict[str, int]:
     if not settings.llm_embedding_model:
         return {"note_chunk_embeddings_created": 0, "note_chunk_embeddings_skipped": 0}
-    sql = """
+    excluded = sorted({str(value).strip() for value in (excluded_source_types or set()) if str(value).strip()})
+    document_join = "JOIN knowledge_documents kd ON kd.id = c.document_id" if excluded else ""
+    sql = f"""
         SELECT c.id, c.text
         FROM research_chunks c
+        {document_join}
         LEFT JOIN chunk_embeddings e
           ON e.chunk_id = c.id AND e.model = ?
         WHERE e.chunk_id IS NULL
-        ORDER BY c.id
     """
     params: list[object] = [settings.llm_embedding_model]
+    if excluded:
+        sql += f" AND kd.source_type NOT IN ({', '.join('?' for _ in excluded)})"
+        params.extend(excluded)
+    sql += " ORDER BY c.id"
     if limit:
         sql += " LIMIT ?"
         params.append(limit)

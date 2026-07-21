@@ -617,7 +617,11 @@
 }
 
 .vision-dashboard .vision-run-actions button,
+.vision-dashboard .vision-run-actions a,
 .vision-dashboard .vision-feed-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   min-height: 33px;
   padding: 0 11px;
   border: 1px solid rgba(255, 255, 255, 0.13);
@@ -626,10 +630,12 @@
   background: rgba(255, 255, 255, 0.06);
   box-shadow: none;
   font-size: 12px;
+  text-decoration: none;
   transition: transform 180ms ease, background 180ms ease, border-color 180ms ease;
 }
 
 .vision-dashboard .vision-run-actions button.primary,
+.vision-dashboard .vision-run-actions a.primary,
 .vision-dashboard .vision-feed-actions button.primary {
   border-color: rgba(177, 189, 255, 0.43);
   background: linear-gradient(135deg, rgba(130, 148, 255, 0.54), rgba(183, 112, 255, 0.42));
@@ -637,6 +643,7 @@
 }
 
 .vision-dashboard .vision-run-actions button:hover,
+.vision-dashboard .vision-run-actions a:hover,
 .vision-dashboard .vision-feed-actions button:hover {
   border-color: rgba(205, 211, 255, 0.5);
   background: rgba(255, 255, 255, 0.13);
@@ -644,6 +651,7 @@
 }
 
 .vision-dashboard .vision-run-actions button.primary:hover,
+.vision-dashboard .vision-run-actions a.primary:hover,
 .vision-dashboard .vision-feed-actions button.primary:hover {
   background: linear-gradient(135deg, rgba(138, 156, 255, 0.72), rgba(193, 122, 255, 0.6));
 }
@@ -1290,6 +1298,7 @@
 }
 
 :root[data-theme="light"] .vision-dashboard .vision-run-actions button,
+:root[data-theme="light"] .vision-dashboard .vision-run-actions a,
 :root[data-theme="light"] .vision-dashboard .vision-feed-actions button {
   border-color: rgba(64, 75, 110, 0.14);
   color: #34405f;
@@ -1297,6 +1306,7 @@
 }
 
 :root[data-theme="light"] .vision-dashboard .vision-run-actions button.primary,
+:root[data-theme="light"] .vision-dashboard .vision-run-actions a.primary,
 :root[data-theme="light"] .vision-dashboard .vision-feed-actions button.primary {
   border-color: rgba(91, 106, 185, 0.3);
   color: #ffffff;
@@ -1304,12 +1314,14 @@
 }
 
 :root[data-theme="light"] .vision-dashboard .vision-run-actions button:hover,
+:root[data-theme="light"] .vision-dashboard .vision-run-actions a:hover,
 :root[data-theme="light"] .vision-dashboard .vision-feed-actions button:hover {
   border-color: rgba(93, 109, 181, 0.34);
   background: rgba(255, 255, 255, 0.96);
 }
 
 :root[data-theme="light"] .vision-dashboard .vision-run-actions button.primary:hover,
+:root[data-theme="light"] .vision-dashboard .vision-run-actions a.primary:hover,
 :root[data-theme="light"] .vision-dashboard .vision-feed-actions button.primary:hover {
   background: linear-gradient(135deg, #5f75cc, #805fc0);
 }

@@ -193,6 +193,24 @@ function PaperDetail({ detail, onOpenReportQueue, onRecommendation, onGenerateRe
         <section className="section inbox-content-section">
           <header className="inbox-section-heading">
             <div>
+              <span>推荐依据</span>
+              <h3>项目关联</h3>
+            </div>
+          </header>
+          <div className="evidence-list">
+            {recommendations.length ? recommendations.map((recommendation) => (
+              <article className="evidence" key={`${recommendation.project_id}-${recommendation.state}`}>
+                <strong>{recommendation.project_name} · {recommendation.relation_type} · {recommendation.state}</strong>
+                <p>{recommendation.reason || "暂无推荐理由。"}</p>
+                {recommendation.obsidian_path ? <p className="muted">{recommendation.obsidian_path}</p> : null}
+              </article>
+            )) : <p className="summary">暂无项目级推荐。</p>}
+          </div>
+        </section>
+
+        <section className="section inbox-content-section">
+          <header className="inbox-section-heading">
+            <div>
               <span>深度阅读</span>
               <h3>全文报告</h3>
             </div>
@@ -211,24 +229,6 @@ function PaperDetail({ detail, onOpenReportQueue, onRecommendation, onGenerateRe
             ) : null}
           </div>
           {reportReady ? <LazyMarkdownReport markdown={report.report_markdown} /> : null}
-        </section>
-
-        <section className="section inbox-content-section">
-          <header className="inbox-section-heading">
-            <div>
-              <span>推荐依据</span>
-              <h3>项目关联</h3>
-            </div>
-          </header>
-          <div className="evidence-list">
-            {recommendations.length ? recommendations.map((recommendation) => (
-              <article className="evidence" key={`${recommendation.project_id}-${recommendation.state}`}>
-                <strong>{recommendation.project_name} · {recommendation.relation_type} · {recommendation.state}</strong>
-                <p>{recommendation.reason || "暂无推荐理由。"}</p>
-                {recommendation.obsidian_path ? <p className="muted">{recommendation.obsidian_path}</p> : null}
-              </article>
-            )) : <p className="summary">暂无项目级推荐。</p>}
-          </div>
         </section>
 
         {judgments.length ? (
@@ -282,7 +282,7 @@ function PaperDetail({ detail, onOpenReportQueue, onRecommendation, onGenerateRe
   );
 }
 
-export function InboxView({ onOpenReportQueue, onSelectPaper, selectedPaperId, setStatusMessage }) {
+export function InboxView({ notify = () => {}, onOpenReportQueue, onSelectPaper, selectedPaperId, setStatusMessage }) {
   const cache = useApiCacheClient();
   const [activePaperId, setActivePaperId] = useState(null);
 
@@ -345,16 +345,20 @@ export function InboxView({ onOpenReportQueue, onSelectPaper, selectedPaperId, s
       }));
       cache.markStale(["library", "list"]);
       cache.markStale(["projects"]);
-      setStatusMessage(payload.action === "discard" ? "已遗弃推荐" : "已保存到论文仓库");
+      cache.markStale(cacheNamespace("artifact"));
+      const successMessage = payload.action === "discard" ? "已遗弃推荐" : "已保存到论文仓库";
+      setStatusMessage(successMessage);
+      notify(successMessage, { type: "success" });
     } catch (error) {
       setStatusMessage(error.message);
     }
   }
 
   async function generateReport(force = false) {
-    if (!activePaperId) return;
+    const reportPaperId = Number(detail?.paper?.id || 0);
+    if (!activePaperId || !reportPaperId) return;
     try {
-      const data = await postJson(`/api/papers/${activePaperId}/report`, { force });
+      const data = await postJson(`/api/papers/${reportPaperId}/report`, { force });
       if (data?.queued) {
         inboxQuery.patch((current) => ({
           ...(current || {}),

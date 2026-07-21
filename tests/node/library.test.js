@@ -21,6 +21,7 @@ function paperRow(overrides = {}) {
     venue: "",
     doi: "",
     arxiv_id: "2607.00001",
+    importance: "high",
     library_status: "saved",
     reading_state: "unread",
     user_tags_json: "[]",
@@ -92,7 +93,7 @@ function createLibraryPool() {
     }
   ];
   const arxivPapers = [{ id: "101", arxiv_id: "2607.00001" }];
-  const projectPapers = [{ project_id: "5", paper_id: "101", relation: "reading", note: "", updated_at: "2026-07-06T00:00:00Z" }];
+  const projectPapers = [{ project_id: "5", paper_id: "1", relation: "reading", note: "", importance: "high", updated_at: "2026-07-06T00:00:00Z" }];
   const projects = [{ id: "5", name: "Project" }];
   const artifacts = [
     {
@@ -104,7 +105,7 @@ function createLibraryPool() {
       content_markdown: "Report markdown",
       content_json: "{\"prompt\":\"p\",\"system_prompt\":\"s\",\"source_project_ids\":[5],\"started_at\":\"start\",\"finished_at\":\"finish\"}",
       status: "done",
-      source_json: "{\"source_key\":\"paper_report:101\",\"source_text_hash\":\"hash\"}",
+      source_json: "{\"source_key\":\"paper_report:1\",\"source_text_hash\":\"hash\"}",
       model_provider_id: "provider",
       model: "model",
       input_hash: "hash",
@@ -129,7 +130,7 @@ function createLibraryPool() {
       txCalls.push(normalized);
       return { rows: [] };
     }
-    if (normalized.startsWith("WITH FILTERED AS")) {
+    if (normalized.startsWith("WITH FILTERED AS") || normalized.startsWith("WITH ACCEPTED_IMPORTANCE AS")) {
       const selected = visiblePapers(params)
         .slice(0, Number(params[params.length - 2]))
         .map((paper) => ({
@@ -260,13 +261,45 @@ test("getPaperLibrary rejects invalid report presence", async () => {
   }
 });
 
+test("getPaperLibrary uses the report queue daily and manual source contract", async () => {
+  const fake = createLibraryPool();
+  setPoolForTesting(fake.pool);
+  try {
+    await getPaperLibrary({ source: "manual", limit: "25", offset: "0" });
+    assert.match(fake.calls[0].sql, /COALESCE\(source_filter\.fetched_batch_id, ''\) = 'reader-import'/i);
+    assert.match(fake.calls[0].sql, /source_filter\.source_type IN \('url', 'upload', 'web', 'manual'\)/i);
+
+    fake.calls.length = 0;
+    await getPaperLibrary({ source: "daily", limit: "25", offset: "0" });
+    assert.match(fake.calls[0].sql, /NOT EXISTS\s*\(\s*SELECT 1\s*FROM paper_sources source_filter/i);
+
+    await assert.rejects(() => getPaperLibrary({ source: "arxiv" }), ValidationError);
+  } finally {
+    setPoolForTesting(null);
+  }
+});
+
+test("getPaperLibrary exposes, filters, and sorts accepted recommendation importance", async () => {
+  const fake = createLibraryPool();
+  setPoolForTesting(fake.pool);
+  try {
+    const data = await getPaperLibrary({ importance: "high", sort: "importance", limit: "25", offset: "0" });
+    assert.equal(data.items[0].importance, "high");
+    assert.match(fake.calls[0].sql, /importance_recommendation\.importance\s*=\s*\$\d+/i);
+    assert.match(fake.calls[0].sql, /COALESCE\(ai\.importance_rank, 3\)/i);
+    await assert.rejects(() => getPaperLibrary({ importance: "critical" }), ValidationError);
+    await assert.rejects(() => getPaperLibrary({ sort: "score" }), ValidationError);
+  } finally {
+    setPoolForTesting(null);
+  }
+});
+
 test("getPaperLibraryDetail returns nested paper library shape with paper report", async () => {
   const fake = createLibraryPool();
   setPoolForTesting(fake.pool);
   try {
     const detail = await getPaperLibraryDetail(1);
     assert.equal(detail.paper.id, 1);
-    assert.equal(detail.legacy_arxiv_paper_id, 101);
     assert.equal(detail.sources[0].source_type, "arxiv");
     assert.equal(detail.assets[0].asset_type, "pdf");
     assert.equal(detail.chunks[0].text, "Chunk text");
@@ -274,6 +307,9 @@ test("getPaperLibraryDetail returns nested paper library shape with paper report
     assert.equal(detail.artifacts[0].artifact_type, "paper_report");
     assert.equal(detail.paper_report.status, "done");
     assert.equal(detail.paper_report.artifact_id, 40);
+    assert.equal(detail.paper_report.paper_id, 1);
+    assert.equal(detail.paper.importance, "high");
+    assert.equal(detail.linked_projects[0].importance, "high");
   } finally {
     setPoolForTesting(null);
   }

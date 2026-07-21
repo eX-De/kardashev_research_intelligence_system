@@ -57,6 +57,7 @@ const SETTINGS_ENV_KEYS = [
   "PROJECT_CHAT_PROFILE_PROVIDER_ID",
   "PROJECT_CHAT_PROFILE_MODEL",
   "PROJECT_CHAT_PROFILE_CONCURRENCY",
+  "PROJECT_JUDGMENT_CONCURRENCY",
   "READER_CHAT_PROVIDER_ID",
   "READER_CHAT_MODEL",
   "READER_SMART_SAVE_PROVIDER_ID",
@@ -257,14 +258,17 @@ test("saveAppSettings preserves project Chat profile model routing", async () =>
       const result = await saveAppSettings({
         project_chat_profile_provider_id: "openai",
         project_chat_profile_model: "gpt-4.1-mini",
-        project_chat_profile_concurrency: 3
+        project_chat_profile_concurrency: 3,
+        project_judgment_concurrency: 4
       });
       assert.equal(fake.value("project_chat_profile_provider_id"), "openai");
       assert.equal(fake.value("project_chat_profile_model"), "gpt-4.1-mini");
       assert.equal(fake.value("project_chat_profile_concurrency"), 3);
+      assert.equal(fake.value("project_judgment_concurrency"), 4);
       assert.equal(result.settings.project_chat_profile_provider_id, "openai");
       assert.equal(result.settings.project_chat_profile_model, "gpt-4.1-mini");
       assert.equal(result.settings.project_chat_profile_concurrency, 3);
+      assert.equal(result.settings.project_judgment_concurrency, 4);
     } finally {
       setPoolForTesting(null);
     }
@@ -296,6 +300,10 @@ test("normalizeSettingsPayload matches csv tags, validation, and provider URL ru
     () => normalizeSettingsPayload({ project_chat_profile_concurrency: 9 }),
     ValidationError
   );
+  assert.throws(
+    () => normalizeSettingsPayload({ project_judgment_concurrency: 9 }),
+    ValidationError
+  );
 });
 
 test("SETTING_SCHEMA describes secret and worker-visible fields centrally", () => {
@@ -306,4 +314,6 @@ test("SETTING_SCHEMA describes secret and worker-visible fields centrally", () =
   assert.equal(SETTING_SCHEMA.project_chat_profile_model.worker_visible, true);
   assert.equal(SETTING_SCHEMA.project_chat_profile_concurrency.type, "int");
   assert.equal(SETTING_SCHEMA.project_chat_profile_concurrency.worker_visible, true);
+  assert.equal(SETTING_SCHEMA.project_judgment_concurrency.type, "int");
+  assert.equal(SETTING_SCHEMA.project_judgment_concurrency.worker_visible, true);
 });

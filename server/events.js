@@ -25,6 +25,7 @@ export const SERVER_EVENTS = Object.freeze({
   READER_PAPER_UPDATED: "reader.paper.updated",
   READER_PAPERS_IMPORTED: "reader.papers.imported",
   SETTINGS_CHANGED: "settings.changed",
+  SEARCH_COMPLETED: "search.completed",
   TASK_FAILED: "task.failed",
   TASK_FINISHED: "task.finished",
   TASK_STARTED: "task.started"
@@ -249,9 +250,10 @@ export function compactPaperPayload(data = {}, fallbackId = null) {
   const paper = data?.paper && typeof data.paper === "object" ? data.paper : {};
   const report = data?.paper_report && typeof data.paper_report === "object" ? data.paper_report : {};
   const paperId = eventNumber(
-    data.paper_id ??
     paper.id ??
     report.paper_id ??
+    data?.library?.paper_id ??
+    data.paper_id ??
     fallbackId
   );
   return {

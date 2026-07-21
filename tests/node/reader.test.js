@@ -19,7 +19,7 @@ function createReaderFake() {
   const txCalls = [];
   const arxivPapers = [
     {
-      id: "101",
+      id: "1001",
       arxiv_id: "2607.00001",
       title: "Reader Paper",
       authors_json: "[\"Ada\", \"Ben\"]",
@@ -38,7 +38,7 @@ function createReaderFake() {
       fetched_batch_id: "reader-import"
     },
     {
-      id: "102",
+      id: "1002",
       arxiv_id: "2607.00002",
       title: "Reference Paper",
       authors_json: "[]",
@@ -57,18 +57,24 @@ function createReaderFake() {
       fetched_batch_id: "reader-import"
     }
   ];
-  const papers = [{ id: "201", canonical_key: "arxiv:2607.00001", arxiv_id: "2607.00001" }];
+  const papers = arxivPapers.map((paper, index) => ({
+    ...paper,
+    id: String(101 + index),
+    canonical_key: `arxiv:${paper.arxiv_id}`,
+    abstract: paper.summary,
+    source_type: "arxiv",
+    source_metadata_json: JSON.stringify({ categories: JSON.parse(paper.categories_json) })
+  }));
   const artifacts = [
     {
       id: "301",
       scope_type: "paper",
-      scope_id: "201",
+      scope_id: "101",
       artifact_type: "paper_report",
       title: "Reader Paper",
       content_markdown: "Report markdown",
       content_json: JSON.stringify({
-        paper_id: 201,
-        legacy_arxiv_paper_id: 101,
+        paper_id: 101,
         arxiv_id: "2607.00001",
         link: "https://arxiv.org/abs/2607.00001",
         prompt: "Analyze this paper",
@@ -82,7 +88,6 @@ function createReaderFake() {
       source_json: JSON.stringify({
         source_key: "paper_report:101",
         generated_from: "paper_report_queue",
-        legacy_arxiv_paper_id: 101,
         source_text_hash: "hash"
       }),
       model_provider_id: "provider",
@@ -95,7 +100,7 @@ function createReaderFake() {
   const messages = [
     {
       id: "401",
-      paper_id: "101",
+      library_paper_id: "101",
       role: "user",
       content: "Question",
       source: "chat",
@@ -112,6 +117,7 @@ function createReaderFake() {
   const recommendations = [
     {
       paper_id: "101",
+      source_arxiv_paper_id: "1001",
       project_id: "8",
       state: "pending",
       importance: "high",
@@ -129,10 +135,6 @@ function createReaderFake() {
   ];
   const calls = [];
   const referencePapers = [];
-
-  function legacyIdForArtifact(artifact) {
-    return Number(JSON.parse(artifact.content_json).legacy_arxiv_paper_id || JSON.parse(artifact.source_json).legacy_arxiv_paper_id || 0);
-  }
 
   function reportRows() {
     return artifacts.filter((artifact) => artifact.scope_type === "paper" && artifact.artifact_type === "paper_report" && artifact.status !== "removed");
@@ -162,19 +164,18 @@ function createReaderFake() {
       return {
         rows: reportRows().map((artifact) => ({
           ...artifact,
-          legacy_arxiv_paper_id: String(legacyIdForArtifact(artifact))
+          paper_id: artifact.scope_id
         }))
       };
     }
     if (normalized.startsWith("WITH REPORT_ROWS AS")) {
       let rows = reportRows().map((artifact) => {
-          const paper = arxivPapers.find((item) => Number(item.id) === legacyIdForArtifact(artifact));
+          const paper = papers.find((item) => Number(item.id) === Number(artifact.scope_id));
           return {
             ...artifact,
             artifact_title: artifact.title,
             report_excerpt: artifact.content_markdown.slice(0, 500),
-            legacy_arxiv_paper_id: paper.id,
-            arxiv_paper_id: paper.id,
+            paper_id: paper.id,
             arxiv_id: paper.arxiv_id,
             title: paper.title,
             authors_json: paper.authors_json,
@@ -186,8 +187,8 @@ function createReaderFake() {
           };
         });
       if (normalized.includes("RR.STATUS =")) rows = rows.filter((row) => row.status === params.find((item) => REPORT_STATUS_VALUES.has(item)));
-      if (normalized.includes("COALESCE(AP.FETCHED_BATCH_ID, '') = 'READER-IMPORT'")) {
-        const wantsDaily = normalized.includes("NOT ( COALESCE(AP.FETCHED_BATCH_ID, '') = 'READER-IMPORT'");
+      if (normalized.includes("SOURCE.SOURCE_TYPE")) {
+        const wantsDaily = normalized.includes("NOT COALESCE(SOURCE.SOURCE_TYPE");
         rows = rows.filter((row) => wantsDaily ? row.source === "daily" : row.source === "manual");
       }
       if (normalized.includes("SELECT COUNT(*) AS TOTAL")) return { rows: [{ total: String(rows.length) }] };
@@ -222,6 +223,9 @@ function createReaderFake() {
     if (normalized.startsWith("SELECT * FROM ARXIV_PAPERS WHERE ID = $1")) {
       return { rows: arxivPapers.filter((paper) => Number(paper.id) === Number(params[0])) };
     }
+    if (normalized.startsWith("SELECT P.*") && normalized.includes("FROM PAPERS P")) {
+      return { rows: papers.filter((paper) => Number(paper.id) === Number(params[0])) };
+    }
     if (normalized.startsWith("SELECT ID FROM PAPERS WHERE")) {
       return { rows: papers.filter((paper) => paper.arxiv_id === params[0] || paper.canonical_key === params[1]) };
     }
@@ -254,30 +258,30 @@ function createReaderFake() {
       };
     }
     if (normalized.startsWith("SELECT STATUS, NOTE, UPDATED_AT FROM USER_FEEDBACK")) return { rows: [] };
-    if (normalized.startsWith("SELECT ID, PAPER_ID, ROLE")) {
-      return { rows: messages.filter((message) => Number(message.paper_id) === Number(params[0])) };
+    if (normalized.startsWith("SELECT ID, LIBRARY_PAPER_ID, ROLE")) {
+      return { rows: messages.filter((message) => Number(message.library_paper_id) === Number(params[0])) };
     }
-    if (normalized.startsWith("SELECT P.ID AS PAPER_ID") && normalized.includes("PAPER_READER_REFERENCE_PAPERS")) {
+    if (normalized.startsWith("SELECT P.ID AS PAPER_ID") && normalized.includes("PAPER_READER_REFERENCES")) {
       return {
         rows: referencePapers
           .filter((reference) => Number(reference.paper_id) === Number(params[0]))
           .sort((left, right) => left.position - right.position)
           .map((reference) => {
-            const paper = arxivPapers.find((item) => Number(item.id) === Number(reference.reference_paper_id));
+            const paper = papers.find((item) => Number(item.id) === Number(reference.reference_paper_id));
             return { ...paper, paper_id: paper.id, position: reference.position, updated_at: reference.updated_at };
           })
       };
     }
-    if (normalized.startsWith("SELECT ID, TEXT_STATUS, TEXT_PATH FROM ARXIV_PAPERS WHERE ID = ANY")) {
-      return { rows: arxivPapers.filter((paper) => params[0].map(Number).includes(Number(paper.id))) };
+    if (normalized.startsWith("SELECT P.ID,") && normalized.includes("FROM PAPERS P") && normalized.includes("WHERE P.ID = ANY")) {
+      return { rows: papers.filter((paper) => params[0].map(Number).includes(Number(paper.id))) };
     }
-    if (normalized.startsWith("DELETE FROM PAPER_READER_REFERENCE_PAPERS")) {
+    if (normalized.startsWith("DELETE FROM PAPER_READER_REFERENCES")) {
       for (let index = referencePapers.length - 1; index >= 0; index -= 1) {
         if (Number(referencePapers[index].paper_id) === Number(params[0])) referencePapers.splice(index, 1);
       }
       return { rows: [], rowCount: 1 };
     }
-    if (normalized.startsWith("INSERT INTO PAPER_READER_REFERENCE_PAPERS")) {
+    if (normalized.startsWith("INSERT INTO PAPER_READER_REFERENCES")) {
       referencePapers.push({
         paper_id: String(params[0]),
         reference_paper_id: String(params[1]),
@@ -289,7 +293,7 @@ function createReaderFake() {
     }
     if (normalized.startsWith("DELETE FROM PAPER_READER_MESSAGES")) {
       const before = messages.length;
-      const index = messages.findIndex((message) => Number(message.id) === Number(params[0]) && Number(message.paper_id) === Number(params[1]));
+      const index = messages.findIndex((message) => Number(message.id) === Number(params[0]) && Number(message.library_paper_id) === Number(params[1]));
       if (index >= 0) messages.splice(index, 1);
       return { rows: [], rowCount: before - messages.length };
     }
@@ -309,7 +313,7 @@ function createReaderFake() {
     }
     if (normalized.startsWith("UPDATE ARTIFACTS SET TITLE") && normalized.includes("STATUS != 'REMOVED'")) {
       for (const artifact of artifacts) {
-        if (legacyIdForArtifact(artifact) === Number(params[3]) && artifact.status !== "removed") artifact.title = params[0];
+        if (Number(artifact.scope_id) === Number(params[3]) && artifact.status !== "removed") artifact.title = params[0];
       }
       return { rows: [], rowCount: 1 };
     }
@@ -334,10 +338,10 @@ function createReaderFake() {
       return { rows: [{ id: paper.id }], rowCount: 1 };
     }
     if (normalized.startsWith("UPDATE PAPERS SET TITLE")) {
-      for (const paper of papers) {
-        if (paper.arxiv_id === arxivPapers.find((item) => Number(item.id) === Number(params[2]))?.arxiv_id) paper.title = params[0];
-      }
-      return { rows: [], rowCount: 1 };
+      const paper = papers.find((item) => Number(item.id) === Number(params[2]));
+      if (!paper) return { rows: [], rowCount: 0 };
+      paper.title = params[0];
+      return { rows: [{ id: paper.id }], rowCount: 1 };
     }
     if (normalized.startsWith("SELECT R.PROJECT_ID FROM PROJECT_PAPER_RECOMMENDATIONS")) {
       return { rows: recommendations.map((row) => ({ project_id: row.project_id })) };
@@ -415,7 +419,7 @@ test("getReaderPapers applies status, project, source, and pagination to the ser
   const countCall = fake.calls.find((call) => /SELECT COUNT\(\*\) AS total/i.test(call.sql));
   assert.match(countCall.sql, /project_paper_recommendations/);
   assert.match(countCall.sql, /project_papers/);
-  assert.match(countCall.sql, /fetched_batch_id/);
+  assert.match(countCall.sql, /source_type/);
   assert.ok(countCall.params.includes("queued"));
   assert.ok(countCall.params.includes(7));
 });
@@ -435,7 +439,7 @@ test("getReaderPapers returns filtered total independently from the requested pa
   assert.equal(data.items.length, 1);
 });
 
-test("updateReaderPaperTitle synchronizes reader, library, and report titles", async () => {
+test("updateReaderPaperTitle synchronizes the canonical paper and report titles", async () => {
   const fake = createReaderFake();
   setPoolForTesting(fake.pool);
   try {

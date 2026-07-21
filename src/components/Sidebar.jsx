@@ -8,6 +8,8 @@ const NAV_ICONS = {
   papers: <><path d="M6 3.5h9l3 3V20.5H6z" /><path d="M15 3.5v3h3" /><path d="M9 11h6M9 14.5h6" /></>,
   projects: <><rect x="3.5" y="4" width="7" height="6" rx="2" /><rect x="13.5" y="14" width="7" height="6" rx="2" /><path d="M10.5 7h4a3 3 0 0 1 3 3v4M13.5 17h-4a3 3 0 0 1-3-3v-4" /></>,
   artifacts: <><path d="M5 7.5 12 4l7 3.5-7 3.5z" /><path d="m5 12 7 3.5 7-3.5M5 16.5 12 20l7-3.5" /></>,
+  search: <><circle cx="10.5" cy="10.5" r="6.5" /><path d="m15.5 15.5 5 5" /></>,
+  importPaper: <><path d="M6 3.5h8.5l3.5 3.5v13.5H6z" /><path d="M14.5 3.5V7H18M12 10v7M8.5 13.5H15.5" /></>,
   settings: <><circle cx="12" cy="12" r="3" /><path d="M19 13.5v-3l-2-.7-.7-1.7.9-1.9-2.1-2.1-1.9.9-1.7-.7-.7-2h-3l-.7 2-1.7.7-1.9-.9-2.1 2.1.9 1.9-.7 1.7-2 .7v3l2 .7.7 1.7-.9 1.9 2.1 2.1 1.9-.9 1.7.7.7 2h3l.7-2 1.7-.7 1.9.9 2.1-2.1-.9-1.9.7-1.7z" /></>
 };
 
@@ -25,8 +27,11 @@ function authLabel(authInfo, fallback) {
   return "已登录";
 }
 
-export function Sidebar({ authInfo, authStatusLabel, isLoggingOut = false, onLogout, statusMessage }) {
+export function Sidebar({ authInfo, authStatusLabel, isLoggingOut = false, onLogout, onOpenPaperImport, onOpenSearch, statusMessage }) {
   const canLogout = authInfo?.auth_required !== false;
+  const isApplePlatform = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+  const searchShortcutLabel = isApplePlatform ? "⌘ K" : "Ctrl K";
+  const importShortcutLabel = isApplePlatform ? "⌘ I" : "Ctrl I";
   const navSections = [
     {
       label: "研究工作区",
@@ -72,6 +77,18 @@ export function Sidebar({ authInfo, authStatusLabel, isLoggingOut = false, onLog
         <span>界面主题</span>
         <ThemeControl />
       </div>
+
+      <button className="sidebar-search-trigger" onClick={onOpenSearch} type="button">
+        <span className="sidebar-search-icon"><NavIcon name="search" /></span>
+        <span className="sidebar-search-copy">搜索论文、产物与项目…</span>
+        <kbd>{searchShortcutLabel}</kbd>
+      </button>
+
+      <button className="sidebar-search-trigger sidebar-import-trigger" onClick={onOpenPaperImport} type="button">
+        <span className="sidebar-search-icon"><NavIcon name="importPaper" /></span>
+        <span className="sidebar-search-copy">导入报告队列论文</span>
+        <kbd>{importShortcutLabel}</kbd>
+      </button>
 
       <nav className="main-nav" aria-label="主导航">
         {navSections.map((section) => (

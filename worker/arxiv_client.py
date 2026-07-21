@@ -12,7 +12,6 @@ from uuid import uuid4
 
 from .config import Settings
 from .db import to_json, utc_now
-from .papers import upsert_paper_from_arxiv
 
 ATOM = "{http://www.w3.org/2005/Atom}"
 ARXIV = "{http://arxiv.org/schemas/atom}"
@@ -278,7 +277,6 @@ def fetch_arxiv(conn: DbConnection, settings: Settings) -> dict[str, int | str]:
                 )
                 if update_cur.rowcount:
                     updated += 1
-            upsert_paper_from_arxiv(conn, paper, fetched_batch_id=batch_id, library_status="candidate")
         conn.commit()
         if reached_cutoff:
             stopped_at_cutoff = 1

@@ -20,6 +20,7 @@ from worker.project_chat_profiles import (
     project_chat_profiles_for_paper,
     refresh_project_chat_profiles,
 )
+from worker.papers import promote_arxiv_paper_to_library
 from worker.settings_store import apply_stored_settings, get_app_settings, save_app_settings
 
 
@@ -306,7 +307,8 @@ class ProjectChatProfileTests(unittest.TestCase):
             VALUES ('profile-paper', 'Profile Paper', '[]', '', '[]', 'now', 'now', '', '', 'test', 'now')
             """
         )
-        paper_id = int(conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"])
+        legacy_paper_id = int(conn.execute("SELECT id FROM arxiv_papers").fetchone()["id"])
+        paper_id = int(promote_arxiv_paper_to_library(conn, legacy_paper_id) or 0)
         project_ids: list[int] = []
         for index in range(4):
             conn.execute(
@@ -334,7 +336,7 @@ class ProjectChatProfileTests(unittest.TestCase):
             VALUES (?, ?, 'core', '', 'now', 'now'),
                    (?, ?, 'candidate', 'auto_matched_by_project_context', 'now', 'now')
             """,
-            (project_ids[0], paper_id, project_ids[3], paper_id),
+            (project_ids[0], legacy_paper_id, project_ids[3], legacy_paper_id),
         )
         conn.execute(
             """
@@ -345,7 +347,7 @@ class ProjectChatProfileTests(unittest.TestCase):
             VALUES (?, ?, 'pending', 'medium', 'direct', '', '', '', '', 'now', 'now'),
                    (?, ?, 'discarded', 'medium', 'direct', '', '', '', '', 'now', 'now')
             """,
-            (project_ids[1], paper_id, project_ids[2], paper_id),
+            (project_ids[1], legacy_paper_id, project_ids[2], legacy_paper_id),
         )
         conn.commit()
 
@@ -356,7 +358,7 @@ class ProjectChatProfileTests(unittest.TestCase):
 
         conn.execute(
             "DELETE FROM project_papers WHERE project_id = ? AND paper_id = ?",
-            (project_ids[0], paper_id),
+            (project_ids[0], legacy_paper_id),
         )
         conn.commit()
 
@@ -365,7 +367,7 @@ class ProjectChatProfileTests(unittest.TestCase):
 
         conn.execute(
             "UPDATE project_paper_recommendations SET state = 'discarded' WHERE paper_id = ?",
-            (paper_id,),
+            (legacy_paper_id,),
         )
         conn.commit()
 

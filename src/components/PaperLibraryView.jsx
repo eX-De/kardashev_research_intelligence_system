@@ -2,7 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { api, fmtDate, postJson, snippet } from "../lib/dashboard.js";
+import { PAPER_IMPORTANCE_OPTIONS, paperImportanceLabel } from "../lib/paperImportance.js";
 import { commitPaperListSelection, resolvePaperListSelection } from "../lib/paperSelection.js";
+import { PAPER_SOURCE_FILTER_OPTIONS, paperSourceFilterLabel } from "../lib/paperSource.js";
 import { RefreshButton } from "./RefreshButton.jsx";
 import { WorkspacePaneLoader } from "./WorkspacePaneLoader.jsx";
 import { WORKSPACE_PAGE_SIZE_OPTIONS, WorkspacePagination } from "./WorkspacePagination.jsx";
@@ -19,18 +21,15 @@ const STATUSES = [
   ["discarded", "已丢弃"]
 ];
 
-const SOURCES = [
-  ["", "全部来源"],
-  ["arxiv", "arXiv"],
-  ["url", "URL"],
-  ["upload", "上传"],
-  ["manual", "手动"]
-];
-
 const REPORT_PRESENCE = [
   ["", "全部报告"],
   ["with", "有报告"],
   ["without", "无报告"]
+];
+
+const LIBRARY_SORTS = [
+  ["updated", "工作流状态与更新"],
+  ["importance", "重要性优先"]
 ];
 
 const REPORT_STATUS_LABELS = {
@@ -42,7 +41,13 @@ const REPORT_STATUS_LABELS = {
 };
 
 const STATUS_LABELS = Object.fromEntries(STATUSES.filter(([value]) => value));
-const SOURCE_LABELS = Object.fromEntries(SOURCES.filter(([value]) => value));
+const SOURCE_TYPE_LABELS = {
+  arxiv: "arXiv",
+  url: "URL",
+  upload: "上传",
+  web: "网页正文",
+  manual: "手动"
+};
 const STATUS_TONES = {
   archived: "slate",
   candidate: "blue",
@@ -70,7 +75,7 @@ function reportStatusLabel(status) {
 }
 
 function sourceLabel(sourceType) {
-  return SOURCE_LABELS[sourceType] || sourceType || "来源";
+  return SOURCE_TYPE_LABELS[sourceType] || sourceType || "来源";
 }
 
 function safeToken(value, fallback = "unknown") {
@@ -98,8 +103,10 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
   const cache = useApiCacheClient();
   const [activeId, setActiveId] = useState(null);
   const [status, setStatus] = useState("");
-  const [sourceType, setSourceType] = useState("");
+  const [sourceFilter, setSourceFilter] = useState("all");
   const [reportPresence, setReportPresence] = useState("");
+  const [importance, setImportance] = useState("");
+  const [sort, setSort] = useState("updated");
   const [query, setQuery] = useState("");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
@@ -113,13 +120,15 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
     const offset = (page - 1) * pageSize;
     const params = new URLSearchParams({ limit: String(pageSize), offset: String(offset) });
     if (status) params.set("status", status);
-    if (sourceType) params.set("source_type", sourceType);
+    if (sourceFilter !== "all") params.set("source", sourceFilter);
     if (reportPresence) params.set("report_presence", reportPresence);
+    if (importance) params.set("importance", importance);
+    if (sort !== "updated") params.set("sort", sort);
     if (query.trim()) params.set("q", query.trim());
     if (dateFrom) params.set("date_from", dateFrom);
     if (dateTo) params.set("date_to", dateTo);
     return params.toString();
-  }, [dateFrom, dateTo, page, pageSize, query, reportPresence, sourceType, status]);
+  }, [dateFrom, dateTo, importance, page, pageSize, query, reportPresence, sort, sourceFilter, status]);
 
   const listQuery = useCachedApi(
     ["library", "list", queryString],
@@ -209,15 +218,19 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const currentPage = Math.min(page, pageCount);
   const selectedStatusLabel = status ? statusLabel(status) : "全部状态";
-  const selectedSourceLabel = sourceType ? sourceLabel(sourceType) : "全部来源";
+  const selectedSourceLabel = paperSourceFilterLabel(sourceFilter);
   const selectedReportLabel = REPORT_PRESENCE.find(([value]) => value === reportPresence)?.[1] || "全部报告";
+  const selectedImportanceLabel = PAPER_IMPORTANCE_OPTIONS.find(([value]) => value === importance)?.[1] || "全部重要性";
+  const selectedSortLabel = LIBRARY_SORTS.find(([value]) => value === sort)?.[1] || "工作流状态与更新";
   const searchLabel = query.trim() ? `搜索：${query.trim()}` : "未搜索";
   const dateRangeLabel = dateFrom || dateTo ? `${dateFrom || "不限"} 至 ${dateTo || "不限"}` : "全部日期";
-  const activeFilterCount = [status, sourceType, reportPresence, query.trim(), dateFrom, dateTo].filter(Boolean).length;
+  const activeFilterCount = [status, sourceFilter !== "all", reportPresence, importance, sort !== "updated", query.trim(), dateFrom, dateTo].filter(Boolean).length;
   const activeFilterLabels = [
     status ? selectedStatusLabel : "",
-    sourceType ? selectedSourceLabel : "",
+    sourceFilter !== "all" ? selectedSourceLabel : "",
     reportPresence ? selectedReportLabel : "",
+    importance ? `重要性：${selectedImportanceLabel}` : "",
+    sort !== "updated" ? `排序：${selectedSortLabel}` : "",
     query.trim() ? searchLabel : "",
     dateFrom || dateTo ? dateRangeLabel : ""
   ].filter(Boolean);
@@ -235,6 +248,19 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
   function updateFilter(setter, value) {
     selectFirstFromNextList.current = true;
     setter(value);
+    setPage(1);
+  }
+
+  function clearFilters() {
+    selectFirstFromNextList.current = true;
+    setStatus("");
+    setSourceFilter("all");
+    setReportPresence("");
+    setImportance("");
+    setSort("updated");
+    setQuery("");
+    setDateFrom("");
+    setDateTo("");
     setPage(1);
   }
 
@@ -299,15 +325,20 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
                   ? activeFilterLabels.map((label) => <span key={label}>{label}</span>)
                   : <span>全部论文</span>}
               </div>
-            <button
-              aria-controls="paper-library-filter-panel"
-              aria-expanded={filtersOpen}
-              className="left-filter-toggle"
-              onClick={() => setFiltersOpen((current) => !current)}
-              type="button"
-            >
-              {filtersOpen ? "收起筛选" : `筛选${activeFilterCount ? ` (${activeFilterCount})` : ""}`}
-            </button>
+            <div className="paper-filter-summary-actions">
+              {activeFilterCount ? (
+                <button className="filter-clear-button" onClick={clearFilters} type="button">清除筛选</button>
+              ) : null}
+              <button
+                aria-controls="paper-library-filter-panel"
+                aria-expanded={filtersOpen}
+                className="left-filter-toggle"
+                onClick={() => setFiltersOpen((current) => !current)}
+                type="button"
+              >
+                {filtersOpen ? "收起筛选" : `筛选${activeFilterCount ? ` (${activeFilterCount})` : ""}`}
+              </button>
+            </div>
           </div>
           <div
             aria-hidden={!filtersOpen}
@@ -322,11 +353,19 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
               </div>
               <div className="library-filter-control paper-filter-control">
                 <span>来源</span>
-                <WorkspaceSelect ariaLabel="筛选论文来源" onChange={(nextValue) => updateFilter(setSourceType, nextValue)} options={SOURCES} value={sourceType} />
+                <WorkspaceSelect ariaLabel="筛选论文来源" onChange={(nextValue) => updateFilter(setSourceFilter, nextValue)} options={PAPER_SOURCE_FILTER_OPTIONS} value={sourceFilter} />
               </div>
               <div className="library-filter-control paper-filter-control">
                 <span>全文报告</span>
                 <WorkspaceSelect ariaLabel="筛选全文报告" onChange={(nextValue) => updateFilter(setReportPresence, nextValue)} options={REPORT_PRESENCE} value={reportPresence} />
+              </div>
+              <div className="library-filter-control paper-filter-control">
+                <span>重要性</span>
+                <WorkspaceSelect ariaLabel="筛选论文重要性" onChange={(nextValue) => updateFilter(setImportance, nextValue)} options={PAPER_IMPORTANCE_OPTIONS} value={importance} />
+              </div>
+              <div className="library-filter-control paper-filter-control">
+                <span>排序</span>
+                <WorkspaceSelect ariaLabel="选择论文排序" onChange={(nextValue) => updateFilter(setSort, nextValue)} options={LIBRARY_SORTS} value={sort} />
               </div>
               <label className="library-filter-control library-search-control paper-filter-control paper-search-control">
                 <span>搜索</span>
@@ -375,6 +414,7 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
                 >
                   <div className="inbox-paper-row-head">
                     <span className={`paper-pill paper-status-${itemStatusTone}`}>{statusLabel(item.library_status)}</span>
+                    {item.importance ? <span className={`paper-pill paper-importance-${safeToken(item.importance)}`}>重要性 {paperImportanceLabel(item.importance)}</span> : null}
                     <span className="library-card-asset-state">{item.chunk_count || 0} 正文块</span>
                   </div>
                   <h2>{item.title}</h2>
@@ -397,7 +437,7 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
             }) : (
               <div className="paper-empty-state">
                 <strong>暂无论文</strong>
-                <p>{status || sourceType || reportPresence || query || dateFrom || dateTo ? "当前筛选没有匹配项。" : "导入或保存的论文会显示在这里。"}</p>
+                <p>{status || sourceFilter !== "all" || reportPresence || importance || sort !== "updated" || query || dateFrom || dateTo ? "当前筛选没有匹配项。" : "导入或保存的论文会显示在这里。"}</p>
               </div>
             )
           )}
@@ -424,17 +464,20 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
                 <p className="library-detail-authors">{(paper.authors || []).slice(0, 8).join(", ") || "未记录作者"}</p>
                 <div className="inbox-detail-meta library-detail-meta">
                   <span className={`paper-pill paper-status-${STATUS_TONES[paper.library_status] || "slate"}`}>{statusLabel(paper.library_status)}</span>
+                  {paper.importance ? <span className={`paper-pill paper-importance-${safeToken(paper.importance)}`}>重要性 {paperImportanceLabel(paper.importance)}</span> : null}
                   <span className="paper-pill paper-source-pill">{sourceLabel(mainSource?.source_type)}</span>
                   {paper.year ? <span className="paper-pill paper-year-pill">{paper.year}</span> : null}
                   {paperReport?.status ? <span className={`paper-pill report-status-${safeToken(paperReport.status)}`}>报告：{reportStatusLabel(paperReport.status)}</span> : null}
                   <span>{paper.venue || "未记录发表场所"}</span>
                   <span>更新于 {fmtDate(paper.updated_at)}</span>
-                  {paperReport?.paper_id ? (
-                    <button className="library-hero-action" onClick={() => onOpenReportQueue?.(paperReport.paper_id)} type="button">
-                      打开报告队列
-                    </button>
-                  ) : null}
                 </div>
+                {paperReport?.paper_id ? (
+                  <div className="library-detail-hero-actions">
+                    <button className="library-report-action" onClick={() => onOpenReportQueue?.(paperReport.paper_id)} type="button">
+                      <span>打开报告队列</span><i aria-hidden="true">→</i>
+                    </button>
+                  </div>
+                ) : null}
               </div>
             </header>
 
@@ -476,10 +519,10 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
                   </header>
                   <div className="paper-item-list">
                     {linkedProjects.length ? linkedProjects.map((project) => (
-                      <article className="paper-info-item" key={project.project_id}>
+                      <a className="paper-info-item paper-info-link" href={`/projects/${encodeURIComponent(String(project.project_id))}`} key={project.project_id}>
                         <strong>{project.project_name}</strong>
-                        <p>{project.relation} · {project.note || "已关联"}</p>
-                      </article>
+                        <p>{project.relation}{project.importance ? ` · 重要性 ${paperImportanceLabel(project.importance)}` : ""} · {project.note || "已关联"}</p>
+                      </a>
                     )) : <p className="muted">暂无项目关联。</p>}
                   </div>
                 </section>

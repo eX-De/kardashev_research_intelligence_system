@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { Link } from "react-router-dom";
 
 import {
   api,
@@ -13,6 +14,7 @@ import {
 import { cacheNamespace, useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { friendlyObsidianMessage, postObsidianJson, useObsidianCapability } from "../lib/obsidianCapability.js";
 import { resolveReaderQueueSelection } from "../lib/paperSelection.js";
+import { isRecentManualPaperImport, PAPER_SOURCE_FILTER_OPTIONS, paperSourceFilterLabel } from "../lib/paperSource.js";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
 import { InlineLoader } from "./Loading.jsx";
@@ -38,6 +40,8 @@ const REPORT_FILTERS = [
   ["failed", "失败"],
   ["cancelled", "已取消"]
 ];
+
+const READER_BOTTOM_THRESHOLD = 80;
 
 function reportStatusLabel(status) {
   return REPORT_STATUS_LABELS[status] || status || "Missing";
@@ -243,7 +247,7 @@ function getSelectionContextText(selection, contentElement) {
   return normalizePromptText(fullText.slice(contextStart, contextEnd));
 }
 
-function ReaderRow({ active, deleting, item, onDelete, onSelect }) {
+function ReaderRow({ active, deleting, item, onDelete, onSelect, recentImport }) {
   const canDelete = item.status !== "processing";
   const linkedProjectNames = item.linked_project_names || [];
   const recommendationProjectNames = item.recommendation_project_names || [];
@@ -254,7 +258,7 @@ function ReaderRow({ active, deleting, item, onDelete, onSelect }) {
   }
   return (
     <article
-      className={`inbox-paper-row report-queue-paper-row ${active ? "active" : ""}`}
+      className={`inbox-paper-row report-queue-paper-row ${active ? "active" : ""} ${recentImport ? "recent-import" : ""}`}
       onClick={selectRow}
       onKeyDown={(event) => {
         if (event.key !== "Enter" && event.key !== " ") return;
@@ -267,6 +271,7 @@ function ReaderRow({ active, deleting, item, onDelete, onSelect }) {
       <div className="inbox-paper-row-head">
         <span className="inbox-score">{item.arxiv_id || "本地论文"}</span>
         <div className="inbox-paper-row-actions">
+          {recentImport ? <span className="reader-recent-import-badge" title="最近 30 分钟手动导入"><i aria-hidden="true" />刚刚导入</span> : null}
           <span className={`inbox-report-status ${item.status || "missing"}`}>{reportStatusLabel(item.status)}</span>
         <button
           className={`danger queue-delete-button ${deleting ? "is-busy" : ""}`}
@@ -308,12 +313,101 @@ function messageSourceLabel(source) {
   return source || "";
 }
 
-function ChatMessage({ deleting, message, onDelete }) {
+function readerMessageKey(message, index) {
+  const id = message?.id;
+  return id === undefined || id === null || id === "" ? `reader-message-${index}` : String(id);
+}
+
+function readerQuestionLabel(content) {
+  return String(content || "").replace(/\s+/g, " ").trim() || "空白问题";
+}
+
+function ReaderQuestionNavigator({ activeQuestionKey, items, onJump }) {
+  const [open, setOpen] = useState(false);
+  const navigatorRef = useRef(null);
+  const panelRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    panelRef.current?.querySelector('[aria-current="true"]')?.scrollIntoView({ block: "nearest" });
+
+    function closeNavigator(event) {
+      if (event.key === "Escape") {
+        setOpen(false);
+        navigatorRef.current?.querySelector(".reader-question-line")?.focus();
+        return;
+      }
+      if (event.type === "pointerdown" && !navigatorRef.current?.contains(event.target)) setOpen(false);
+    }
+
+    document.addEventListener("keydown", closeNavigator);
+    document.addEventListener("pointerdown", closeNavigator, true);
+    return () => {
+      document.removeEventListener("keydown", closeNavigator);
+      document.removeEventListener("pointerdown", closeNavigator, true);
+    };
+  }, [open]);
+
+  if (!items.length) return null;
+
+  return createPortal((
+    <nav
+      aria-label="论文报告与用户问题快速导航"
+      className={`reader-question-navigator ${open ? "is-open" : ""}`}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
+      }}
+      onFocus={() => setOpen(true)}
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+      ref={navigatorRef}
+    >
+      <div className="reader-question-panel-shell">
+        <div className="reader-question-panel" ref={panelRef}>
+          {items.map((item) => {
+            const active = item.key === activeQuestionKey;
+            return (
+              <button
+                aria-current={active ? "true" : undefined}
+                className={`reader-question-entry ${active ? "active" : ""}`}
+                key={`question-entry-${item.key}`}
+                onClick={() => onJump(item.key)}
+                title={item.label}
+                type="button"
+              >
+                <span>{item.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <div aria-expanded={open} className="reader-question-rail">
+        {items.map((item) => {
+          const active = item.key === activeQuestionKey;
+          return (
+            <button
+              aria-label={`跳转到：${item.label}`}
+              aria-current={active ? "true" : undefined}
+              className={`reader-question-line ${active ? "active" : ""}`}
+              key={`question-line-${item.key}`}
+              onClick={() => onJump(item.key)}
+              title={item.label}
+              type="button"
+            ><span aria-hidden="true" /></button>
+          );
+        })}
+      </div>
+    </nav>
+  ), document.body);
+}
+
+function ChatMessage({ deleting, message, navigationKey, onDelete }) {
   const isAssistant = message.role === "assistant";
   const numericId = Number(message.id);
   const persistedId = Number.isInteger(numericId) ? numericId : null;
   const isAnalysisSeed = ["analysis_prompt", "analysis_report"].includes(message.source);
   const canDelete = persistedId && persistedId > 0 && message.source === "chat" && onDelete;
+  const isNavigationAnchor = message.source === "analysis_report" || (!isAssistant && message.source === "chat");
   const roleLabel = isAssistant ? "Assistant" : "You";
   const sourceLabel = messageSourceLabel(message.source);
   return (
@@ -321,6 +415,7 @@ function ChatMessage({ deleting, message, onDelete }) {
       className={`reader-message ${isAssistant ? "assistant" : "user"} ${isAnalysisSeed ? "analysis-seed" : ""} ${message.transient ? "transient" : ""}`}
       data-message-id={persistedId ?? undefined}
       data-reader-message={persistedId ? "true" : undefined}
+      data-reader-question-key={isNavigationAnchor ? navigationKey : undefined}
     >
       <div className="reader-message-header">
         <div className="reader-message-identity">
@@ -416,20 +511,86 @@ function ReaderDetail({
   const [referenceDialogOpen, setReferenceDialogOpen] = useState(false);
   const [referenceQuery, setReferenceQuery] = useState("");
   const [draftReferenceIds, setDraftReferenceIds] = useState([]);
-  const [messageScroll, setMessageScroll] = useState({ max: 0, top: 0 });
+  const [messageScroll, setMessageScroll] = useState({ activeQuestionKey: null, atBottom: true, max: 0, top: 0 });
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [savingTitle, setSavingTitle] = useState(false);
   const messagesRef = useRef(null);
+  const chatInitializedRef = useRef(false);
+  const latestTransientQuestionRef = useRef(null);
+  const stickToBottomRef = useRef(true);
+  const navigationItems = useMemo(() => {
+    const hasUserQuestions = displayedMessages.some((item) => item.role === "user" && item.source === "chat");
+    if (!hasUserQuestions) return [];
+    return displayedMessages.flatMap((item, index) => {
+      if (item.source === "analysis_report") {
+        return [{ key: readerMessageKey(item, index), label: "论文报告", transient: false }];
+      }
+      if (item.role !== "user" || item.source !== "chat") return [];
+      return [{
+        key: readerMessageKey(item, index),
+        label: readerQuestionLabel(item.content),
+        transient: Boolean(item.transient)
+      }];
+    });
+  }, [displayedMessages]);
+  const latestTransientQuestionKey = [...navigationItems].reverse().find((item) => item.transient)?.key || null;
 
   const updateMessageScroll = useCallback(() => {
     const container = messagesRef.current;
     if (!container) return;
+    const containerRect = container.getBoundingClientRect();
+    const questionElements = [...container.querySelectorAll("[data-reader-question-key]")];
+    const viewportMarker = container.scrollTop + Math.min(container.clientHeight * 0.3, 180);
+    let activeQuestionKey = questionElements[0]?.dataset.readerQuestionKey || null;
+    for (const element of questionElements) {
+      const elementTop = element.getBoundingClientRect().top - containerRect.top + container.scrollTop;
+      if (elementTop > viewportMarker) break;
+      activeQuestionKey = element.dataset.readerQuestionKey || activeQuestionKey;
+    }
+    const max = Math.max(0, container.scrollHeight - container.clientHeight);
+    const top = Math.max(0, container.scrollTop);
+    const atBottom = max - top <= READER_BOTTOM_THRESHOLD;
+    stickToBottomRef.current = atBottom;
     const next = {
-      max: Math.max(0, container.scrollHeight - container.clientHeight),
-      top: Math.max(0, container.scrollTop)
+      activeQuestionKey,
+      atBottom,
+      max,
+      top
     };
-    setMessageScroll((current) => current.max === next.max && current.top === next.top ? current : next);
+    setMessageScroll((current) => (
+      current.activeQuestionKey === next.activeQuestionKey &&
+      current.atBottom === next.atBottom &&
+      current.max === next.max &&
+      current.top === next.top
+        ? current
+        : next
+    ));
+  }, []);
+
+  const jumpToQuestion = useCallback((questionKey) => {
+    const container = messagesRef.current;
+    if (!container) return;
+    const target = [...container.querySelectorAll("[data-reader-question-key]")]
+      .find((element) => element.dataset.readerQuestionKey === String(questionKey));
+    if (!target) return;
+    const containerRect = container.getBoundingClientRect();
+    const targetTop = target.getBoundingClientRect().top - containerRect.top + container.scrollTop - 10;
+    stickToBottomRef.current = false;
+    container.scrollTo({
+      behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+      top: Math.max(0, targetTop)
+    });
+  }, []);
+
+  const jumpToBottom = useCallback((behavior = "smooth") => {
+    const container = messagesRef.current;
+    if (!container) return;
+    stickToBottomRef.current = true;
+    container.scrollTo({
+      behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : behavior,
+      top: container.scrollHeight
+    });
   }, []);
 
   useEffect(() => {
@@ -475,6 +636,32 @@ function ReaderDetail({
   }, [activeTab, selectedText]);
 
   useEffect(() => {
+    if (activeTab !== "chat") {
+      chatInitializedRef.current = false;
+      return undefined;
+    }
+    const frame = requestAnimationFrame(() => {
+      const container = messagesRef.current;
+      if (!container) return;
+      if (!chatInitializedRef.current) {
+        stickToBottomRef.current = true;
+        container.scrollTop = container.scrollHeight;
+        chatInitializedRef.current = true;
+      }
+      updateMessageScroll();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [activeTab, updateMessageScroll]);
+
+  useEffect(() => {
+    if (activeTab !== "chat" || !latestTransientQuestionKey) return undefined;
+    if (latestTransientQuestionRef.current === latestTransientQuestionKey) return undefined;
+    latestTransientQuestionRef.current = latestTransientQuestionKey;
+    const frame = requestAnimationFrame(() => jumpToBottom("auto"));
+    return () => cancelAnimationFrame(frame);
+  }, [activeTab, jumpToBottom, latestTransientQuestionKey]);
+
+  useEffect(() => {
     if (activeTab !== "chat") return undefined;
     const container = messagesRef.current;
     if (!container || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return undefined;
@@ -515,8 +702,12 @@ function ReaderDetail({
     if (activeTab !== "chat") return undefined;
     const container = messagesRef.current;
     if (!container) return undefined;
-    const frame = requestAnimationFrame(updateMessageScroll);
-    const resizeObserver = new ResizeObserver(updateMessageScroll);
+    const syncMessageViewport = () => {
+      if (stickToBottomRef.current) container.scrollTop = container.scrollHeight;
+      updateMessageScroll();
+    };
+    const frame = requestAnimationFrame(syncMessageViewport);
+    const resizeObserver = new ResizeObserver(syncMessageViewport);
     resizeObserver.observe(container);
     [...container.children].forEach((child) => resizeObserver.observe(child));
     return () => {
@@ -746,8 +937,10 @@ function ReaderDetail({
                 {linkedProjects.map((project) => (
                   <article className="evidence linked-project-evidence" key={`linked-${project.project_id}`}>
                     <div>
-                      <strong>{project.project_name} · {project.relation} · 已关联</strong>
-                      <p>{project.note || "手动关联到项目。"}</p>
+                      <Link className="reader-project-link" to={`/projects/${encodeURIComponent(String(project.project_id))}`}>
+                        <strong>{project.project_name} · {project.relation} · 已关联</strong>
+                        <p>{project.note || "手动关联到项目。"}</p>
+                      </Link>
                     </div>
                     <button
                       className="reader-project-unlink"
@@ -758,7 +951,12 @@ function ReaderDetail({
                   </article>
                 ))}
                 {recommendations.map((recommendation) => (
-                  <article className="evidence" key={`${recommendation.project_id}-${recommendation.state}`}><strong>{recommendation.project_name} · {recommendation.relation_type} · {recommendation.state}</strong><p>{recommendation.reason || "暂无推荐理由。"}</p></article>
+                  <article className="evidence" key={`${recommendation.project_id}-${recommendation.state}`}>
+                    <Link className="reader-project-link" to={`/projects/${encodeURIComponent(String(recommendation.project_id))}`}>
+                      <strong>{recommendation.project_name} · {recommendation.relation_type} · {recommendation.state}</strong>
+                      <p>{recommendation.reason || "暂无推荐理由。"}</p>
+                    </Link>
+                  </article>
                 ))}
                 {!linkedProjects.length && !recommendations.length ? <p className="summary">暂无项目级推荐。</p> : null}
               </div>
@@ -803,13 +1001,19 @@ function ReaderDetail({
               <div><span>论文对话</span><h3>全文问答</h3></div>
               <em>{displayedMessages.length} 条</em>
             </header>
+            <ReaderQuestionNavigator
+              activeQuestionKey={messageScroll.activeQuestionKey}
+              items={navigationItems}
+              onJump={jumpToQuestion}
+            />
             <div className="reader-messages-shell">
               <div className="reader-messages" onKeyUp={updateSelectedText} onMouseUp={updateSelectedText} onScroll={updateMessageScroll} ref={messagesRef}>
-                {displayedMessages.length ? displayedMessages.map((item) => (
+                {displayedMessages.length ? displayedMessages.map((item, index) => (
                   <ChatMessage
                     deleting={deletingMessageId === Number(item.id)}
-                    key={item.id}
+                    key={readerMessageKey(item, index)}
                     message={item}
+                    navigationKey={readerMessageKey(item, index)}
                     onDelete={onDeleteMessage}
                   />
                 )) : <p className="muted">还没有对话。发送问题后会基于论文全文回答。</p>}
@@ -828,6 +1032,19 @@ function ReaderDetail({
                 type="range"
                 value={Math.min(messageScroll.top, Math.max(1, messageScroll.max))}
               />
+              {!messageScroll.atBottom && messageScroll.max > 0 ? (
+                <button
+                  aria-label="跳转到对话底部"
+                  className="reader-scroll-to-bottom"
+                  onClick={() => jumpToBottom()}
+                  title="跳转到最新消息"
+                  type="button"
+                >
+                  <svg aria-hidden="true" fill="none" viewBox="0 0 24 24">
+                    <path d="m6.5 9 5.5 5.5L17.5 9" />
+                  </svg>
+                </button>
+              ) : null}
             </div>
             {selectedText && followUpPanelPosition ? createPortal((
               <div
@@ -1066,7 +1283,7 @@ function ReaderDetail({
   );
 }
 
-export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, targetPaperKey }) {
+export function ReaderView({ importOpen, onClosePaperImport, onOpenPaperImport, onSelectPaper, setStatusMessage, targetPaperId, targetPaperKey }) {
   const cache = useApiCacheClient();
   const queueNavigationRef = useRef(false);
   const internalRouteSelectionRef = useRef(null);
@@ -1074,10 +1291,10 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
   const [activeTab, setActiveTab] = useState("analysis");
   const [message, setMessage] = useState("");
   const [urls, setUrls] = useState("");
+  const [webUrls, setWebUrls] = useState("");
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [busy, setBusy] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
-  const [importOpen, setImportOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState("all");
   const [projectFilter, setProjectFilter] = useState("all");
   const [sourceFilter, setSourceFilter] = useState("all");
@@ -1092,7 +1309,13 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
   const [savingChatModel, setSavingChatModel] = useState(false);
   const [projectContextPreferences, setProjectContextPreferences] = useState({});
   const [savingReferencePapers, setSavingReferencePapers] = useState(false);
+  const [recencyClock, setRecencyClock] = useState(() => Date.now());
   const queuePageSize = 10;
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setRecencyClock(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
   const debouncedQueueQuery = useDebouncedValue(queueQuery, 700, () => {
     queueNavigationRef.current = true;
     setQueuePage(0);
@@ -1182,12 +1405,27 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
     projectFilter !== "all",
     sourceFilter !== "all"
   ].filter(Boolean).length;
+  const queueActiveFilterLabels = [
+    statusFilter !== "all" ? REPORT_FILTERS.find(([value]) => value === statusFilter)?.[1] || statusFilter : "",
+    projectFilter !== "all" ? `项目：${projectFilterOptions.find(([value]) => value === projectFilter)?.[1] || projectFilter}` : "",
+    sourceFilter !== "all" ? paperSourceFilterLabel(sourceFilter) : "",
+    queueQuery.trim() ? `搜索：${queueQuery.trim()}` : ""
+  ].filter(Boolean);
   const activeReportCount = Number(stats.queued || 0) + Number(stats.processing || 0);
 
   function changeQueueFilter(setter, value) {
     queueNavigationRef.current = true;
     setQueuePage(0);
     setter(value);
+  }
+
+  function clearQueueFilters() {
+    queueNavigationRef.current = true;
+    setQueuePage(0);
+    setQueueQuery("");
+    setStatusFilter("all");
+    setProjectFilter("all");
+    setSourceFilter("all");
   }
 
   function changeQueuePage(nextPage) {
@@ -1632,15 +1870,48 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
         cache.markStale(["jobs", "history"]);
         cache.markStale(cacheNamespace("reader", "papers"));
         setUrls("");
-        setImportOpen(false);
+        onClosePaperImport();
         setStatusMessage("URL 导入已加入队列");
         return;
       }
       cache.markStale(cacheNamespace("reader", "papers"));
       cache.markStale(["paper-reports", "summary"]);
       setUrls("");
-      setImportOpen(false);
+      onClosePaperImport();
       setStatusMessage(`URL 导入完成：${data.imported?.length || 0} 篇，失败 ${data.errors?.length || 0} 篇`);
+      await refresh();
+      const firstId = data.imported?.[0]?.paper_id;
+      if (firstId) {
+        if (onSelectPaper) onSelectPaper(firstId);
+        else setActivePaperId(Number(firstId));
+      }
+    } catch (error) {
+      setStatusMessage(error.message);
+    } finally {
+      setImportBusy(false);
+    }
+  }
+
+  async function submitWebpages(event) {
+    event.preventDefault();
+    if (!webUrls.trim()) return;
+    setImportBusy(true);
+    try {
+      const data = await postJson("/api/reader/papers/web", { urls: webUrls });
+      if (data?.queued) {
+        cache.markStale(["jobs", "summary"]);
+        cache.markStale(["jobs", "history"]);
+        cache.markStale(cacheNamespace("reader", "papers"));
+        setWebUrls("");
+        onClosePaperImport();
+        setStatusMessage("网页正文提取已加入队列");
+        return;
+      }
+      cache.markStale(cacheNamespace("reader", "papers"));
+      cache.markStale(["paper-reports", "summary"]);
+      setWebUrls("");
+      onClosePaperImport();
+      setStatusMessage(`网页正文导入完成：${data.imported?.length || 0} 篇，失败 ${data.errors?.length || 0} 篇`);
       await refresh();
       const firstId = data.imported?.[0]?.paper_id;
       if (firstId) {
@@ -1669,7 +1940,7 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
         cache.markStale(["jobs", "history"]);
         cache.markStale(cacheNamespace("reader", "papers"));
         setSelectedFiles([]);
-        setImportOpen(false);
+        onClosePaperImport();
         event.currentTarget.reset();
         setStatusMessage("PDF 导入已加入队列");
         return;
@@ -1677,7 +1948,7 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
       cache.markStale(cacheNamespace("reader", "papers"));
       cache.markStale(["paper-reports", "summary"]);
       setSelectedFiles([]);
-      setImportOpen(false);
+      onClosePaperImport();
       event.currentTarget.reset();
       setStatusMessage(`PDF 导入完成：${data.imported?.length || 0} 篇，失败 ${data.errors?.length || 0} 篇`);
       await refresh();
@@ -1707,7 +1978,7 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
             {queueStatus.enabled ? `自动生成 · ${queueStatus.active || 0}/${queueStatus.concurrency || 0}` : "自动生成未启用"}
           </span>
           <RefreshButton className="vision-refresh" onClick={() => refresh().catch((error) => setStatusMessage(error.message))} />
-          <button className="workspace-primary-action" onClick={() => setImportOpen(true)} type="button">
+          <button className="workspace-primary-action" onClick={onOpenPaperImport} title="导入论文 (Ctrl/⌘ I)" type="button">
             <span aria-hidden="true">＋</span>导入论文
           </button>
         </div>
@@ -1727,16 +1998,7 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
               <h2>队列列表</h2>
               <p>选择论文后在右侧阅读报告或继续对话</p>
             </div>
-            <div className="inbox-list-heading-actions reader-queue-filter-summary">
-              <button
-                aria-controls="reader-queue-filter-panel"
-                aria-expanded={queueFiltersOpen}
-                className="left-filter-toggle"
-                onClick={() => setQueueFiltersOpen((current) => !current)}
-                type="button"
-              >
-                {queueFiltersOpen ? "收起筛选" : `筛选${queueActiveFilterCount ? ` (${queueActiveFilterCount})` : ""}`}
-              </button>
+            <div className="inbox-list-heading-actions">
               <em>{loading || queueSearchPending ? "…" : queueTotal}</em>
               <WorkspacePagination
                 compact
@@ -1748,50 +2010,73 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
               />
             </div>
           </header>
-          <div
-            aria-hidden={!queueFiltersOpen}
-            className={`reader-queue-filter-collapse ${queueFiltersOpen ? "is-open" : ""}`}
-            id="reader-queue-filter-panel"
-            inert={!queueFiltersOpen}
-          >
-            <div className="inbox-list-filters reader-queue-filter-panel" aria-label="报告队列筛选">
-              <div className="inbox-filter-control reader-queue-status-control">
-                <span>状态</span>
-                <WorkspaceSelect
-                  ariaLabel="筛选报告状态"
-                  onChange={(value) => changeQueueFilter(setStatusFilter, value)}
-                  options={REPORT_FILTERS}
-                  value={statusFilter}
-                />
+          <div className="reader-queue-filter-stack">
+            <div className="reader-queue-filter-summary">
+              <div className="reader-queue-active-filters">
+                {queueActiveFilterLabels.length
+                  ? queueActiveFilterLabels.map((label) => <span key={label}>{label}</span>)
+                  : <span>全部报告</span>}
               </div>
-              <div className="inbox-filter-control reader-queue-project-control">
-                <span>所属项目</span>
-                <WorkspaceSelect
-                  ariaLabel="筛选所属项目"
-                  onChange={(value) => changeQueueFilter(setProjectFilter, value)}
-                  options={projectFilterOptions}
-                  value={projectFilter}
-                />
+              <div className="reader-queue-filter-actions">
+                {queueActiveFilterCount ? (
+                  <button className="filter-clear-button" onClick={clearQueueFilters} type="button">清除筛选</button>
+                ) : null}
+                <button
+                  aria-controls="reader-queue-filter-panel"
+                  aria-expanded={queueFiltersOpen}
+                  className="left-filter-toggle"
+                  onClick={() => setQueueFiltersOpen((current) => !current)}
+                  type="button"
+                >
+                  {queueFiltersOpen ? "收起筛选" : `筛选${queueActiveFilterCount ? ` (${queueActiveFilterCount})` : ""}`}
+                </button>
               </div>
-              <div className="inbox-filter-control reader-queue-source-control">
-                <span>来源</span>
-                <WorkspaceSelect
-                  ariaLabel="筛选论文来源"
-                  onChange={(value) => changeQueueFilter(setSourceFilter, value)}
-                  options={[["all", "全部来源"], ["daily", "每日任务"], ["manual", "手动导入"]]}
-                  value={sourceFilter}
-                />
+            </div>
+            <div
+              aria-hidden={!queueFiltersOpen}
+              className={`reader-queue-filter-collapse ${queueFiltersOpen ? "is-open" : ""}`}
+              id="reader-queue-filter-panel"
+              inert={!queueFiltersOpen}
+            >
+              <div className="inbox-list-filters reader-queue-filter-panel" aria-label="报告队列筛选">
+                <div className="inbox-filter-control reader-queue-status-control">
+                  <span>状态</span>
+                  <WorkspaceSelect
+                    ariaLabel="筛选报告状态"
+                    onChange={(value) => changeQueueFilter(setStatusFilter, value)}
+                    options={REPORT_FILTERS}
+                    value={statusFilter}
+                  />
+                </div>
+                <div className="inbox-filter-control reader-queue-project-control">
+                  <span>所属项目</span>
+                  <WorkspaceSelect
+                    ariaLabel="筛选所属项目"
+                    onChange={(value) => changeQueueFilter(setProjectFilter, value)}
+                    options={projectFilterOptions}
+                    value={projectFilter}
+                  />
+                </div>
+                <div className="inbox-filter-control reader-queue-source-control">
+                  <span>来源</span>
+                  <WorkspaceSelect
+                    ariaLabel="筛选论文来源"
+                    onChange={(value) => changeQueueFilter(setSourceFilter, value)}
+                    options={PAPER_SOURCE_FILTER_OPTIONS}
+                    value={sourceFilter}
+                  />
+                </div>
+                <label className="inbox-filter-control inbox-filter-search reader-queue-search-control">
+                  <span>搜索</span>
+                  <input
+                    disabled={loading && !items.length}
+                    onChange={(event) => setQueueQuery(event.target.value)}
+                    placeholder="标题、arXiv、正文或状态"
+                    type="search"
+                    value={queueQuery}
+                  />
+                </label>
               </div>
-              <label className="inbox-filter-control inbox-filter-search reader-queue-search-control">
-                <span>搜索</span>
-                <input
-                  disabled={loading && !items.length}
-                  onChange={(event) => setQueueQuery(event.target.value)}
-                  placeholder="标题、arXiv、正文或状态"
-                  type="search"
-                  value={queueQuery}
-                />
-              </label>
             </div>
           </div>
           <div className="paper-list inbox-paper-list report-queue-paper-list">
@@ -1807,6 +2092,7 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
                 onSelect={(paperId) => {
                   selectQueuePaper(paperId);
                 }}
+                recentImport={isRecentManualPaperImport(item, recencyClock)}
               />
             )) : (
               <div className="queue-empty-state">
@@ -1819,16 +2105,9 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
                 {hasQueueFilters ? (
                   <button
                     type="button"
-                    onClick={() => {
-                      queueNavigationRef.current = true;
-                      setQueuePage(0);
-                      setQueueQuery("");
-                      setStatusFilter("all");
-                      setProjectFilter("all");
-                      setSourceFilter("all");
-                    }}
+                    onClick={clearQueueFilters}
                   >清空筛选</button>
-                ) : <button type="button" onClick={() => setImportOpen(true)}>导入论文</button>}
+                ) : <button type="button" onClick={onOpenPaperImport}>导入论文</button>}
               </div>
             )}
           </div>
@@ -1889,18 +2168,14 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
       </div>
       <WorkspaceDialog
         className="reader-import-dialog"
-        description="通过 arXiv 链接或本地 PDF 建立全文报告任务；导入完成后会出现在报告队列中。"
         eyebrow="Paper intake"
         footer={(
-          <>
-            <span>支持批量导入，PDF 可一次选择多个文件</span>
-            <div>
-              <button disabled={importBusy} onClick={() => setImportOpen(false)} type="button">关闭</button>
-            </div>
-          </>
+          <div>
+            <button disabled={importBusy} onClick={onClosePaperImport} type="button">关闭</button>
+          </div>
         )}
         icon="IN"
-        onClose={() => { if (!importBusy) setImportOpen(false); }}
+        onClose={() => { if (!importBusy) onClosePaperImport(); }}
         open={importOpen}
         title="导入论文"
       >
@@ -1908,10 +2183,10 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
           <form className="reader-import-method" onSubmit={submitUrls}>
             <header>
               <i aria-hidden="true">URL</i>
-              <div><span>远程论文</span><h3>导入 arXiv 链接</h3><p>每行填写一个论文链接，可批量创建全文任务。</p></div>
+              <div><span>PDF 链接</span><h3>从链接获取论文 PDF</h3></div>
             </header>
             <label className="workspace-field">
-              <span>arXiv URL</span>
+              <span>arXiv / PDF URL</span>
               <textarea
                 disabled={importBusy}
                 onChange={(event) => setUrls(event.target.value)}
@@ -1920,13 +2195,13 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
               />
             </label>
             <button className="reader-import-submit" disabled={importBusy || !urls.trim()} type="submit">
-              {importBusy ? <InlineLoader compact label="导入中" /> : <>导入 URL <i aria-hidden="true">→</i></>}
+              {importBusy ? <InlineLoader compact label="导入中" /> : <>查找并导入 PDF <i aria-hidden="true">→</i></>}
             </button>
           </form>
           <form className="reader-import-method" onSubmit={submitPdf}>
             <header>
               <i aria-hidden="true">PDF</i>
-              <div><span>本地文件</span><h3>上传论文 PDF</h3><p>选择一篇或多篇 PDF，系统会提取全文并生成任务。</p></div>
+              <div><span>本地文件</span><h3>上传论文 PDF</h3></div>
             </header>
             <label className="reader-import-file-picker">
               <input
@@ -1944,6 +2219,24 @@ export function ReaderView({ onSelectPaper, setStatusMessage, targetPaperId, tar
             </label>
             <button className="reader-import-submit" disabled={importBusy || !selectedFiles.length} type="submit">
               {importBusy ? <InlineLoader compact label="导入中" /> : <>导入 PDF{selectedFiles.length ? ` (${selectedFiles.length})` : ""} <i aria-hidden="true">→</i></>}
+            </button>
+          </form>
+          <form className="reader-import-method is-webpage" onSubmit={submitWebpages}>
+            <header>
+              <i aria-hidden="true">WEB</i>
+              <div><span>网页正文</span><h3>提取并导入网页内容</h3></div>
+            </header>
+            <label className="workspace-field">
+              <span>网页 URL（每行一个）</span>
+              <textarea
+                disabled={importBusy}
+                onChange={(event) => setWebUrls(event.target.value)}
+                placeholder={"https://example.com/article\nhttps://example.org/blog/post"}
+                value={webUrls}
+              />
+            </label>
+            <button className="reader-import-submit" disabled={importBusy || !webUrls.trim()} type="submit">
+              {importBusy ? <InlineLoader compact label="提取中" /> : <>提取网页正文 <i aria-hidden="true">→</i></>}
             </button>
           </form>
         </div>

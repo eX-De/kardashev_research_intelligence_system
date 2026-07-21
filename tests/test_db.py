@@ -88,7 +88,29 @@ class PostgresTestDatabaseTests(unittest.TestCase):
         self.assertIn("idx_worker_jobs_job_run", POSTGRES_REQUIRED_INDEXES)
         self.assertIn("idx_app_events_unpublished", POSTGRES_REQUIRED_INDEXES)
         self.assertIn("CREATE INDEX IF NOT EXISTS idx_worker_jobs_claim", indexes)
+
+    def test_reader_schema_uses_only_canonical_paper_ids(self) -> None:
+        schema = postgres_schema_sql()
+        indexes = postgres_index_sql()
+        message_schema = schema.split("CREATE TABLE IF NOT EXISTS paper_reader_messages", 1)[1].split(");", 1)[0]
+        self.assertIn("library_paper_id INTEGER NOT NULL REFERENCES papers(id)", message_schema)
+        self.assertNotIn("REFERENCES arxiv_papers", message_schema)
+        self.assertIn("CREATE TABLE IF NOT EXISTS paper_reader_references", schema)
+        self.assertIn("paper_reader_references", REQUIRED_TABLES)
+        self.assertIn("idx_paper_reader_references", POSTGRES_REQUIRED_INDEXES)
+        self.assertIn("CREATE INDEX IF NOT EXISTS idx_paper_reader_references", indexes)
         self.assertIn("CREATE INDEX IF NOT EXISTS idx_app_events_unpublished", indexes)
+
+    def test_artifact_search_index_schema_is_required(self) -> None:
+        schema = postgres_schema_sql()
+        indexes = postgres_index_sql()
+        self.assertIn("CREATE TABLE IF NOT EXISTS artifact_chunks", schema)
+        self.assertIn("CREATE TABLE IF NOT EXISTS artifact_chunk_embeddings", schema)
+        self.assertIn("artifact_chunks", REQUIRED_TABLES)
+        self.assertIn("artifact_chunk_embeddings", REQUIRED_TABLES)
+        self.assertIn("idx_artifact_chunks_artifact", POSTGRES_REQUIRED_INDEXES)
+        self.assertIn("idx_artifact_chunk_embeddings_model", POSTGRES_REQUIRED_INDEXES)
+        self.assertIn("CREATE INDEX IF NOT EXISTS idx_artifact_chunks_artifact", indexes)
 
     def test_test_database_helper_uses_postgres_connection(self) -> None:
         conn = connect_test_db()

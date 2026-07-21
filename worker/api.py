@@ -38,11 +38,10 @@ from .paper_reports import (
     remove_paper_report_from_queue,
     sync_paper_report_for_recommendation_state,
 )
+from .paper_reader import paper_reader_detail
 from .papers import (
     list_paper_library,
-    paper_id_for_arxiv_paper_id,
     paper_library_detail,
-    set_arxiv_paper_library_status,
     set_library_status,
 )
 from .recommendations import (
@@ -263,15 +262,27 @@ def project_detail(conn: DbConnection, project_id: int) -> dict[str, object]:
           p.id,
           p.arxiv_id,
           p.title,
-          p.link,
+          COALESCE(source.source_url, '') AS link,
           pp.relation,
           pp.note,
           pp.updated_at,
           COALESCE(NULLIF(ppm.quality_score, 0), ppm.score) AS project_score
         FROM project_papers pp
-        JOIN arxiv_papers p ON p.id = pp.paper_id
+        JOIN papers p ON p.id = pp.paper_id
+        LEFT JOIN LATERAL (
+          SELECT ps.source_url
+          FROM paper_sources ps
+          WHERE ps.paper_id = p.id
+          ORDER BY ps.updated_at DESC, ps.id DESC
+          LIMIT 1
+        ) source ON TRUE
+        LEFT JOIN project_paper_recommendations r
+          ON r.project_id = pp.project_id
+         AND r.paper_id = pp.paper_id
+         AND r.state = 'accepted'
         LEFT JOIN project_paper_matches ppm
-          ON ppm.project_id = pp.project_id AND ppm.paper_id = pp.paper_id
+          ON ppm.project_id = pp.project_id
+         AND ppm.paper_id = r.source_arxiv_paper_id
         WHERE pp.project_id = ?
           AND NOT (
             pp.relation = 'candidate'
@@ -378,6 +389,7 @@ def project_detail(conn: DbConnection, project_id: int) -> dict[str, object]:
         "papers": [
             {
                 "id": int(paper["id"]),
+                "library_paper_id": int(paper["id"]),
                 "arxiv_id": paper["arxiv_id"],
                 "title": paper["title"],
                 "link": paper["link"],
@@ -403,6 +415,7 @@ def project_detail(conn: DbConnection, project_id: int) -> dict[str, object]:
         "candidate_papers": [
             {
                 "id": int(paper["id"]),
+                "library_paper_id": int(paper["id"]),
                 "arxiv_id": paper["arxiv_id"],
                 "title": paper["title"],
                 "published_at": paper["published_at"],
@@ -420,6 +433,7 @@ def project_detail(conn: DbConnection, project_id: int) -> dict[str, object]:
         "recommended_papers": [
             {
                 "id": int(paper["id"]),
+                "library_paper_id": int(paper["id"]),
                 "arxiv_id": paper["arxiv_id"],
                 "title": paper["title"],
                 "published_at": paper["published_at"],
@@ -724,6 +738,9 @@ def export_project_to_obsidian(
 ) -> dict[str, object]:
     detail = project_detail(conn, project_id)
     artifact = generate_project_index_artifact(conn, project_id)
+    from .artifact_index import enqueue_artifact_index
+
+    enqueue_artifact_index(conn, settings, artifact)
     if obsidian_remote_enabled(settings):
         export = export_artifact_to_obsidian(conn, settings, int(artifact["id"]))
         relative_path = str(export.get("path") or "")
@@ -761,11 +778,11 @@ def link_project_paper(conn: DbConnection, project_id: int, payload: dict[str, o
         (project_id, paper_id, relation, note, now, now),
     )
     if relation == "reading":
-        set_arxiv_paper_library_status(conn, paper_id, "reading")
+        set_library_status(conn, paper_id, "reading")
     elif relation in {"core", "background", "candidate"}:
-        set_arxiv_paper_library_status(conn, paper_id, "saved")
+        set_library_status(conn, paper_id, "saved")
     elif relation == "rejected":
-        set_arxiv_paper_library_status(conn, paper_id, "discarded")
+        set_library_status(conn, paper_id, "discarded")
     conn.commit()
     return project_detail(conn, project_id)
 
@@ -853,9 +870,10 @@ def inbox(conn: DbConnection) -> dict[str, object]:
           p.arxiv_id,
           p.title,
           p.authors_json,
-          p.categories_json,
+          COALESCE(source.metadata_json::jsonb -> 'categories', '[]'::jsonb)::text AS categories_json,
           p.published_at,
-          p.link,
+          COALESCE(source.source_url, '') AS link,
+          r.source_arxiv_paper_id,
           r.project_id,
           rp.name AS project_name,
           r.relation_type,
@@ -866,37 +884,29 @@ def inbox(conn: DbConnection) -> dict[str, object]:
           rr.status AS report_status,
           rr.content_json AS report_content_json,
           rr.updated_at AS report_updated_at
-        FROM arxiv_papers p
+        FROM papers p
         JOIN pending_recommendations r ON r.paper_id = p.id AND r.rn = 1
         JOIN research_projects rp ON rp.id = r.project_id
         LEFT JOIN project_paper_judgments j
-          ON j.project_id = r.project_id AND j.paper_id = r.paper_id
-        LEFT JOIN (
-          SELECT ps.source_identifier AS arxiv_id, af.status, af.content_json, af.updated_at
+          ON j.project_id = r.project_id AND j.paper_id = r.source_arxiv_paper_id
+        LEFT JOIN LATERAL (
+          SELECT ps.source_url, ps.metadata_json
+          FROM paper_sources ps
+          WHERE ps.paper_id = p.id
+          ORDER BY ps.updated_at DESC, ps.id DESC
+          LIMIT 1
+        ) source ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT af.status, af.content_json, af.updated_at
           FROM artifacts af
-          JOIN paper_sources ps ON ps.paper_id = af.scope_id
           WHERE af.scope_type = 'paper'
+            AND af.scope_id = p.id
             AND af.artifact_type = ?
             AND af.status != 'removed'
-        ) rr ON rr.arxiv_id = p.arxiv_id
-        WHERE NOT EXISTS (
-            SELECT 1 FROM arxiv_paper_tombstones t
-            WHERE t.arxiv_id = p.arxiv_id
-          )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM papers lp
-            WHERE lp.arxiv_id = p.arxiv_id
-              AND lp.library_status IN ('archived', 'discarded')
-          )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM paper_sources ps
-            JOIN papers lp ON lp.id = ps.paper_id
-            WHERE ps.source_type = 'arxiv'
-              AND ps.source_identifier = p.arxiv_id
-              AND lp.library_status IN ('archived', 'discarded')
-          )
+          ORDER BY af.updated_at DESC, af.id DESC
+          LIMIT 1
+        ) rr ON TRUE
+        WHERE p.library_status NOT IN ('archived', 'discarded')
         ORDER BY
           CASE r.relation_type WHEN 'direct' THEN 0 ELSE 1 END,
           COALESCE(j.usefulness_score, 0) DESC,
@@ -966,30 +976,6 @@ def _paper_report_stats(conn: DbConnection) -> dict[str, object]:
     return stats
 
 
-def _paper_report_legacy_paper_id(conn: DbConnection, row: DbRow) -> int:
-    content = from_json(row["content_json"], {}) if "content_json" in row.keys() else {}
-    source = from_json(row["source_json"], {}) if "source_json" in row.keys() else {}
-    if not isinstance(content, dict):
-        content = {}
-    if not isinstance(source, dict):
-        source = {}
-    paper_id = int(content.get("legacy_arxiv_paper_id") or source.get("legacy_arxiv_paper_id") or 0)
-    if paper_id:
-        return paper_id
-    source_row = conn.execute(
-        """
-        SELECT ap.id
-        FROM arxiv_papers ap
-        JOIN paper_sources ps ON ps.source_identifier = ap.arxiv_id
-        WHERE ps.paper_id = ?
-        ORDER BY ap.id
-        LIMIT 1
-        """,
-        (int(row["scope_id"] or 0),),
-    ).fetchone()
-    return int(source_row["id"]) if source_row else 0
-
-
 def _paper_report_search_tokens(query: str) -> list[str]:
     normalized = unicodedata.normalize("NFKC", clean_unicode(str(query or "")))
     normalized = re.sub(r"\s+", " ", normalized).strip().lower()
@@ -1015,13 +1001,13 @@ def paper_reports_summary(conn: DbConnection) -> dict[str, object]:
     ).fetchall()
     latest_payload = None
     for latest in latest_rows:
-        paper_id = _paper_report_legacy_paper_id(conn, latest)
+        paper_id = int(latest["scope_id"] or 0)
         if not paper_id:
             continue
         latest_payload = {
             "artifact_id": int(latest["id"]),
             "paper_id": paper_id,
-            "library_paper_id": int(latest["scope_id"] or 0),
+            "library_paper_id": paper_id,
             "status": latest["status"],
             "updated_at": latest["updated_at"],
         }
@@ -1048,9 +1034,9 @@ def paper_reports_queue(conn: DbConnection, limit: int = 300, query: str = "") -
               OR LOWER(a.content_markdown) LIKE ? ESCAPE '\\'
               OR LOWER(a.content_json) LIKE ? ESCAPE '\\'
               OR LOWER(a.source_json) LIKE ? ESCAPE '\\'
-              OR LOWER(COALESCE(ap.arxiv_id, '')) LIKE ? ESCAPE '\\'
-              OR LOWER(COALESCE(ap.title, '')) LIKE ? ESCAPE '\\'
-              OR LOWER(COALESCE(ap.link, '')) LIKE ? ESCAPE '\\'
+              OR LOWER(COALESCE(p.arxiv_id, '')) LIKE ? ESCAPE '\\'
+              OR LOWER(COALESCE(p.title, '')) LIKE ? ESCAPE '\\'
+              OR LOWER(COALESCE(source.source_url, '')) LIKE ? ESCAPE '\\'
             )
             """
         )
@@ -1061,18 +1047,27 @@ def paper_reports_queue(conn: DbConnection, limit: int = 300, query: str = "") -
         SELECT
           a.id, a.scope_id, a.status, a.model_provider_id, a.model, a.content_markdown,
           a.content_json, a.source_json, a.created_at, a.updated_at,
-          ap.id AS arxiv_paper_id
+          p.id AS paper_id, p.arxiv_id, p.title, p.authors_json, p.published_at,
+          COALESCE(source.source_url, '') AS link,
+          COALESCE(source.metadata_json::jsonb -> 'categories', '[]'::jsonb)::text AS categories_json,
+          COALESCE(text_asset.status, 'pending') AS text_status
         FROM artifacts a
-        LEFT JOIN arxiv_papers ap ON ap.id = COALESCE(
-          CASE
-            WHEN (a.content_json::jsonb ->> 'legacy_arxiv_paper_id') ~ '^[0-9]+$'
-            THEN (a.content_json::jsonb ->> 'legacy_arxiv_paper_id')::integer
-          END,
-          CASE
-            WHEN (a.source_json::jsonb ->> 'legacy_arxiv_paper_id') ~ '^[0-9]+$'
-            THEN (a.source_json::jsonb ->> 'legacy_arxiv_paper_id')::integer
-          END
-        )
+        JOIN papers p ON p.id = a.scope_id
+        LEFT JOIN LATERAL (
+          SELECT ps.source_url, ps.metadata_json
+          FROM paper_sources ps
+          WHERE ps.paper_id = p.id
+          ORDER BY ps.updated_at DESC, ps.id DESC
+          LIMIT 1
+        ) source ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT pa.status
+          FROM paper_assets pa
+          WHERE pa.paper_id = p.id AND pa.asset_type = 'text'
+          ORDER BY CASE WHEN pa.status = 'complete' AND pa.path != '' THEN 0 ELSE 1 END,
+                   pa.updated_at DESC, pa.id DESC
+          LIMIT 1
+        ) text_asset ON TRUE
         WHERE a.scope_type = 'paper'
           AND a.artifact_type = ?
           AND a.status != 'removed'
@@ -1096,12 +1091,7 @@ def paper_reports_queue(conn: DbConnection, limit: int = 300, query: str = "") -
         content = from_json(row["content_json"], {})
         if not isinstance(content, dict):
             content = {}
-        paper_id = int(row["arxiv_paper_id"] or 0) or _paper_report_legacy_paper_id(conn, row)
-        if not paper_id:
-            continue
-        paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
-        if not paper:
-            continue
+        paper_id = int(row["paper_id"])
         source_project_ids = [
             int(project_id)
             for project_id in content.get("source_project_ids", [])
@@ -1114,13 +1104,14 @@ def paper_reports_queue(conn: DbConnection, limit: int = 300, query: str = "") -
                 "id": paper_id,
                 "artifact_id": int(row["id"]),
                 "status": row["status"],
-                "title": paper["title"],
-                "arxiv_id": paper["arxiv_id"],
-                "authors": from_json(paper["authors_json"], []),
-                "categories": from_json(paper["categories_json"], []),
-                "published_at": paper["published_at"],
-                "link": paper["link"],
-                "text_status": paper["text_status"],
+                "library_paper_id": paper_id,
+                "title": row["title"],
+                "arxiv_id": row["arxiv_id"],
+                "authors": from_json(row["authors_json"], []),
+                "categories": from_json(row["categories_json"], []),
+                "published_at": row["published_at"],
+                "link": row["link"],
+                "text_status": row["text_status"],
                 "project_count": len(source_project_ids),
                 "project_ids": source_project_ids,
                 "project_names": source_project_names,
@@ -1177,9 +1168,46 @@ def remove_paper_report(conn: DbConnection, paper_id: int) -> dict[str, object]:
 
 
 def paper_detail(conn: DbConnection, paper_id: int) -> dict[str, object]:
-    sync_project_paper_recommendations(conn, [paper_id])
-    ensure_paper_reports_for_recommendations(conn, [paper_id])
-    paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
+    paper = conn.execute(
+        """
+        SELECT
+          p.*,
+          p.abstract AS summary,
+          COALESCE(source.source_url, '') AS link,
+          COALESCE(source.metadata_json::jsonb -> 'categories', '[]'::jsonb)::text AS categories_json,
+          COALESCE(pdf_asset.url, '') AS pdf_link,
+          COALESCE(pdf_asset.path, '') AS pdf_path,
+          COALESCE(text_asset.path, '') AS text_path,
+          COALESCE(text_asset.status, 'pending') AS text_status,
+          text_asset.updated_at AS text_extracted_at,
+          COALESCE(text_asset.error_message, '') AS text_error,
+          COALESCE((text_asset.metadata_json::jsonb ->> 'char_count')::bigint, 0) AS text_char_count
+        FROM papers p
+        LEFT JOIN LATERAL (
+          SELECT ps.source_url, ps.metadata_json
+          FROM paper_sources ps
+          WHERE ps.paper_id = p.id
+          ORDER BY ps.updated_at DESC, ps.id DESC
+          LIMIT 1
+        ) source ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT pa.url, pa.path
+          FROM paper_assets pa
+          WHERE pa.paper_id = p.id AND pa.asset_type = 'pdf'
+          ORDER BY pa.updated_at DESC, pa.id DESC
+          LIMIT 1
+        ) pdf_asset ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT pa.path, pa.status, pa.error_message, pa.metadata_json, pa.updated_at
+          FROM paper_assets pa
+          WHERE pa.paper_id = p.id AND pa.asset_type = 'text'
+          ORDER BY pa.updated_at DESC, pa.id DESC
+          LIMIT 1
+        ) text_asset ON TRUE
+        WHERE p.id = ?
+        """,
+        (paper_id,),
+    ).fetchone()
     if not paper:
         raise RuntimeError(f"Paper not found: {paper_id}")
     evidence_rows = conn.execute(
@@ -1206,10 +1234,19 @@ def paper_detail(conn: DbConnection, paper_id: int) -> dict[str, object]:
         LEFT JOIN obsidian_notes n ON n.id = c.note_id
         LEFT JOIN knowledge_documents kd ON kd.id = c.document_id
         LEFT JOIN arxiv_text_chunks ac ON ac.id = m.arxiv_chunk_id
-        WHERE m.paper_id = ?
+        WHERE m.paper_id IN (
+          SELECT source_arxiv_paper_id
+          FROM project_paper_recommendations
+          WHERE paper_id = ? AND source_arxiv_paper_id IS NOT NULL
+          UNION
+          SELECT ap.id
+          FROM paper_sources ps
+          JOIN arxiv_papers ap ON ap.arxiv_id = ps.source_identifier
+          WHERE ps.paper_id = ?
+        )
         ORDER BY m.score DESC
         """,
-        (paper_id,),
+        (paper_id, paper_id),
     ).fetchall()
     judgment_rows = conn.execute(
         """
@@ -1227,13 +1264,22 @@ def paper_detail(conn: DbConnection, paper_id: int) -> dict[str, object]:
           j.updated_at
         FROM project_paper_judgments j
         JOIN research_projects rp ON rp.id = j.project_id
-        WHERE j.paper_id = ?
+        WHERE j.paper_id IN (
+          SELECT source_arxiv_paper_id
+          FROM project_paper_recommendations
+          WHERE paper_id = ? AND source_arxiv_paper_id IS NOT NULL
+          UNION
+          SELECT ap.id
+          FROM paper_sources ps
+          JOIN arxiv_papers ap ON ap.arxiv_id = ps.source_identifier
+          WHERE ps.paper_id = ?
+        )
         ORDER BY
           CASE j.relation_type WHEN 'direct' THEN 0 WHEN 'indirect' THEN 1 WHEN 'weak' THEN 2 ELSE 3 END,
           j.usefulness_score DESC,
           j.confidence DESC
         """,
-        (paper_id,),
+        (paper_id, paper_id),
     ).fetchall()
     feedback = conn.execute(
         "SELECT status, note, updated_at FROM user_feedback WHERE paper_id = ? ORDER BY updated_at DESC",
@@ -1261,7 +1307,7 @@ def paper_detail(conn: DbConnection, paper_id: int) -> dict[str, object]:
         FROM project_paper_recommendations r
         JOIN research_projects rp ON rp.id = r.project_id
         LEFT JOIN project_paper_judgments j
-          ON j.project_id = r.project_id AND j.paper_id = r.paper_id
+          ON j.project_id = r.project_id AND j.paper_id = r.source_arxiv_paper_id
         WHERE r.paper_id = ?
         ORDER BY
           CASE r.state WHEN 'pending' THEN 0 WHEN 'accepted' THEN 1 ELSE 2 END,
@@ -1294,7 +1340,8 @@ def paper_detail(conn: DbConnection, paper_id: int) -> dict[str, object]:
     ).fetchall()
     return {
         "paper": {
-            "id": int(paper["id"]),
+                "id": int(paper["id"]),
+                "library_paper_id": int(paper["id"]),
             "arxiv_id": paper["arxiv_id"],
             "title": paper["title"],
             "authors": from_json(paper["authors_json"], []),
@@ -1393,7 +1440,7 @@ def paper_detail(conn: DbConnection, paper_id: int) -> dict[str, object]:
 def save_feedback(conn: DbConnection, paper_id: int, status: str, note: str = "") -> dict[str, object]:
     if status not in VALID_FEEDBACK:
         raise RuntimeError(f"Invalid feedback status: {status}")
-    if not conn.execute("SELECT id FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone():
+    if not conn.execute("SELECT id FROM papers WHERE id = ?", (paper_id,)).fetchone():
         raise RuntimeError(f"Paper not found: {paper_id}")
     now = utc_now()
     conn.execute(
@@ -1407,11 +1454,11 @@ def save_feedback(conn: DbConnection, paper_id: int, status: str, note: str = ""
         (paper_id, status, note, now, now),
     )
     if status in {"read_later", "favorite"}:
-        set_arxiv_paper_library_status(conn, paper_id, "saved")
+        set_library_status(conn, paper_id, "saved")
     elif status == "read":
-        set_arxiv_paper_library_status(conn, paper_id, "read")
+        set_library_status(conn, paper_id, "read")
     elif status == "not_relevant":
-        set_arxiv_paper_library_status(conn, paper_id, "discarded")
+        set_library_status(conn, paper_id, "discarded")
     conn.commit()
     return {"ok": True, "paper_id": paper_id, "status": status}
 
@@ -1422,14 +1469,13 @@ def update_paper_recommendation(
     paper_id: int,
     payload: dict[str, object],
 ) -> dict[str, object]:
-    sync_project_paper_recommendations(conn, [paper_id])
     action = str(payload.get("action") or "").strip().lower()
     if action == "accept":
         raw_project_ids = payload.get("project_ids", [])
         project_ids = [int(project_id) for project_id in raw_project_ids] if isinstance(raw_project_ids, list) else []
         importance = str(payload.get("importance") or "").strip().lower()
         accept_recommendations_for_paper(conn, paper_id, project_ids, importance)
-        library_result = set_arxiv_paper_library_status(conn, paper_id, "reading")
+        library_result = set_library_status(conn, paper_id, "reading")
         conn.commit()
         sync_result: dict[str, object] = {"skipped": True, "reason": OBSIDIAN_NOT_CONFIGURED}
         if settings.obsidian_vault_path and not obsidian_remote_enabled(settings):
@@ -1458,7 +1504,7 @@ def update_paper_recommendation(
         project_ids = [int(project_id) for project_id in raw_project_ids] if isinstance(raw_project_ids, list) else None
         discard_recommendations_for_paper(conn, paper_id, project_ids)
         try:
-            set_arxiv_paper_library_status(conn, paper_id, "discarded")
+            set_library_status(conn, paper_id, "discarded")
         except RuntimeError:
             pass
         report_result = sync_paper_report_for_recommendation_state(conn, paper_id)
@@ -1481,7 +1527,7 @@ def generate_paper_reading_report(
         prompt=settings.paper_reader_default_prompt,
     )
     result = process_paper_report_queue(conn, settings, [paper_id])
-    detail = paper_detail(conn, paper_id)
+    detail = paper_reader_detail(conn, paper_id)
     detail["ok"] = True
     detail["paper_report_result"] = result
     return detail
@@ -1514,8 +1560,7 @@ def paper_library(
 
 def library_paper_detail(conn: DbConnection, paper_id: int) -> dict[str, object]:
     detail = paper_library_detail(conn, paper_id)
-    legacy_paper_id = detail.get("legacy_arxiv_paper_id")
-    detail["paper_report"] = paper_report_payload(conn, int(legacy_paper_id)) if legacy_paper_id else None
+    detail["paper_report"] = paper_report_payload(conn, paper_id)
     return detail
 
 
@@ -1607,6 +1652,9 @@ def generate_project_index(
 ) -> dict[str, object]:
     payload = payload or {}
     artifact = generate_project_index_artifact(conn, project_id)
+    from .artifact_index import enqueue_artifact_index
+
+    enqueue_artifact_index(conn, settings, artifact)
     export = None
     if bool(payload.get("export_to_obsidian")):
         export = export_artifact_to_obsidian(

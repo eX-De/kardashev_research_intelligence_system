@@ -53,8 +53,17 @@ function createProjectsPool() {
     pdf_link: "https://arxiv.org/pdf/2607.00012",
     fetched_batch_id: "batch-1"
   }];
-  const libraryPapers = [];
-  const paperSources = [];
+  const libraryPapers = [{
+    id: 12,
+    canonical_key: "arxiv:2607.00012",
+    arxiv_id: "2607.00012",
+    title: "Queued Worker Paper",
+    library_status: "candidate",
+    reading_state: "unread",
+    saved_at: null,
+    last_read_at: null
+  }];
+  const paperSources = [{ paper_id: 12, source_identifier: "2607.00012" }];
 
   function projectListRows() {
     return projects.map((project) => ({
@@ -80,14 +89,16 @@ function createProjectsPool() {
         && !(item.relation === "candidate" && item.note === "auto_matched_by_project_context")
       ))
       .map((item) => {
-        const paper = arxivPapers.find((row) => row.id === item.paper_id) || {};
+        const paper = libraryPapers.find((row) => row.id === item.paper_id) || {};
         return {
           id: paper.id,
+          library_paper_id: paper.id,
           arxiv_id: paper.arxiv_id,
           title: paper.title,
           link: paper.link,
           relation: item.relation,
           note: item.note,
+          importance: item.importance || "",
           updated_at: item.updated_at,
           project_score: "0"
         };
@@ -301,6 +312,7 @@ test("linkProjectPaper upserts visible link and mirrors library status", async (
     const detail = await linkProjectPaper(1, { paper_id: 12, relation: "core", note: "important" });
     assert.equal(detail.papers.length, 1);
     assert.equal(detail.papers[0].relation, "core");
+    assert.equal(detail.papers[0].library_paper_id, Number(fake.libraryPapers[0].id));
     assert.equal(fake.libraryPapers[0].library_status, "saved");
     assert.ok(fake.libraryPapers[0].saved_at);
   } finally {

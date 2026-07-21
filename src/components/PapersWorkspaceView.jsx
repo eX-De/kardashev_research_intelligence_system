@@ -16,7 +16,11 @@ const PAPER_SECTIONS = {
 };
 
 export function PapersWorkspaceView({
+  importOpen,
+  notify,
+  onClosePaperImport,
   onOpenReportQueue,
+  onOpenPaperImport,
   onSelectPaper,
   section = "inbox",
   selectedPaperId,
@@ -37,6 +41,10 @@ export function PapersWorkspaceView({
   return (
     <section className={workspaceClassName}>
       <ActiveView
+        importOpen={importOpen}
+        notify={notify}
+        onClosePaperImport={onClosePaperImport}
+        onOpenPaperImport={onOpenPaperImport}
         onOpenReportQueue={onOpenReportQueue}
         onSelectPaper={onSelectPaper}
         selectedPaperId={selectedPaperId}

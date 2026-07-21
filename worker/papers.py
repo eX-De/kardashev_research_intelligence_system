@@ -11,7 +11,7 @@ from .db import clean_unicode, from_json, to_json, utc_now
 VALID_LIBRARY_STATUSES = {"candidate", "saved", "reading", "read", "archived", "discarded"}
 ARCHIVE_PROTECTED_STATUSES = {"saved", "reading", "read"}
 DEFAULT_HIDDEN_LIBRARY_STATUSES = {"archived", "discarded"}
-SOURCE_TYPES = {"arxiv", "url", "upload", "manual"}
+SOURCE_TYPES = {"arxiv", "url", "upload", "web", "manual"}
 
 
 def _row_value(row: Any, key: str, default: Any = "") -> Any:
@@ -407,8 +407,15 @@ def upsert_paper_from_arxiv(
     elif arxiv_id.startswith("reader-url-"):
         source_type = "url"
         long_term_arxiv_id = ""
-    link = _text(_row_value(paper, "link")) or (f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else "")
-    pdf_link = _text(_row_value(paper, "pdf_link")) or (f"https://arxiv.org/pdf/{arxiv_id}" if arxiv_id else "")
+    elif arxiv_id.startswith("reader-web-"):
+        source_type = "web"
+        long_term_arxiv_id = ""
+    link = _text(_row_value(paper, "link")) or (
+        f"https://arxiv.org/abs/{arxiv_id}" if source_type == "arxiv" and arxiv_id else ""
+    )
+    pdf_link = _text(_row_value(paper, "pdf_link")) or (
+        f"https://arxiv.org/pdf/{arxiv_id}" if source_type == "arxiv" and arxiv_id else ""
+    )
     categories = _json_list(_row_value(paper, "categories", _row_value(paper, "categories_json", [])))
     batch_id = _text(fetched_batch_id) or _text(_row_value(paper, "fetched_batch_id"))
     if requested_status == "candidate" and arxiv_id:
@@ -456,6 +463,7 @@ def upsert_imported_paper(
     arxiv_id: str = "",
     library_status: str = "saved",
     metadata: dict[str, object] | None = None,
+    fetched_batch_id: str = "reader-import",
 ) -> int:
     metadata_payload = dict(metadata or {})
     if pdf_url:
@@ -471,6 +479,7 @@ def upsert_imported_paper(
         arxiv_id=arxiv_id,
         library_status=library_status,
         metadata=metadata_payload,
+        fetched_batch_id=fetched_batch_id,
     )
     if pdf_url or pdf_path:
         upsert_paper_asset(conn, paper_id, asset_type="pdf", path=pdf_path, url=pdf_url, status="complete" if pdf_path else "pending")
@@ -589,6 +598,56 @@ def replace_paper_chunks_for_arxiv_paper(
     return replace_paper_chunks(conn, paper_id, chunks, text_asset_id=text_asset_id)
 
 
+def replace_existing_paper_chunks_for_arxiv_paper(
+    conn: DbConnection,
+    arxiv_paper: DbRow,
+    chunks: list[dict[str, Any]],
+) -> int:
+    arxiv_id = _text(_row_value(arxiv_paper, "arxiv_id"))
+    paper_id = paper_id_for_arxiv_id(conn, arxiv_id)
+    if paper_id is None:
+        return 0
+    upsert_paper_from_arxiv(conn, arxiv_paper)
+    _pdf_asset_id, text_asset_id = _sync_assets_from_arxiv_row(conn, paper_id, arxiv_paper)
+    return replace_paper_chunks(conn, paper_id, chunks, text_asset_id=text_asset_id)
+
+
+def _copy_arxiv_embeddings_to_library_paper(
+    conn: DbConnection,
+    paper_id: int,
+    arxiv_paper_id: int,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO paper_embeddings(paper_id, model, embedding_json, created_at)
+        SELECT ?, model, embedding_json, created_at
+        FROM arxiv_paper_embeddings
+        WHERE paper_id = ?
+        ON CONFLICT(paper_id, model) DO UPDATE SET
+          embedding_json = excluded.embedding_json,
+          created_at = excluded.created_at
+        """,
+        (int(paper_id), int(arxiv_paper_id)),
+    )
+    conn.execute(
+        """
+        INSERT INTO paper_chunk_embeddings(paper_chunk_id, model, embedding_json, created_at)
+        SELECT pc.id, source_embedding.model, source_embedding.embedding_json, source_embedding.created_at
+        FROM paper_chunks pc
+        JOIN arxiv_text_chunks source_chunk
+          ON source_chunk.paper_id = ?
+         AND source_chunk.chunk_index = pc.chunk_index
+        JOIN arxiv_chunk_embeddings source_embedding
+          ON source_embedding.arxiv_chunk_id = source_chunk.id
+        WHERE pc.paper_id = ?
+        ON CONFLICT(paper_chunk_id, model) DO UPDATE SET
+          embedding_json = excluded.embedding_json,
+          created_at = excluded.created_at
+        """,
+        (int(arxiv_paper_id), int(paper_id)),
+    )
+
+
 def mirror_arxiv_paper(
     conn: DbConnection,
     arxiv_paper: DbRow,
@@ -607,6 +666,7 @@ def mirror_arxiv_paper(
     ).fetchall()
     if chunks:
         replace_paper_chunks_for_arxiv_paper(conn, arxiv_paper, [dict(row) for row in chunks])
+    _copy_arxiv_embeddings_to_library_paper(conn, paper_id, int(arxiv_paper["id"]))
     return paper_id
 
 
@@ -660,13 +720,22 @@ def paper_id_for_arxiv_id(conn: DbConnection, arxiv_id: str) -> int | None:
 
 
 def paper_id_for_arxiv_paper_id(conn: DbConnection, arxiv_paper_id: int) -> int | None:
+    row = conn.execute("SELECT arxiv_id FROM arxiv_papers WHERE id = ?", (int(arxiv_paper_id),)).fetchone()
+    if not row:
+        return None
+    return paper_id_for_arxiv_id(conn, str(row["arxiv_id"]))
+
+
+def promote_arxiv_paper_to_library(
+    conn: DbConnection,
+    arxiv_paper_id: int,
+    *,
+    library_status: str = "candidate",
+) -> int | None:
     row = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (int(arxiv_paper_id),)).fetchone()
     if not row:
         return None
-    existing = paper_id_for_arxiv_id(conn, str(row["arxiv_id"]))
-    if existing:
-        return existing
-    return mirror_arxiv_paper(conn, row)
+    return mirror_arxiv_paper(conn, row, library_status=library_status)
 
 
 def set_library_status(
@@ -711,6 +780,8 @@ def set_library_status(
 def set_arxiv_paper_library_status(conn: DbConnection, arxiv_paper_id: int, status: str) -> dict[str, object]:
     paper_id = paper_id_for_arxiv_paper_id(conn, int(arxiv_paper_id))
     if paper_id is None:
+        paper_id = promote_arxiv_paper_to_library(conn, int(arxiv_paper_id), library_status=status)
+    if paper_id is None:
         raise RuntimeError(f"arXiv paper not found: {arxiv_paper_id}")
     return set_library_status(conn, paper_id, status)
 
@@ -744,6 +815,68 @@ def mark_arxiv_paper_archived(conn: DbConnection, arxiv_paper_id: int) -> dict[s
     if paper_id is None:
         return None
     return mark_paper_archived(conn, paper_id)
+
+
+def prune_unqualified_arxiv_library_papers(conn: DbConnection) -> dict[str, object]:
+    """Remove automatic arXiv mirrors that have no library-worthy relationship.
+
+    The discovery corpus remains in ``arxiv_papers``.  We only remove the
+    user-library projection when it has no pending/accepted recommendation and
+    no evidence of an explicit user action.
+    """
+    rows = conn.execute(
+        """
+        SELECT DISTINCT lp.id
+        FROM papers lp
+        JOIN paper_sources source
+          ON source.paper_id = lp.id
+         AND source.source_type = 'arxiv'
+        JOIN arxiv_papers ap ON ap.arxiv_id = source.source_identifier
+        WHERE lp.library_status IN ('candidate', 'archived')
+          AND lp.reading_state = 'unread'
+          AND COALESCE(lp.user_note, '') = ''
+          AND COALESCE(NULLIF(TRIM(lp.user_tags_json), ''), '[]') = '[]'
+          AND lp.saved_at IS NULL
+          AND lp.last_read_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM paper_sources other_source
+            WHERE other_source.paper_id = lp.id
+              AND other_source.source_type != 'arxiv'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM project_paper_recommendations recommendation
+            WHERE recommendation.paper_id = lp.id
+              AND recommendation.state IN ('pending', 'accepted')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM project_papers project_paper
+            WHERE project_paper.paper_id = lp.id
+              AND NOT (
+                project_paper.relation = 'candidate'
+                AND project_paper.note = 'auto_matched_by_project_context'
+              )
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM user_feedback feedback
+            WHERE feedback.paper_id = lp.id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM paper_reader_messages message
+            WHERE message.library_paper_id = lp.id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM artifacts artifact
+            WHERE artifact.scope_type = 'paper'
+              AND artifact.scope_id = lp.id
+          )
+        ORDER BY lp.id
+        """
+    ).fetchall()
+    paper_ids = [int(row["id"]) for row in rows]
+    for paper_id in paper_ids:
+        conn.execute("DELETE FROM papers WHERE id = ?", (paper_id,))
+    conn.commit()
+    return {"unqualified_library_papers_removed": len(paper_ids)}
 
 
 def arxiv_paper_has_protected_library_status(conn: DbConnection, arxiv_paper_id: int) -> bool:
@@ -802,9 +935,8 @@ def list_paper_library(
             """
             EXISTS (
               SELECT 1
-              FROM arxiv_papers ap
-              JOIN project_papers pp ON pp.paper_id = ap.id
-              WHERE ap.arxiv_id = p.arxiv_id
+              FROM project_papers pp
+              WHERE pp.paper_id = p.id
                 AND pp.project_id = ?
                 AND NOT (pp.relation = 'candidate' AND pp.note = 'auto_matched_by_project_context')
             )
@@ -898,32 +1030,28 @@ def paper_library_detail(conn: DbConnection, paper_id: int) -> dict[str, object]
         """,
         (int(paper_id),),
     ).fetchall()
-    arxiv_legacy = None
     linked_projects: list[dict[str, object]] = []
-    if paper["arxiv_id"]:
-        arxiv_legacy = conn.execute("SELECT id FROM arxiv_papers WHERE arxiv_id = ?", (paper["arxiv_id"],)).fetchone()
-        if arxiv_legacy:
-            project_rows = conn.execute(
-                """
-                SELECT pp.project_id, rp.name AS project_name, pp.relation, pp.note, pp.updated_at
-                FROM project_papers pp
-                JOIN research_projects rp ON rp.id = pp.project_id
-                WHERE pp.paper_id = ?
-                  AND NOT (pp.relation = 'candidate' AND pp.note = 'auto_matched_by_project_context')
-                ORDER BY pp.updated_at DESC
-                """,
-                (int(arxiv_legacy["id"]),),
-            ).fetchall()
-            linked_projects = [
-                {
-                    "project_id": int(project["project_id"]),
-                    "project_name": project["project_name"],
-                    "relation": project["relation"],
-                    "note": project["note"],
-                    "updated_at": project["updated_at"],
-                }
-                for project in project_rows
-            ]
+    project_rows = conn.execute(
+        """
+        SELECT pp.project_id, rp.name AS project_name, pp.relation, pp.note, pp.updated_at
+        FROM project_papers pp
+        JOIN research_projects rp ON rp.id = pp.project_id
+        WHERE pp.paper_id = ?
+          AND NOT (pp.relation = 'candidate' AND pp.note = 'auto_matched_by_project_context')
+        ORDER BY pp.updated_at DESC
+        """,
+        (int(paper_id),),
+    ).fetchall()
+    linked_projects = [
+        {
+            "project_id": int(project["project_id"]),
+            "project_name": project["project_name"],
+            "relation": project["relation"],
+            "note": project["note"],
+            "updated_at": project["updated_at"],
+        }
+        for project in project_rows
+    ]
     artifacts = conn.execute(
         """
         SELECT id, artifact_type, title, status, updated_at
@@ -935,7 +1063,6 @@ def paper_library_detail(conn: DbConnection, paper_id: int) -> dict[str, object]
     ).fetchall()
     return {
         "paper": paper,
-        "legacy_arxiv_paper_id": int(arxiv_legacy["id"]) if arxiv_legacy else None,
         "sources": [
             {
                 "id": int(source["id"]),

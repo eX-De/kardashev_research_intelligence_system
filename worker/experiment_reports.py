@@ -8,17 +8,20 @@ from .artifacts import (
     export_artifact_to_obsidian,
     update_artifact,
     upsert_artifact,
+    get_artifact,
 )
 from .config import Settings
-from .db import clean_unicode, utc_now
+from .db import clean_unicode, from_json, to_json, utc_now
 from .knowledge import save_project_context_document
 from .obsidian_remote import obsidian_remote_enabled
+from .pgvector_search import ensure_pgvector_indexes
 
 
 EXPERIMENT_REPORT_ARTIFACT_TYPE = "experiment_report"
 EXPERIMENT_REPORT_SOURCE_TYPE = "experiment_report"
 EXPERIMENT_REPORT_RELATION = "experiment_progress"
 VALID_SOURCE_AGENTS = {"codex", "claude-code", "manual"}
+EXPERIMENT_REPORT_INDEX_JOB = "experiment-report-index"
 
 
 def _required_text(payload: dict[str, object], key: str, *, max_chars: int) -> str:
@@ -87,6 +90,104 @@ def _export_status(status: str, **values: object) -> dict[str, object]:
     return {"status": status, "exported_at": utc_now(), **values}
 
 
+def enqueue_experiment_report_index(
+    conn: DbConnection,
+    settings: Settings,
+    artifact: dict[str, object],
+) -> dict[str, object]:
+    artifact_id = int(artifact["id"])
+    digest = str(artifact.get("input_hash") or "")
+    model = clean_unicode(settings.llm_embedding_model).strip()
+    rows = conn.execute(
+        """
+        SELECT id, payload_json
+        FROM worker_jobs
+        WHERE job_type = ? AND status IN ('queued', 'running')
+        ORDER BY id DESC
+        """,
+        (EXPERIMENT_REPORT_INDEX_JOB,),
+    ).fetchall()
+    for row in rows:
+        queued = from_json(row["payload_json"], {})
+        if (
+            isinstance(queued, dict)
+            and int(queued.get("artifact_id") or 0) == artifact_id
+            and str(queued.get("content_hash") or "") == digest
+            and str(queued.get("model") or "") == model
+        ):
+            return {"queued": False, "deduplicated": True, "worker_job_id": int(row["id"])}
+    now = utc_now()
+    cursor = conn.execute(
+        """
+        INSERT INTO worker_jobs(job_type, status, priority, payload_json, max_attempts, created_at, updated_at)
+        VALUES (?, 'queued', 15, ?, 3, ?, ?)
+        """,
+        (
+            EXPERIMENT_REPORT_INDEX_JOB,
+            to_json({
+                "command": EXPERIMENT_REPORT_INDEX_JOB,
+                "source": "experiment-report",
+                "artifact_id": artifact_id,
+                "content_hash": digest,
+                "model": model,
+            }),
+            now,
+            now,
+        ),
+    )
+    conn.commit()
+    return {"queued": True, "worker_job_id": int(cursor.lastrowid)}
+
+
+def index_experiment_report(conn: DbConnection, settings: Settings, artifact_id: int) -> dict[str, object]:
+    artifact = get_artifact(conn, int(artifact_id))
+    if not artifact or str(artifact.get("artifact_type") or "") != EXPERIMENT_REPORT_ARTIFACT_TYPE:
+        raise RuntimeError(f"Experiment report artifact not found: {artifact_id}")
+    project_id = int(artifact.get("scope_id") or 0)
+    if not project_id:
+        raise RuntimeError("Experiment report project_id is missing")
+    source = artifact.get("source") if isinstance(artifact.get("source"), dict) else {}
+    content = artifact.get("content_json") if isinstance(artifact.get("content_json"), dict) else {}
+    idempotency_key = clean_unicode(str(source.get("idempotency_key") or f"artifact-{artifact_id}"))
+    document = save_project_context_document(
+        conn,
+        settings,
+        project_id,
+        title=f"实验进展：{artifact.get('title') or 'Untitled'}",
+        raw_content=str(artifact.get("content_markdown") or ""),
+        source_type=EXPERIMENT_REPORT_SOURCE_TYPE,
+        source_uri=f"project:{project_id}:experiment_report:{idempotency_key}",
+        relation=EXPERIMENT_REPORT_RELATION,
+        weight=1.0,
+        metadata={
+            "created_from": "experiment_report",
+            "project_id": project_id,
+            "artifact_id": int(artifact_id),
+            "source_agent": source.get("source_agent") or content.get("source_agent") or "manual",
+            "idempotency_key": idempotency_key,
+            "received_at": source.get("received_at") or content.get("received_at") or artifact.get("created_at"),
+        },
+    )
+    try:
+        pgvector = ensure_pgvector_indexes(conn)
+    except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        pgvector = {"supported": False, "reason": "init_failed", "error": str(exc)[:500]}
+    content["knowledge_document"] = {
+        "document_id": int(document["document_id"]),
+        "chunks_created": int(document["chunks_created"]),
+        "embeddings_created": int(document["embeddings_created"]),
+        "relation": EXPERIMENT_REPORT_RELATION,
+        "source_type": EXPERIMENT_REPORT_SOURCE_TYPE,
+        "indexed_at": utc_now(),
+    }
+    updated = update_artifact(conn, int(artifact_id), content_json=content)
+    return {"artifact": updated, "knowledge_document": document, "pgvector": pgvector}
+
+
 def create_experiment_report(
     conn: DbConnection,
     settings: Settings,
@@ -133,42 +234,7 @@ def create_experiment_report(
         source_json=source_json,
         source_key=f"experiment_report:{idempotency_key}",
         input_hash=content_hash(markdown, {"report_json": report_json, "metadata": metadata}),
-        commit=False,
-    )
-
-    document = save_project_context_document(
-        conn,
-        settings,
-        project_id,
-        title=f"实验进展：{title}",
-        raw_content=markdown,
-        source_type=EXPERIMENT_REPORT_SOURCE_TYPE,
-        source_uri=f"project:{project_id}:experiment_report:{idempotency_key}",
-        relation=EXPERIMENT_REPORT_RELATION,
-        weight=1.0,
-        metadata={
-            "created_from": "experiment_report",
-            "project_id": project_id,
-            "artifact_id": int(artifact["id"]),
-            "source_agent": source_agent,
-            "idempotency_key": idempotency_key,
-            "received_at": received_at,
-        },
-        commit=False,
-    )
-
-    content_json["knowledge_document"] = {
-        "document_id": int(document["document_id"]),
-        "chunks_created": int(document["chunks_created"]),
-        "embeddings_created": int(document["embeddings_created"]),
-        "relation": EXPERIMENT_REPORT_RELATION,
-        "source_type": EXPERIMENT_REPORT_SOURCE_TYPE,
-    }
-    artifact = update_artifact(
-        conn,
-        int(artifact["id"]),
-        content_json=content_json,
-        commit=False,
+        commit=True,
     )
 
     obsidian = _export_status("skipped", reason="obsidian_not_configured")
@@ -185,12 +251,37 @@ def create_experiment_report(
         conn,
         int(artifact["id"]),
         content_json=content_json,
-        commit=False,
+        commit=True,
     )
-    conn.commit()
+    index_job = enqueue_experiment_report_index(conn, settings, artifact)
     return {
         "ok": True,
         "artifact": artifact,
-        "knowledge_document": document,
+        "knowledge_document": {"status": "queued", **index_job},
         "obsidian": obsidian,
     }
+
+
+def backfill_experiment_report_indexes(conn: DbConnection, settings: Settings) -> dict[str, int]:
+    """Repair historical experiment reports through their canonical knowledge-document path."""
+    rows = conn.execute(
+        """
+        SELECT id
+        FROM artifacts
+        WHERE artifact_type = ? AND status = 'ready'
+        ORDER BY id
+        """,
+        (EXPERIMENT_REPORT_ARTIFACT_TYPE,),
+    ).fetchall()
+    result = {
+        "experiment_reports_considered": len(rows),
+        "experiment_report_documents_repaired": 0,
+        "experiment_report_embeddings_created": 0,
+    }
+    for row in rows:
+        indexed = index_experiment_report(conn, settings, int(row["id"]))
+        document = indexed["knowledge_document"]
+        if int(document.get("indexed") or 0):
+            result["experiment_report_documents_repaired"] += 1
+        result["experiment_report_embeddings_created"] += int(document.get("embeddings_created") or 0)
+    return result

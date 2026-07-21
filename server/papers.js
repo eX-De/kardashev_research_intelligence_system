@@ -2,10 +2,13 @@ import { createHash } from "node:crypto";
 
 import { NotFoundError, ValidationError, maybeOne, parseJson, query, toJson, withTransaction } from "./db.js";
 import { DEFAULT_PAPER_READER_PROMPT } from "./settings.js";
-import { ensureLibraryPaperIdForLegacyPaper, getReaderPaperDetail } from "./reader.js";
+import {
+  ensureLibraryPaperIdForLegacyPaper,
+  getReaderPaperDetail
+} from "./reader.js";
 
 const PAPER_REPORT_ARTIFACT_TYPE = "paper_report";
-const PAPER_READER_ANALYSIS_SYSTEM = "You are a research paper reading assistant. Read the supplied full PDF text and answer accurately from it.";
+const PAPER_READER_ANALYSIS_SYSTEM = "You are a research document reading assistant. Read the supplied cleaned document text and answer accurately from it.";
 const REPORT_RELATIONS = ["direct", "indirect"];
 const REPORT_CONFIDENCE_THRESHOLD = 0.65;
 const REPORT_USEFULNESS_THRESHOLD = 0.6;
@@ -67,15 +70,14 @@ function readingStateForStatus(status, existing = "") {
   return text(existing) || "unread";
 }
 
-async function legacyPaper(db, legacyPaperId) {
-  const result = await db.query("SELECT * FROM arxiv_papers WHERE id = $1", [Number(legacyPaperId)]);
+async function canonicalPaper(db, paperId) {
+  const result = await db.query("SELECT * FROM papers WHERE id = $1", [Number(paperId)]);
   const row = maybeOne(result);
-  if (!row) throw new NotFoundError(`Paper not found: ${legacyPaperId}`);
+  if (!row) throw new NotFoundError(`Paper not found: ${paperId}`);
   return row;
 }
 
-async function reportArtifactRow(db, legacyPaperId, libraryPaperId) {
-  if (!libraryPaperId) return null;
+async function reportArtifactRow(db, paperId) {
   const result = await db.query(
     `
       SELECT *
@@ -83,13 +85,10 @@ async function reportArtifactRow(db, legacyPaperId, libraryPaperId) {
       WHERE scope_type = 'paper'
         AND scope_id = $1
         AND artifact_type = $2
-      ORDER BY
-        CASE WHEN source_json::jsonb ->> 'source_key' = $3 THEN 0 ELSE 1 END,
-        updated_at DESC,
-        id DESC
+      ORDER BY updated_at DESC, id DESC
       LIMIT 1
     `,
-    [Number(libraryPaperId), PAPER_REPORT_ARTIFACT_TYPE, `paper_report:${Number(legacyPaperId)}`]
+    [Number(paperId), PAPER_REPORT_ARTIFACT_TYPE]
   );
   return maybeOne(result);
 }
@@ -103,7 +102,11 @@ async function sourceProjectsForRecommendedPapers(db, paperIds = null) {
       JOIN research_projects rp ON rp.id = r.project_id
       WHERE r.state IN ('pending', 'accepted')
         AND rp.status NOT IN ('paused', 'archived')
-        AND ($1::bigint[] IS NULL OR r.paper_id = ANY($1::bigint[]))
+        AND (
+          $1::bigint[] IS NULL
+          OR r.paper_id = ANY($1::bigint[])
+          OR r.source_arxiv_paper_id = ANY($1::bigint[])
+        )
       ORDER BY r.paper_id, r.project_id
     `,
     [normalizedIds && normalizedIds.length ? normalizedIds : null]
@@ -121,7 +124,6 @@ async function sourceProjectsForRecommendedPapers(db, paperIds = null) {
 async function savePaperReportState(db, state) {
   const content = {
     paper_id: Number(state.library_paper_id),
-    legacy_arxiv_paper_id: Number(state.paper_id),
     arxiv_id: state.arxiv_id || "",
     link: state.link || "",
     prompt: state.prompt || "",
@@ -132,9 +134,8 @@ async function savePaperReportState(db, state) {
     finished_at: state.finished_at ?? null
   };
   const source = {
-    source_key: `paper_report:${Number(state.paper_id)}`,
+    source_key: `paper_report:${Number(state.library_paper_id)}`,
     generated_from: "paper_report_queue",
-    legacy_arxiv_paper_id: Number(state.paper_id),
     source_text_hash: state.source_text_hash || ""
   };
   const markdown = state.report_markdown || "";
@@ -197,15 +198,12 @@ async function savePaperReportState(db, state) {
   return Number(inserted.rows[0].id);
 }
 
-async function setLegacyPaperLibraryStatus(db, legacyPaperId, status) {
-  const paper = await legacyPaper(db, legacyPaperId);
-  const libraryPaperId = await ensureLibraryPaperIdForLegacyPaper(db, paper);
-  const existing = await db.query("SELECT reading_state, saved_at, last_read_at FROM papers WHERE id = $1", [libraryPaperId]);
-  const existingRow = maybeOne(existing) || {};
+async function setPaperLibraryStatus(db, paperId, status) {
+  const paper = await canonicalPaper(db, paperId);
   const now = nowIso();
-  const savedAt = ["saved", "reading", "read"].includes(status) && !existingRow.saved_at ? now : existingRow.saved_at;
-  const lastReadAt = status === "read" ? now : existingRow.last_read_at;
-  const readingState = readingStateForStatus(status, existingRow.reading_state);
+  const savedAt = ["saved", "reading", "read"].includes(status) && !paper.saved_at ? now : paper.saved_at;
+  const lastReadAt = status === "read" ? now : paper.last_read_at;
+  const readingState = readingStateForStatus(status, paper.reading_state);
   await db.query(
     `
       UPDATE papers
@@ -216,16 +214,16 @@ async function setLegacyPaperLibraryStatus(db, legacyPaperId, status) {
           updated_at = $5
       WHERE id = $6
     `,
-    [status, readingState, savedAt, lastReadAt, now, libraryPaperId]
+    [status, readingState, savedAt, lastReadAt, now, Number(paperId)]
   );
-  return { ok: true, paper_id: libraryPaperId, library_status: status, reading_state: readingState };
+  return { ok: true, paper_id: Number(paperId), library_status: status, reading_state: readingState };
 }
 
 async function acceptRecommendationsForPaper(db, paperId, projectIds, importance) {
   if (!VALID_IMPORTANCE.has(importance)) throw new ValidationError("importance must be high, medium, or low");
   const selectedIds = parseIntegerList(projectIds);
   if (!selectedIds.length) throw new ValidationError("At least one project must be selected");
-  await legacyPaper(db, paperId);
+  await canonicalPaper(db, paperId);
   const found = await db.query(
     `
       SELECT project_id
@@ -284,7 +282,7 @@ async function acceptRecommendationsForPaper(db, paperId, projectIds, importance
 }
 
 async function discardRecommendationsForPaper(db, paperId, projectIds = null) {
-  await legacyPaper(db, paperId);
+  await canonicalPaper(db, paperId);
   const selectedIds = projectIds === null ? null : parseIntegerList(projectIds);
   const now = nowIso();
   if (selectedIds && selectedIds.length) {
@@ -313,18 +311,16 @@ async function discardRecommendationsForPaper(db, paperId, projectIds = null) {
   );
 }
 
-async function paperReportState(db, legacyPaperId) {
-  const paper = await legacyPaper(db, legacyPaperId);
-  const libraryPaperId = await ensureLibraryPaperIdForLegacyPaper(db, paper);
-  if (!libraryPaperId) return null;
-  const row = await reportArtifactRow(db, legacyPaperId, libraryPaperId);
+async function paperReportState(db, paperId) {
+  const paper = await canonicalPaper(db, paperId);
+  const row = await reportArtifactRow(db, paperId);
   const content = reportContent(row);
   const source = reportSource(row);
   const now = nowIso();
   return {
     artifact_id: row ? Number(row.id) : null,
-    paper_id: Number(legacyPaperId),
-    library_paper_id: libraryPaperId,
+    paper_id: Number(paperId),
+    library_paper_id: Number(paperId),
     arxiv_id: paper.arxiv_id || "",
     link: paper.link || "",
     title: paper.title || "",
@@ -355,12 +351,29 @@ export async function syncProjectPaperRecommendations(paperIds = null) {
           j.relation_type,
           j.reason,
           j.input_hash,
-          r.state AS existing_state
+          r.state AS existing_state,
+          r.paper_id AS existing_paper_id,
+          p.arxiv_id,
+          p.title,
+          p.authors_json,
+          p.summary,
+          p.categories_json,
+          p.published_at,
+          p.updated_at AS arxiv_updated_at,
+          p.link,
+          p.pdf_link,
+          p.pdf_path,
+          p.text_path,
+          p.text_status,
+          p.text_error,
+          p.text_char_count,
+          p.fetched_batch_id
         FROM project_paper_judgments j
         JOIN arxiv_papers p ON p.id = j.paper_id
         JOIN research_projects rp ON rp.id = j.project_id
         LEFT JOIN project_paper_recommendations r
-          ON r.project_id = j.project_id AND r.paper_id = j.paper_id
+          ON r.project_id = j.project_id
+         AND r.source_arxiv_paper_id = j.paper_id
         WHERE j.relation_type = ANY($1::text[])
           AND j.suggested_action != 'ignore'
           AND j.confidence >= $2
@@ -399,17 +412,22 @@ export async function syncProjectPaperRecommendations(paperIds = null) {
     const now = nowIso();
     for (const row of rows.rows || []) {
       const existingState = text(row.existing_state);
+      const libraryPaperId = await ensureLibraryPaperIdForLegacyPaper(client, {
+        ...row,
+        updated_at: row.arxiv_updated_at
+      });
       if (existingState === "accepted" || existingState === "discarded") preserved += 1;
       else if (existingState) refreshed += 1;
       else inserted += 1;
       await client.query(
         `
           INSERT INTO project_paper_recommendations(
-            project_id, paper_id, state, importance, relation_type, reason,
+            project_id, paper_id, source_arxiv_paper_id, state, importance, relation_type, reason,
             source_judgment_hash, created_at, updated_at
           )
-          VALUES ($1, $2, 'pending', '', $3, $4, $5, $6, $6)
+          VALUES ($1, $2, $3, 'pending', '', $4, $5, $6, $7, $7)
           ON CONFLICT(project_id, paper_id) DO UPDATE SET
+            source_arxiv_paper_id = excluded.source_arxiv_paper_id,
             relation_type = excluded.relation_type,
             reason = excluded.reason,
             source_judgment_hash = excluded.source_judgment_hash,
@@ -417,6 +435,7 @@ export async function syncProjectPaperRecommendations(paperIds = null) {
         `,
         [
           Number(row.project_id),
+          Number(libraryPaperId),
           Number(row.paper_id),
           row.relation_type || "",
           row.reason || "",
@@ -522,9 +541,11 @@ export async function getInbox() {
         p.arxiv_id,
         p.title,
         p.authors_json,
-        p.categories_json,
+        COALESCE(source.metadata_json::jsonb -> 'categories', '[]'::jsonb)::text AS categories_json,
         p.published_at,
-        p.link,
+        COALESCE(source.source_url, '') AS link,
+        p.id AS library_paper_id,
+        r.source_arxiv_paper_id,
         r.project_id,
         rp.name AS project_name,
         r.relation_type,
@@ -535,37 +556,29 @@ export async function getInbox() {
         rr.status AS report_status,
         rr.content_json AS report_content_json,
         rr.updated_at AS report_updated_at
-      FROM arxiv_papers p
+      FROM papers p
       JOIN pending_recommendations r ON r.paper_id = p.id AND r.rn = 1
       JOIN research_projects rp ON rp.id = r.project_id
       LEFT JOIN project_paper_judgments j
-        ON j.project_id = r.project_id AND j.paper_id = r.paper_id
-      LEFT JOIN (
-        SELECT ps.source_identifier AS arxiv_id, af.status, af.content_json, af.updated_at
+        ON j.project_id = r.project_id AND j.paper_id = r.source_arxiv_paper_id
+      LEFT JOIN LATERAL (
+        SELECT ps.source_url, ps.metadata_json
+        FROM paper_sources ps
+        WHERE ps.paper_id = p.id
+        ORDER BY ps.updated_at DESC, ps.id DESC
+        LIMIT 1
+      ) source ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT af.status, af.content_json, af.updated_at
         FROM artifacts af
-        JOIN paper_sources ps ON ps.paper_id = af.scope_id
         WHERE af.scope_type = 'paper'
+          AND af.scope_id = p.id
           AND af.artifact_type = $1
           AND af.status != 'removed'
-      ) rr ON rr.arxiv_id = p.arxiv_id
-      WHERE NOT EXISTS (
-          SELECT 1 FROM arxiv_paper_tombstones t
-          WHERE t.arxiv_id = p.arxiv_id
-        )
-        AND NOT EXISTS (
-          SELECT 1
-          FROM papers lp
-          WHERE lp.arxiv_id = p.arxiv_id
-            AND lp.library_status IN ('archived', 'discarded')
-        )
-        AND NOT EXISTS (
-          SELECT 1
-          FROM paper_sources ps
-          JOIN papers lp ON lp.id = ps.paper_id
-          WHERE ps.source_type = 'arxiv'
-            AND ps.source_identifier = p.arxiv_id
-            AND lp.library_status IN ('archived', 'discarded')
-        )
+        ORDER BY af.updated_at DESC, af.id DESC
+        LIMIT 1
+      ) rr ON TRUE
+      WHERE p.library_status NOT IN ('archived', 'discarded')
       ORDER BY
         CASE r.relation_type WHEN 'direct' THEN 0 ELSE 1 END,
         COALESCE(j.usefulness_score, 0) DESC,
@@ -580,6 +593,8 @@ export async function getInbox() {
       const reportContentJson = reportContent({ content_json: row.report_content_json });
       return {
         id: Number(row.id),
+        library_paper_id: Number(row.id),
+        source_arxiv_paper_id: Number(row.source_arxiv_paper_id || 0),
         arxiv_id: row.arxiv_id || "",
         title: row.title || "",
         authors: parseJson(row.authors_json, []),
@@ -603,23 +618,21 @@ export async function getInbox() {
   };
 }
 
-export async function getLegacyPaperDetail(paperId) {
+export async function getPaperDetail(paperId) {
   const id = positiveId(paperId, "paper_id");
-  await syncProjectPaperRecommendations([id]);
-  await ensurePaperReportsForRecommendations([id]);
+  await canonicalPaper({ query }, id);
   return getReaderPaperDetail(id);
 }
 
 export async function updatePaperRecommendation(paperId, payload = {}) {
   const id = positiveId(paperId, "paper_id");
   const action = text(payload.action).toLowerCase();
-  await syncProjectPaperRecommendations([id]);
   if (action === "accept") {
     const projectIds = parseIntegerList(payload.project_ids);
     const importance = text(payload.importance).toLowerCase();
     return withTransaction(async (client) => {
       await acceptRecommendationsForPaper(client, id, projectIds, importance);
-      const library = await setLegacyPaperLibraryStatus(client, id, "reading");
+      const library = await setPaperLibraryStatus(client, id, "reading");
       const detail = await getReaderPaperDetail(id, client);
       return { ...detail, ok: true, library, sync: { skipped: true, reason: "node_crud_recommendation_update" } };
     });
@@ -628,12 +641,7 @@ export async function updatePaperRecommendation(paperId, payload = {}) {
     const projectIds = Array.isArray(payload.project_ids) ? parseIntegerList(payload.project_ids) : null;
     return withTransaction(async (client) => {
       await discardRecommendationsForPaper(client, id, projectIds);
-      let library = null;
-      try {
-        library = await setLegacyPaperLibraryStatus(client, id, "discarded");
-      } catch {
-        library = null;
-      }
+      const library = await setPaperLibraryStatus(client, id, "discarded");
       return { ok: true, paper_id: id, action: "discard", library };
     });
   }
@@ -645,7 +653,7 @@ export async function savePaperFeedback(paperId, statusValue, note = "") {
   const status = text(statusValue);
   if (!VALID_FEEDBACK.has(status)) throw new ValidationError(`Invalid feedback status: ${status}`);
   return withTransaction(async (client) => {
-    const paper = await legacyPaper(client, id);
+    const paper = await canonicalPaper(client, id);
     const now = nowIso();
     await client.query(
       `
@@ -657,7 +665,6 @@ export async function savePaperFeedback(paperId, statusValue, note = "") {
       `,
       [id, status, text(note), now]
     );
-    const libraryPaperId = await ensureLibraryPaperIdForLegacyPaper(client, paper);
     const statusMap = {
       read_later: "saved",
       favorite: "saved",
@@ -665,7 +672,7 @@ export async function savePaperFeedback(paperId, statusValue, note = "") {
       not_relevant: "discarded"
     };
     const libraryStatus = statusMap[status];
-    const existing = await client.query("SELECT reading_state, saved_at, last_read_at FROM papers WHERE id = $1", [libraryPaperId]);
+    const existing = await client.query("SELECT reading_state, saved_at, last_read_at FROM papers WHERE id = $1", [id]);
     const existingRow = maybeOne(existing) || {};
     const savedAt = ["saved", "reading", "read"].includes(libraryStatus) && !existingRow.saved_at ? now : existingRow.saved_at;
     const lastReadAt = libraryStatus === "read" ? now : existingRow.last_read_at;
@@ -685,7 +692,7 @@ export async function savePaperFeedback(paperId, statusValue, note = "") {
         savedAt,
         lastReadAt,
         now,
-        libraryPaperId
+        id
       ]
     );
     return {
@@ -695,7 +702,7 @@ export async function savePaperFeedback(paperId, statusValue, note = "") {
       arxiv_id: paper.arxiv_id || "",
       library: {
         ok: true,
-        paper_id: libraryPaperId,
+        paper_id: id,
         library_status: libraryStatus,
         reading_state: readingStateForStatus(libraryStatus, existingRow.reading_state)
       }

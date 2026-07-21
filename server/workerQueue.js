@@ -176,6 +176,22 @@ export async function countActiveWorkerJobs(jobType = "") {
   return Number(result.rows?.[0]?.count || 0);
 }
 
+export async function getWorkerJob(workerJobId) {
+  const id = Number(workerJobId);
+  if (!Number.isInteger(id) || id <= 0) throw new ValidationError("worker job id must be a positive integer");
+  const result = await query(
+    `
+      SELECT id, job_run_id, job_type, status, priority, payload_json, result_json,
+             error_message, attempts, max_attempts, run_after, locked_by, locked_at,
+             created_at, updated_at, started_at, finished_at
+      FROM worker_jobs
+      WHERE id = $1
+    `,
+    [id]
+  );
+  return workerJobRow(result.rows?.[0]);
+}
+
 export async function claimNextWorkerJob({ workerId, now = isoNow() } = {}) {
   const normalizedWorkerId = cleanWorkerId(workerId);
   return withTransaction(async (client) => {

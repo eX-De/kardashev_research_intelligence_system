@@ -4,6 +4,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any
 
 from .artifacts import ARTIFACT_STATUS_READY, content_hash as artifact_content_hash, update_artifact, upsert_artifact
+from .artifact_index import enqueue_artifact_index
 from .config import Settings
 from .db import clean_unicode, from_json, to_json
 from .db_types import DbConnection, DbRow
@@ -409,13 +410,14 @@ def refresh_project_chat_profiles(conn: DbConnection, settings: Settings) -> dic
         if not has_project_material:
             existing = _existing_profile_artifact(conn, int(project["id"]))
             if existing and str(existing["status"] or "") == ARTIFACT_STATUS_READY:
-                update_artifact(
+                stale_artifact = update_artifact(
                     conn,
                     int(existing["id"]),
                     status="stale",
                     source_json={**source, "source_key": _profile_source_key(int(project["id"]))},
                     input_hash=artifact_content_hash("", source),
                 )
+                enqueue_artifact_index(conn, settings, stale_artifact)
                 result["project_chat_profiles_invalidated"] = int(
                     result["project_chat_profiles_invalidated"] or 0
                 ) + 1
@@ -469,7 +471,7 @@ def refresh_project_chat_profiles(conn: DbConnection, settings: Settings) -> dic
             continue
 
         try:
-            upsert_artifact(
+            artifact = upsert_artifact(
                 conn,
                 scope_type="project",
                 scope_id=int(project["id"]),
@@ -484,6 +486,7 @@ def refresh_project_chat_profiles(conn: DbConnection, settings: Settings) -> dic
                 model=model,
                 input_hash=str(item["input_hash"]),
             )
+            enqueue_artifact_index(conn, settings, artifact)
             count_key = "project_chat_profiles_updated" if item["existing"] else "project_chat_profiles_created"
             result[count_key] = int(result[count_key] or 0) + 1
         except Exception as exc:  # Database writes remain serialized on the owning connection.

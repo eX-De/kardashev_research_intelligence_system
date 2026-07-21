@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 
 import { api, fmtDate } from "../lib/dashboard.js";
 import { cacheNamespace, useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
@@ -64,6 +65,12 @@ function safeToken(value, fallback = "unknown") {
   return token || fallback;
 }
 
+function relationLabel(relationType) {
+  if (relationType === "direct") return "直接相关";
+  if (relationType === "indirect") return "间接相关";
+  return relationType || "可能相关";
+}
+
 function sortArtifactsByUpdatedAt(left, right) {
   return new Date(right.updated_at || 0) - new Date(left.updated_at || 0);
 }
@@ -121,6 +128,14 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
     { enabled: Boolean(detailId), staleTime: 300000 }
   );
   const detail = detailQuery.data?.artifact || null;
+  const relatedPapers = Array.isArray(detail?.related_papers)
+    ? detail.related_papers
+    : [];
+  const dailyCandidateCount = new Set(
+    (Array.isArray(detail?.source?.project_candidates) ? detail.source.project_candidates : [])
+      .map((candidate) => String(candidate?.arxiv_id || "").trim())
+      .filter(Boolean)
+  ).size;
   const listLoading = !listQuery.hasData;
   const detailMatchesActiveArtifact = Boolean(detail?.id) && Number(detail.id) === Number(detailId);
   const detailLoading = Boolean(detailId) && (
@@ -174,6 +189,13 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
   function updateFilter(setter, value) {
     selectFirstFromNextList.current = true;
     setter(value);
+    setPage(1);
+  }
+
+  function clearFilters() {
+    selectFirstFromNextList.current = true;
+    setArtifactType("");
+    setScopeType("");
     setPage(1);
   }
 
@@ -267,15 +289,20 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
                   ? activeFilterLabels.map((label) => <span key={label}>{label}</span>)
                   : <span>全部产物</span>}
               </div>
-              <button
-                aria-controls="artifact-filter-panel"
-                aria-expanded={filtersOpen}
-                className="left-filter-toggle"
-                onClick={() => setFiltersOpen((current) => !current)}
-                type="button"
-              >
-                {filtersOpen ? "收起筛选" : `筛选${activeFilterCount ? ` (${activeFilterCount})` : ""}`}
-              </button>
+              <div className="artifact-filter-summary-actions">
+                {activeFilterCount ? (
+                  <button className="filter-clear-button" onClick={clearFilters} type="button">清除筛选</button>
+                ) : null}
+                <button
+                  aria-controls="artifact-filter-panel"
+                  aria-expanded={filtersOpen}
+                  className="left-filter-toggle"
+                  onClick={() => setFiltersOpen((current) => !current)}
+                  type="button"
+                >
+                  {filtersOpen ? "收起筛选" : `筛选${activeFilterCount ? ` (${activeFilterCount})` : ""}`}
+                </button>
+              </div>
             </div>
             <div
               aria-hidden={!filtersOpen}
@@ -403,6 +430,55 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
                   <div><span>当前状态</span><strong>{labelFor(STATUS_LABELS, detail.status, "未知")}</strong><p>产物生命周期</p></div>
                   <div><span>生成模型</span><strong>{detail.model || "—"}</strong><p>{detail.model_provider_id || "未记录提供方"}</p></div>
                 </section>
+
+                {detail.artifact_type === "daily_report" ? (
+                  <section className="library-content-card artifact-related-papers-card">
+                    <header className="library-section-heading">
+                      <div><span>日报关联</span><h3>关联论文</h3></div>
+                      <em>{relatedPapers.length ? `${relatedPapers.length} 篇` : "无关联"}</em>
+                    </header>
+                    {relatedPapers.length ? (
+                      <div className="artifact-related-paper-list">
+                        {relatedPapers.map((paper) => {
+                          const pending = paper.state === "pending";
+                          const paperPath = pending
+                            ? `/papers/inbox/${encodeURIComponent(String(paper.id))}`
+                            : paper.library_paper_id
+                              ? `/papers/library/${encodeURIComponent(String(paper.library_paper_id))}`
+                              : "/papers/library";
+                          return (
+                            <article className="artifact-related-paper" key={paper.id}>
+                              <Link className="artifact-related-paper-title" to={paperPath}>
+                                <span>{paper.arxiv_id || "arXiv"}</span>
+                                <strong>{paper.title}</strong>
+                                <i aria-hidden="true">{pending ? "打开待判断 →" : "打开论文仓库 →"}</i>
+                              </Link>
+                              <div className="artifact-related-paper-meta">
+                                <span className={`artifact-related-paper-state ${pending ? "pending" : "assigned"}`}>
+                                  {pending ? "待判断" : "已分配"}
+                                </span>
+                                <span>{relationLabel(paper.relation_type)}</span>
+                                {paper.published_at ? <span>{fmtDate(paper.published_at)}</span> : null}
+                                {(paper.projects || []).map((project) => (
+                                  <Link key={project.project_id} to={`/projects/${encodeURIComponent(String(project.project_id))}`}>
+                                    {project.project_name}
+                                  </Link>
+                                ))}
+                              </div>
+                              {paper.reason ? <p>{paper.reason}</p> : null}
+                            </article>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="artifact-related-paper-empty">
+                        {dailyCandidateCount
+                          ? "本日报当前没有待判断或已分配的关联论文。"
+                          : "本日报没有关联的项目候选论文。"}
+                      </p>
+                    )}
+                  </section>
+                ) : null}
 
                 <div className="library-detail-content artifact-detail-content">
                   <section className="section inbox-content-section library-content-card artifact-markdown-card">

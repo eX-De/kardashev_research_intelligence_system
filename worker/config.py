@@ -89,6 +89,7 @@ class Settings:
     project_chat_profile_provider_id: str = ""
     project_chat_profile_model: str = ""
     project_chat_profile_concurrency: int = 2
+    project_judgment_concurrency: int = 3
     reader_chat_provider_id: str = ""
     reader_chat_model: str = ""
     reader_smart_save_provider_id: str = ""
@@ -224,6 +225,7 @@ def load_settings() -> Settings:
         project_chat_profile_provider_id=env_value("PROJECT_CHAT_PROFILE_PROVIDER_ID", ""),
         project_chat_profile_model=env_value("PROJECT_CHAT_PROFILE_MODEL", ""),
         project_chat_profile_concurrency=_positive_int("PROJECT_CHAT_PROFILE_CONCURRENCY", 2, maximum=8),
+        project_judgment_concurrency=_positive_int("PROJECT_JUDGMENT_CONCURRENCY", 3, maximum=8),
         reader_chat_provider_id=env_value("READER_CHAT_PROVIDER_ID", ""),
         reader_chat_model=env_value("READER_CHAT_MODEL", ""),
         reader_smart_save_provider_id=env_value("READER_SMART_SAVE_PROVIDER_ID", ""),

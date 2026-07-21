@@ -5,6 +5,7 @@ from helpers import connect_test_db
 from worker.cli import _run_daily_step, _with_deadlock_retry
 from worker.db import from_json, job_run
 from worker.paper_reports import paper_report_payload, process_paper_report_queue, queue_paper_report
+from worker.papers import promote_arxiv_paper_to_library
 
 
 class AbortSimConnection:
@@ -124,7 +125,8 @@ class TransactionRecoveryTests(unittest.TestCase):
               'complete', 'batch', 'now')
             """
         )
-        paper_id = int(base.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+        legacy_paper_id = int(base.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+        paper_id = int(promote_arxiv_paper_to_library(base, legacy_paper_id) or 0)
         queue_paper_report(base, paper_id)
         base.commit()
         conn = AbortSimConnection(base)

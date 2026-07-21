@@ -87,7 +87,7 @@ function dashboardRunState(currentJob, latestJob) {
   };
 }
 
-function dashboardHeroCopy({ dailyRunNotification, recoverableNotification, arxivRateLimitNotification, runState }) {
+function dashboardHeroCopy({ dailyRunNotification, dailyReportNotification, recoverableNotification, arxivRateLimitNotification, runState }) {
   if (dailyRunNotification) {
     return {
       title: "每日流程正在推进",
@@ -99,6 +99,13 @@ function dashboardHeroCopy({ dailyRunNotification, recoverableNotification, arxi
     return {
       title: "每日流程可以从中断处继续",
       detail: "已完成的阶段会保留；你可以继续处理，或明确选择重新执行。"
+    };
+  }
+
+  if (dailyReportNotification) {
+    return {
+      title: "今日科研情报日报已就绪",
+      detail: "本轮每日流程已经完成；你可以直接打开日报查看筛选结果与项目级判断。"
     };
   }
 
@@ -135,9 +142,10 @@ function dashboardHeroCopy({ dailyRunNotification, recoverableNotification, arxi
   return copy[runState.kind] || copy.idle;
 }
 
-function dashboardTopStatus({ dailyRunNotification, recoverableNotification, arxivRateLimitNotification, runState }) {
+function dashboardTopStatus({ dailyRunNotification, dailyReportNotification, recoverableNotification, arxivRateLimitNotification, runState }) {
   if (dailyRunNotification) return { tone: "running", label: "每日流程运行中" };
   if (recoverableNotification) return { tone: "queued", label: "可继续执行" };
+  if (dailyReportNotification) return { tone: "ready", label: "每日报告已就绪" };
   if (arxivRateLimitNotification || runState.kind === "failed") return { tone: "attention", label: "需要处理" };
   if (runState.kind === "running") return { tone: "running", label: "后台任务运行中" };
   if (runState.kind === "queued") return { tone: "queued", label: "任务排队中" };
@@ -311,6 +319,21 @@ function DailyRunIssueCard({ item, onRunNow }) {
   );
 }
 
+function DailyReportReadyCard({ item }) {
+  const artifactId = Number(item?.source?.artifact_id || 0);
+  return (
+    <article className="vision-run-card ready">
+      <strong>{item?.title || "每日报告已生成"}</strong>
+      <p>{item?.detail || "本轮每日流程已经完成，日报可以查看。"}</p>
+      {artifactId > 0 ? (
+        <div className="vision-run-actions">
+          <Link className="primary" to={artifactPath(artifactId)}>查看每日报告</Link>
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
 export function DashboardView({ setStatusMessage, notify = () => {} }) {
   const [updateDialog, setUpdateDialog] = useState(null);
   const healthQuery = useCachedApi(["health", "summary"], () => api("/api/health/summary"), { staleTime: 60000 });
@@ -346,12 +369,16 @@ export function DashboardView({ setStatusMessage, notify = () => {} }) {
   const reportCount = counts.paper_report_artifacts ?? counts.paper_reading_reports ?? 0;
   const runState = dashboardRunState(currentJob, latestJob);
   const dailyRunNotification = notifications.find((item) => item.progress);
+  const dailyReportNotification = notifications.find((item) => (
+    item.type === "daily_run_completed" && Number(item?.source?.artifact_id || 0) > 0
+  ));
   const recoverableNotification = notifications.find((item) => item.type === "daily_run_recoverable");
   const arxivRateLimitNotification = notifications.find((item) => item.type === "arxiv_rate_limited");
-  const heroCopy = dashboardHeroCopy({ dailyRunNotification, recoverableNotification, arxivRateLimitNotification, runState });
-  const topStatus = dashboardTopStatus({ dailyRunNotification, recoverableNotification, arxivRateLimitNotification, runState });
+  const heroCopy = dashboardHeroCopy({ dailyRunNotification, dailyReportNotification, recoverableNotification, arxivRateLimitNotification, runState });
+  const topStatus = dashboardTopStatus({ dailyRunNotification, dailyReportNotification, recoverableNotification, arxivRateLimitNotification, runState });
   const listNotifications = notifications.filter((item) => (
     item.id !== dailyRunNotification?.id
+    && item.id !== dailyReportNotification?.id
     && item.id !== recoverableNotification?.id
     && item.id !== arxivRateLimitNotification?.id
   ));
@@ -450,6 +477,8 @@ export function DashboardView({ setStatusMessage, notify = () => {} }) {
                 onResume={resumeDailyRun}
                 onRunNow={runDailyNow}
               />
+            ) : dailyReportNotification ? (
+              <DailyReportReadyCard item={dailyReportNotification} />
             ) : arxivRateLimitNotification ? (
               <DailyRunIssueCard
                 item={arxivRateLimitNotification}

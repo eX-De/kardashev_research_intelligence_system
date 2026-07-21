@@ -1,6 +1,6 @@
 {
   "name": "research-intelligence-system",
-  "version": "0.4.2",
+  "version": "0.4.5",
   "license": "AGPL-3.0-only",
   "private": true,
   "type": "module",
@@ -11,8 +11,9 @@
     "start": "npm run build && node scripts/start.js",
     "start:api": "node server.js",
     "worker": "python -m worker.service",
-    "check": "node --check server.js && node --check scripts/start.js && node --check server/env.js && node --check server/db.js && node --check server/events.js && node --check server/settings.js && node --check server/jobs.js && node --check server/health.js && node --check server/notifications.js && node --check server/outbox.js && node --check server/artifacts.js && node --check server/library.js && node --check server/projects.js && node --check server/reader.js && node --check server/papers.js && node --check server/workerQueue.js && node --check server/uploadStaging.js && node --check src/lib/cacheKeys.js && node --check src/lib/markdownMath.js && node --check src/lib/serverEventRules.js && npm run test:node && npm run build && python -m compileall worker tests",
+    "check": "node --check server.js && node --check scripts/start.js && node --check server/env.js && node --check server/db.js && node --check server/events.js && node --check server/settings.js && node --check server/jobs.js && node --check server/health.js && node --check server/notifications.js && node --check server/outbox.js && node --check server/artifacts.js && node --check server/library.js && node --check server/projects.js && node --check server/reader.js && node --check server/papers.js && node --check server/search.js && node --check server/workerQueue.js && node --check server/uploadStaging.js && node --check src/lib/cacheKeys.js && node --check src/lib/markdownMath.js && node --check src/lib/serverEventRules.js && npm run test:node && npm run build && python -m compileall worker tests",
     "init-db": "python -m worker.cli init-db",
+    "backfill-search-indexes": "python -m worker.cli backfill-search-indexes",
     "sync-obsidian": "python -m worker.cli sync-obsidian",
     "fetch-arxiv": "python -m worker.cli fetch-arxiv",
     "cache-arxiv-text": "python -m worker.cli cache-arxiv-text",
@@ -28,16 +29,21 @@
     "python": ">=3.11"
   },
   "dependencies": {
+    "@mozilla/readability": "^0.6.0",
     "busboy": "^1.6.0",
+    "dompurify": "^3.4.12",
+    "jsdom": "^29.1.1",
     "katex": "^0.16.45",
     "pg": "^8.22.0",
+    "playwright": "^1.61.1",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "react-markdown": "^10.1.0",
     "react-router-dom": "^7.15.1",
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
-    "remark-math": "^6.0.0"
+    "remark-math": "^6.0.0",
+    "turndown": "^7.2.4"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^6.0.1",

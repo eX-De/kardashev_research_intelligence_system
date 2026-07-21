@@ -59,7 +59,7 @@ import {
 } from "./server/reader.js";
 import {
   getInbox as getNodeInbox,
-  getLegacyPaperDetail as getNodeLegacyPaperDetail,
+  getPaperDetail as getNodePaperDetail,
   savePaperFeedback as saveNodePaperFeedback,
   updatePaperRecommendation as updateNodePaperRecommendation
 } from "./server/papers.js";
@@ -72,7 +72,8 @@ import {
   unlinkProjectNote as unlinkNodeProjectNote,
   unlinkProjectPaper as unlinkNodeProjectPaper
 } from "./server/projects.js";
-import { cleanupStaleWorkerJobs, countActiveWorkerJobs, enqueueWorkerJob } from "./server/workerQueue.js";
+import { cleanupStaleWorkerJobs, countActiveWorkerJobs, enqueueWorkerJob, getWorkerJob } from "./server/workerQueue.js";
+import { normalizeSearchRequest, quickSearch } from "./server/search.js";
 import {
   DEFAULT_READER_UPLOAD_MAX_FILE_BYTES,
   DEFAULT_READER_UPLOAD_MAX_FILES,
@@ -2160,8 +2161,10 @@ async function routeApi(req, res, url) {
   if (req.method === "GET" && url.pathname === "/api/library") {
     const data = await getNodePaperLibrary({
       status: url.searchParams.get("status") || "",
-      source_type: url.searchParams.get("source_type") || "",
+      source: url.searchParams.get("source") || "",
       report_presence: url.searchParams.get("report_presence") || "",
+      importance: url.searchParams.get("importance") || "",
+      sort: url.searchParams.get("sort") || "",
       project_id: url.searchParams.get("project_id") || "",
       q: url.searchParams.get("q") || "",
       date_from: url.searchParams.get("date_from") || "",
@@ -2280,6 +2283,62 @@ async function routeApi(req, res, url) {
     }
   }
 
+  if (req.method === "GET" && url.pathname === "/api/search") {
+    const data = await quickSearch({
+      q: url.searchParams.get("q") || "",
+      types: url.searchParams.get("types") || "",
+      project_id: url.searchParams.get("project_id") || "",
+      artifact_types: url.searchParams.get("artifact_types") || "",
+      date_from: url.searchParams.get("date_from") || "",
+      date_to: url.searchParams.get("date_to") || "",
+      limit: url.searchParams.get("limit") || "30"
+    });
+    sendJson(res, 200, data);
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/search") {
+    const body = await readRequestJson(req);
+    const request = normalizeSearchRequest(body);
+    if (request.mode === "quick") {
+      sendJson(res, 200, await quickSearch(request));
+      return;
+    }
+    const data = await enqueueActionWorkerJob(
+      "unified-search",
+      {
+        query: request.query,
+        types: request.types,
+        limit: request.limit,
+        project_id: request.filters.project_id,
+        artifact_types: request.filters.artifact_types,
+        date_from: request.filters.date_from,
+        date_to: request.filters.date_to
+      },
+      { source: "unified-search", priority: 12, maxAttempts: 1 }
+    );
+    sendJson(res, 202, data);
+    return;
+  }
+
+  const searchJobMatch = url.pathname.match(/^\/api\/search\/jobs\/(\d+)$/);
+  if (req.method === "GET" && searchJobMatch) {
+    const workerJob = await getWorkerJob(searchJobMatch[1]);
+    if (!workerJob || workerJob.job_type !== "unified-search") {
+      sendJson(res, 404, { ok: false, error: "Search job not found" });
+      return;
+    }
+    sendJson(res, 200, {
+      ok: workerJob.status !== "failed",
+      worker_job_id: workerJob.id,
+      job_id: workerJob.job_run_id,
+      status: workerJob.status,
+      result: workerJob.status === "completed" ? workerJob.result : null,
+      error: workerJob.status === "failed" ? workerJob.error_message : ""
+    });
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/api/reader/papers/urls") {
     const body = await readRequestJson(req);
     if (isQueueJobBackend()) {
@@ -2295,6 +2354,31 @@ async function routeApi(req, res, url) {
     sendJson(res, 200, data);
     await publishDurableEvent(SERVER_EVENTS.READER_PAPERS_IMPORTED, {
       source: "url",
+      imported: Array.isArray(data.imported) ? data.imported.map((item) => ({
+        paper_id: eventNumber(item.paper_id || item.id),
+        title: item.title || null
+      })).filter((item) => item.paper_id) : [],
+      imported_count: Array.isArray(data.imported) ? data.imported.length : 0,
+      error_count: Array.isArray(data.errors) ? data.errors.length : 0
+    });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/reader/papers/web") {
+    const body = await readRequestJson(req);
+    if (isQueueJobBackend()) {
+      const data = await enqueueActionWorkerJob(
+        "reader-import-web",
+        { body },
+        { source: "reader-web", priority: 8, maxAttempts: 2 }
+      );
+      sendJson(res, 202, data);
+      return;
+    }
+    const data = await jsonFromWorker(["api-reader-web"], JSON.stringify(body));
+    sendJson(res, 200, data);
+    await publishDurableEvent(SERVER_EVENTS.READER_PAPERS_IMPORTED, {
+      source: "web",
       imported: Array.isArray(data.imported) ? data.imported.map((item) => ({
         paper_id: eventNumber(item.paper_id || item.id),
         title: item.title || null
@@ -2453,7 +2537,7 @@ async function routeApi(req, res, url) {
 
   const paperMatch = url.pathname.match(/^\/api\/papers\/(\d+)$/);
   if (req.method === "GET" && paperMatch) {
-    const data = await getNodeLegacyPaperDetail(paperMatch[1]);
+    const data = await getNodePaperDetail(paperMatch[1]);
     sendJson(res, 200, data);
     return;
   }

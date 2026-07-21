@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { envBoolean, envValue } from "./env.js";
 import { parseJson, query, toJson, ValidationError, withTransaction } from "./db.js";
 
-export const DEFAULT_PAPER_READER_PROMPT = `请阅读这篇论文 PDF，输出结构化解读：
+export const DEFAULT_PAPER_READER_PROMPT = `请阅读这份研究文档，输出结构化解读：
 
 1. 研究问题和背景
 2. 方法和实验设计
@@ -39,7 +39,8 @@ export const INT_FIELDS = new Set([
   "scheduler_interval_hours",
   "paper_report_queue_concurrency",
   "embedding_concurrency",
-  "project_chat_profile_concurrency"
+  "project_chat_profile_concurrency",
+  "project_judgment_concurrency"
 ]);
 
 export const FLOAT_FIELDS = new Set([
@@ -155,6 +156,7 @@ const DATACLASS_SETTING_FIELDS = new Set([
   "project_chat_profile_provider_id",
   "project_chat_profile_model",
   "project_chat_profile_concurrency",
+  "project_judgment_concurrency",
   "reader_chat_provider_id",
   "reader_chat_model",
   "reader_smart_save_provider_id",
@@ -393,6 +395,12 @@ export function loadBaseSettingsFromEnv() {
       "project_chat_profile_concurrency",
       8
     ),
+    project_judgment_concurrency: positiveInteger(
+      envValue("PROJECT_JUDGMENT_CONCURRENCY", "3"),
+      3,
+      "project_judgment_concurrency",
+      8
+    ),
     reader_chat_provider_id: envValue("READER_CHAT_PROVIDER_ID", ""),
     reader_chat_model: envValue("READER_CHAT_MODEL", ""),
     reader_smart_save_provider_id: envValue("READER_SMART_SAVE_PROVIDER_ID", ""),
@@ -432,6 +440,8 @@ export function applyStoredSettings(stored, baseSettings = loadBaseSettingsFromE
         settings[field] = positiveInteger(stored[field], settings.embedding_concurrency || 2, field);
       } else if (field === "project_chat_profile_concurrency") {
         settings[field] = positiveInteger(stored[field], settings.project_chat_profile_concurrency || 2, field, 8);
+      } else if (field === "project_judgment_concurrency") {
+        settings[field] = positiveInteger(stored[field], settings.project_judgment_concurrency || 3, field, 8);
       } else {
         settings[field] = parseInteger(stored[field], field);
       }
@@ -519,6 +529,16 @@ export function settingsPayloadFromStored(stored = {}) {
       ),
       settings.project_chat_profile_concurrency || 2,
       "project_chat_profile_concurrency",
+      8
+    ),
+    project_judgment_concurrency: positiveInteger(
+      storedOr(
+        stored,
+        "project_judgment_concurrency",
+        envValue("PROJECT_JUDGMENT_CONCURRENCY", String(settings.project_judgment_concurrency || 3))
+      ),
+      settings.project_judgment_concurrency || 3,
+      "project_judgment_concurrency",
       8
     ),
     reader_chat_provider_id: String(storedOr(stored, "reader_chat_provider_id", settings.reader_chat_provider_id || "")),
@@ -615,6 +635,9 @@ export function normalizeSettingsPayload(payload = {}, currentSettings = {}) {
       }
       if (key === "project_chat_profile_concurrency" && (value < 1 || value > 8)) {
         throw new ValidationError("project_chat_profile_concurrency must be between 1 and 8");
+      }
+      if (key === "project_judgment_concurrency" && (value < 1 || value > 8)) {
+        throw new ValidationError("project_judgment_concurrency must be between 1 and 8");
       }
     } else if (FLOAT_FIELDS.has(key)) {
       value = parseFloatValue(rawValue || 0, key);

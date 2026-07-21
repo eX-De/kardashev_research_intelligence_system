@@ -10,11 +10,13 @@ import re
 
 from .config import Settings
 from .artifacts import create_artifact, export_artifact_to_obsidian
-from .arxiv_text import download_pdf, extract_pdf_text_to_file, replace_arxiv_chunks_for_paper
+from .arxiv_text import chunk_text, download_pdf, extract_pdf_text_to_file
 from .db import clean_unicode, from_json, to_json, utc_now
 from .obsidian import ObsidianNotConfiguredError
 from .obsidian_remote import obsidian_remote_enabled
-from .papers import upsert_imported_paper
+from .papers import replace_paper_chunks, upsert_imported_paper, upsert_paper_asset
+from .library_search_index import enqueue_library_paper_index
+from .web_content import extract_web_documents
 from .project_chat_profiles import project_chat_profiles_for_paper
 from .paper_reports import (
     _call_chat_text,
@@ -37,9 +39,18 @@ from .obsidian_library import (
 
 VALID_READER_ROLES = {"user", "assistant"}
 PDF_LINK_PATTERN = re.compile(r"""href=["']([^"']+?\.pdf(?:\?[^"']*)?)["']""", re.IGNORECASE)
+WEB_READER_DEFAULT_PROMPT = """请阅读这篇网页正文，输出结构化解读：
+
+1. 核心主题和背景
+2. 主要观点或方法
+3. 关键证据与结论
+4. 局限性或需要核实之处
+5. 对后续研究或应用的启发
+
+请尽量使用中文，保留关键英文术语。"""
 READER_MESSAGE_COLUMNS = (
     "id",
-    "paper_id",
+    "library_paper_id",
     "role",
     "content",
     "source",
@@ -54,7 +65,7 @@ READER_MESSAGE_PROJECTION = ", ".join(READER_MESSAGE_COLUMNS)
 def _reader_message_payload(row: DbRow) -> dict[str, object]:
     return {
         "id": int(row["id"]),
-        "paper_id": int(row["paper_id"]),
+        "paper_id": int(row["library_paper_id"]),
         "role": row["role"],
         "content": row["content"],
         "source": row["source"],
@@ -139,7 +150,7 @@ def paper_reader_messages(conn: DbConnection, paper_id: int) -> list[dict[str, o
         f"""
         SELECT {READER_MESSAGE_PROJECTION}
         FROM paper_reader_messages
-        WHERE paper_id = ?
+        WHERE library_paper_id = ?
         ORDER BY id
         """,
         (paper_id,),
@@ -213,100 +224,46 @@ def _discover_pdf_url(url: str) -> str:
     return urljoin(url, match.group(1))
 
 
-def _insert_imported_paper(
-    conn: DbConnection,
-    *,
-    arxiv_id: str,
-    title: str,
-    summary: str,
-    link: str,
-    pdf_link: str,
-    pdf_path: Path,
-    text_path: Path,
-    text_status: str,
-    text_error: str = "",
-    text_char_count: int = 0,
-) -> int:
-    now = utc_now()
-    existing = conn.execute("SELECT id FROM arxiv_papers WHERE arxiv_id = ?", (arxiv_id,)).fetchone()
-    if existing:
-        paper_id = int(existing["id"])
-        conn.execute(
-            """
-            UPDATE arxiv_papers
-            SET title = ?,
-                summary = ?,
-                link = ?,
-                pdf_link = ?,
-                pdf_path = ?,
-                text_path = ?,
-                text_extracted_at = CASE WHEN ? = 'complete' THEN ? ELSE text_extracted_at END,
-                text_status = ?,
-                text_error = ?,
-                text_char_count = ?,
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (
-                title,
-                summary,
-                link,
-                pdf_link,
-                str(pdf_path),
-                str(text_path),
-                text_status,
-                now,
-                text_status,
-                text_error,
-                text_char_count,
-                now,
-                paper_id,
-            ),
-        )
-        return paper_id
-    cursor = conn.execute(
-        """
-        INSERT INTO arxiv_papers(
-          arxiv_id, title, authors_json, summary, categories_json, published_at,
-          updated_at, link, pdf_link, pdf_path, text_path, text_extracted_at,
-          text_status, text_error, text_char_count, fetched_batch_id, created_at
-        )
-        VALUES (?, ?, '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reader-import', ?)
-        """,
-        (
-            arxiv_id,
-            title,
-            summary,
-            to_json(["reader"]),
-            now,
-            now,
-            link,
-            pdf_link,
-            str(pdf_path),
-            str(text_path),
-            now if text_status == "complete" else None,
-            text_status,
-            text_error,
-            text_char_count,
-            now,
-        ),
-    )
-    return int(cursor.lastrowid)
-
-
-def _finalize_imported_pdf(
+def _finalize_imported_document(
     conn: DbConnection,
     paper_id: int,
-    pdf_path: Path,
     text_path: Path,
 ) -> None:
-    paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
+    paper = conn.execute("SELECT title, abstract FROM papers WHERE id = ?", (paper_id,)).fetchone()
+    if not paper:
+        raise RuntimeError(f"Paper not found: {paper_id}")
     text = text_path.read_text(encoding="utf-8", errors="ignore") if text_path.exists() else ""
-    replace_arxiv_chunks_for_paper(conn, paper, text)
+    text_asset_id = upsert_paper_asset(
+        conn,
+        paper_id,
+        asset_type="text",
+        path=str(text_path),
+        status="complete",
+        metadata={"char_count": len(text)},
+    )
+    metadata_text = clean_unicode(f"Title: {paper['title']}\n\nAbstract: {paper['abstract']}").strip()
+    chunks = [
+        {
+            "source": "metadata",
+            "page_start": None,
+            "page_end": None,
+            "text": metadata_text,
+            "token_count": max(1, len(metadata_text) // 4),
+            "char_count": len(metadata_text),
+        },
+        *chunk_text(text),
+    ]
+    replace_paper_chunks(conn, paper_id, chunks, text_asset_id=text_asset_id)
 
 
-def _queue_imported_report(conn: DbConnection, settings: Settings, paper_id: int) -> None:
-    queue_paper_report(conn, paper_id, prompt=_reader_report_prompt(settings))
+def _queue_imported_report(
+    conn: DbConnection,
+    settings: Settings,
+    paper_id: int,
+    *,
+    prompt: str = "",
+) -> None:
+    queue_paper_report(conn, paper_id, prompt=prompt or _reader_report_prompt(settings))
 
 
 def _reader_upload_metadata(payload: dict[str, object]) -> tuple[str, str]:
@@ -334,20 +291,7 @@ def _import_reader_pdf_path(
         char_count = 0
         text_status = "failed"
         text_error = str(exc)[:1000]
-    paper_id = _insert_imported_paper(
-        conn,
-        arxiv_id=f"reader-upload-{digest[:16]}",
-        title=title,
-        summary="Manual PDF import.",
-        link="",
-        pdf_link="",
-        pdf_path=pdf_path,
-        text_path=text_path,
-        text_status=text_status,
-        text_error=text_error,
-        text_char_count=char_count,
-    )
-    upsert_imported_paper(
+    paper_id = upsert_imported_paper(
         conn,
         source_type="upload",
         source_identifier=f"reader-upload-{digest[:16]}",
@@ -361,7 +305,8 @@ def _import_reader_pdf_path(
         metadata={"filename": filename, "sha256": digest},
     )
     if text_status == "complete":
-        _finalize_imported_pdf(conn, paper_id, pdf_path, text_path)
+        _finalize_imported_document(conn, paper_id, text_path)
+        enqueue_library_paper_index(conn, settings, paper_id)
     _queue_imported_report(conn, settings, paper_id)
     conn.commit()
     detail = paper_reader_detail(conn, paper_id)
@@ -559,20 +504,7 @@ def import_reader_urls(
                 char_count = 0
                 text_status = "failed"
                 text_error = str(exc)[:1000]
-            paper_id = _insert_imported_paper(
-                conn,
-                arxiv_id=source_id,
-                title=clean_unicode(str(payload.get("title") or "")).strip() or _title_from_url(url),
-                summary=f"Imported from {url}",
-                link=url,
-                pdf_link=pdf_link,
-                pdf_path=pdf_path,
-                text_path=text_path,
-                text_status=text_status,
-                text_error=text_error,
-                text_char_count=char_count,
-            )
-            upsert_imported_paper(
+            paper_id = upsert_imported_paper(
                 conn,
                 source_type="url",
                 source_identifier=source_id,
@@ -588,13 +520,119 @@ def import_reader_urls(
                 arxiv_id=arxiv_id,
             )
             if text_status == "complete":
-                _finalize_imported_pdf(conn, paper_id, pdf_path, text_path)
+                _finalize_imported_document(conn, paper_id, text_path)
+                enqueue_library_paper_index(conn, settings, paper_id)
             _queue_imported_report(conn, settings, paper_id)
             conn.commit()
             imported.append({"paper_id": paper_id, "url": url, "pdf_link": pdf_link, "text_status": text_status})
         except Exception as exc:
             conn.rollback()
             errors.append({"url": url, "error": str(exc)})
+    return {"ok": bool(imported), "imported": imported, "errors": errors}
+
+
+def _normalized_web_url(value: str) -> str:
+    parsed = urlparse(clean_unicode(value).strip())
+    return parsed._replace(fragment="").geturl()
+
+
+def import_reader_webpages(
+    conn: DbConnection,
+    settings: Settings,
+    payload: dict[str, object],
+) -> dict[str, object]:
+    raw_urls = payload.get("urls", [])
+    if isinstance(raw_urls, str):
+        urls = [item.strip() for item in raw_urls.splitlines() if item.strip()]
+    elif isinstance(raw_urls, list):
+        urls = [clean_unicode(str(item)).strip() for item in raw_urls if clean_unicode(str(item)).strip()]
+    else:
+        urls = []
+    urls = list(dict.fromkeys(urls))
+    if not urls:
+        raise RuntimeError("At least one webpage URL is required")
+
+    extracted = extract_web_documents(urls)
+    results = extracted.get("results") if isinstance(extracted.get("results"), list) else []
+    imported: list[dict[str, object]] = []
+    errors: list[dict[str, str]] = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        original_url = clean_unicode(str(item.get("url") or "")).strip()
+        if not item.get("ok"):
+            errors.append(
+                {
+                    "url": original_url,
+                    "error": clean_unicode(str(item.get("error") or "Webpage extraction failed")).strip(),
+                }
+            )
+            continue
+
+        text_path: Path | None = None
+        try:
+            final_url = _normalized_web_url(str(item.get("final_url") or original_url))
+            markdown = clean_unicode(str(item.get("markdown") or "")).strip()
+            if not markdown:
+                raise RuntimeError("Webpage extraction returned no cleaned content")
+            title = clean_unicode(str(item.get("title") or "")).strip() or _title_from_url(final_url)
+            excerpt = clean_unicode(str(item.get("excerpt") or "")).strip()
+            source_digest = hashlib.sha256(final_url.encode("utf-8", "replace")).hexdigest()
+            source_id = f"reader-web-{source_digest[:16]}"
+            document_text = f"# {title}\n\n来源：{final_url}\n\n{markdown}\n"
+            char_count = len(document_text)
+            content_digest = hashlib.sha256(document_text.encode("utf-8", "replace")).hexdigest()
+            stem = _reader_file_stem("web", f"{source_id}:{content_digest}")
+            text_path = settings.arxiv_text_dir / f"{stem}.md"
+            text_path.parent.mkdir(parents=True, exist_ok=True)
+            text_path.write_text(document_text, encoding="utf-8")
+            summary = excerpt or f"Imported webpage from {final_url}"
+
+            paper_id = upsert_imported_paper(
+                conn,
+                source_type="web",
+                source_identifier=source_id,
+                title=title,
+                abstract=summary,
+                source_url=final_url,
+                text_path=str(text_path),
+                text_status="complete",
+                text_char_count=char_count,
+                metadata={
+                    "original_url": original_url,
+                    "final_url": final_url,
+                    "byline": clean_unicode(str(item.get("byline") or "")).strip(),
+                    "site_name": clean_unicode(str(item.get("site_name") or "")).strip(),
+                    "lang": clean_unicode(str(item.get("lang") or "")).strip(),
+                    "extraction_method": clean_unicode(str(item.get("extraction_method") or "")).strip(),
+                    "content_sha256": content_digest,
+                },
+            )
+            _finalize_imported_document(conn, paper_id, text_path)
+            enqueue_library_paper_index(conn, settings, paper_id)
+            _queue_imported_report(conn, settings, paper_id, prompt=WEB_READER_DEFAULT_PROMPT)
+            conn.commit()
+            imported.append(
+                {
+                    "paper_id": paper_id,
+                    "title": title,
+                    "url": original_url,
+                    "final_url": final_url,
+                    "source": "web",
+                    "text_status": "complete",
+                    "extraction_method": clean_unicode(str(item.get("extraction_method") or "")).strip(),
+                }
+            )
+        except Exception as exc:
+            conn.rollback()
+            if text_path is not None:
+                text_path.unlink(missing_ok=True)
+            errors.append({"url": original_url, "error": str(exc)})
+
+    known_urls = {str(item.get("url") or "") for item in results if isinstance(item, dict)}
+    for url in urls:
+        if url not in known_urls:
+            errors.append({"url": url, "error": "Webpage extractor returned no result"})
     return {"ok": bool(imported), "imported": imported, "errors": errors}
 
 
@@ -615,13 +653,22 @@ def _reference_papers(conn: DbConnection, paper_id: int) -> list[dict[str, objec
           p.id AS paper_id,
           p.arxiv_id,
           p.title,
-          p.text_path,
-          p.text_status,
-          p.text_char_count,
+          COALESCE(text_asset.path, '') AS text_path,
+          COALESCE(text_asset.status, 'pending') AS text_status,
+          COALESCE(text_asset.metadata_json, '{}') AS text_metadata_json,
           r.position,
           r.updated_at
-        FROM paper_reader_reference_papers r
-        JOIN arxiv_papers p ON p.id = r.reference_paper_id
+        FROM paper_reader_references r
+        JOIN papers p ON p.id = r.reference_paper_id
+        LEFT JOIN LATERAL (
+          SELECT asset.path, asset.status, asset.metadata_json
+          FROM paper_assets asset
+          WHERE asset.paper_id = p.id AND asset.asset_type = 'text'
+          ORDER BY CASE WHEN asset.status = 'complete' AND asset.path != '' THEN 0 ELSE 1 END,
+                   asset.updated_at DESC,
+                   asset.id DESC
+          LIMIT 1
+        ) text_asset ON TRUE
         WHERE r.paper_id = ?
         ORDER BY r.position, p.id
         """,
@@ -634,7 +681,7 @@ def _reference_papers(conn: DbConnection, paper_id: int) -> list[dict[str, objec
             "title": row["title"],
             "text_path": row["text_path"],
             "text_status": row["text_status"],
-            "text_char_count": int(row["text_char_count"] or 0),
+            "text_char_count": int(from_json(row["text_metadata_json"], {}).get("char_count") or 0),
             "position": int(row["position"] or 0),
             "updated_at": row["updated_at"],
         }
@@ -667,7 +714,7 @@ def _build_chat_messages(
     messages = [
         {
             "role": "system",
-            "content": "You are a research paper reading assistant. Answer from the supplied full PDF text whenever possible.",
+            "content": "You are a research document reading assistant. Answer from the supplied extracted document text whenever possible.",
         },
     ]
     messages.extend(
@@ -675,14 +722,14 @@ def _build_chat_messages(
             {
                 "role": "user",
                 "content": (
-                    "下面是 PyMuPDF 从论文 PDF 中解析出的完整文本，按页保留。"
+                    "下面是从来源文档中提取并清洗后的完整正文；PDF 文本可能保留分页，网页文本可能保留 Markdown 结构。"
                     "后续对话都应优先基于这份文本回答。\n\n"
                     "<paper_text>\n"
                     f"{paper_text}\n"
                     "</paper_text>"
                 ),
             },
-            {"role": "assistant", "content": "我已收到完整 PDF 解析文本。"},
+            {"role": "assistant", "content": "我已收到完整的文档正文。"},
         ]
     )
     references = reference_papers or []
@@ -759,12 +806,107 @@ def _build_chat_messages(
     return messages
 
 
-def paper_reader_detail(conn: DbConnection, paper_id: int) -> dict[str, object]:
-    from .api import paper_detail
+def _reader_paper_record(conn: DbConnection, paper_id: int) -> dict[str, object] | None:
+    row = conn.execute(
+        """
+        SELECT
+          paper.*,
+          COALESCE(source.source_type, '') AS source_type,
+          COALESCE(source.source_url, '') AS link,
+          COALESCE(source.metadata_json, '{}') AS source_metadata_json,
+          COALESCE(pdf_asset.url, '') AS pdf_link,
+          COALESCE(pdf_asset.path, '') AS pdf_path,
+          COALESCE(text_asset.path, '') AS text_path,
+          COALESCE(text_asset.status, 'pending') AS text_status,
+          COALESCE(text_asset.error_message, '') AS text_error,
+          COALESCE(text_asset.metadata_json, '{}') AS text_metadata_json,
+          text_asset.updated_at AS text_extracted_at
+        FROM papers paper
+        LEFT JOIN LATERAL (
+          SELECT item.source_type, item.source_url, item.metadata_json
+          FROM paper_sources item
+          WHERE item.paper_id = paper.id
+          ORDER BY item.updated_at DESC, item.id DESC
+          LIMIT 1
+        ) source ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT item.url, item.path
+          FROM paper_assets item
+          WHERE item.paper_id = paper.id AND item.asset_type = 'pdf'
+          ORDER BY CASE WHEN item.path != '' THEN 0 WHEN item.url != '' THEN 1 ELSE 2 END,
+                   item.updated_at DESC,
+                   item.id DESC
+          LIMIT 1
+        ) pdf_asset ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT item.path, item.status, item.error_message, item.metadata_json, item.updated_at
+          FROM paper_assets item
+          WHERE item.paper_id = paper.id AND item.asset_type = 'text'
+          ORDER BY CASE WHEN item.status = 'complete' AND item.path != '' THEN 0 ELSE 1 END,
+                   item.updated_at DESC,
+                   item.id DESC
+          LIMIT 1
+        ) text_asset ON TRUE
+        WHERE paper.id = ?
+        """,
+        (int(paper_id),),
+    ).fetchone()
+    if not row:
+        return None
+    record = dict(row)
+    source_metadata = from_json(record.pop("source_metadata_json", "{}"), {})
+    text_metadata = from_json(record.pop("text_metadata_json", "{}"), {})
+    record["summary"] = record.get("abstract") or ""
+    record["categories_json"] = to_json(source_metadata.get("categories", []))
+    record["text_char_count"] = int(text_metadata.get("char_count") or 0)
+    return record
 
-    detail = paper_detail(conn, paper_id)
-    detail["reader_messages"] = paper_reader_display_messages(conn, paper_id)
-    detail["reference_papers"] = _reference_papers(conn, paper_id)
+
+def paper_reader_detail(conn: DbConnection, paper_id: int) -> dict[str, object]:
+    paper = _reader_paper_record(conn, paper_id)
+    if not paper:
+        raise RuntimeError(f"Paper not found: {paper_id}")
+    detail = {
+        "paper": {
+            "id": int(paper["id"]),
+            "arxiv_id": paper.get("arxiv_id") or "",
+            "title": paper.get("title") or "",
+            "authors": from_json(str(paper.get("authors_json") or "[]"), []),
+            "summary": paper.get("summary") or "",
+            "categories": from_json(str(paper.get("categories_json") or "[]"), []),
+            "published_at": paper.get("published_at") or "",
+            "updated_at": paper.get("updated_at") or "",
+            "link": paper.get("link") or "",
+            "pdf_link": paper.get("pdf_link") or "",
+            "pdf_path": paper.get("pdf_path") or "",
+            "text_path": paper.get("text_path") or "",
+            "text_status": paper.get("text_status") or "pending",
+            "text_extracted_at": paper.get("text_extracted_at"),
+            "text_error": paper.get("text_error") or "",
+            "text_char_count": int(paper.get("text_char_count") or 0),
+        },
+        "explanation": None,
+        "project_judgments": [],
+        "project_recommendations": [],
+        "linked_projects": [],
+        "paper_report": paper_report_payload(conn, paper_id),
+        "evidence": [],
+        "feedback": [],
+        "reader_messages": paper_reader_display_messages(conn, paper_id),
+        "reference_papers": _reference_papers(conn, paper_id),
+    }
+    from .api import paper_detail as canonical_paper_detail
+
+    enrichment = canonical_paper_detail(conn, paper_id)
+    for key in (
+        "explanation",
+        "project_judgments",
+        "project_recommendations",
+        "linked_projects",
+        "evidence",
+        "feedback",
+    ):
+        detail[key] = enrichment.get(key, detail[key])
     return detail
 
 
@@ -779,7 +921,7 @@ def paper_reader_chat_stream(
     if not message:
         raise RuntimeError("Chat message is required")
 
-    paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
+    paper = _reader_paper_record(conn, paper_id)
     if not paper:
         raise RuntimeError(f"Paper not found: {paper_id}")
 
@@ -789,12 +931,11 @@ def paper_reader_chat_stream(
         raise RuntimeError("Full paper text is missing")
     reference_papers = _reference_paper_contexts(conn, settings, paper_id)
     reference_paper_ids = [int(reference["paper_id"]) for reference in reference_papers]
-
     now = utc_now()
     conn.execute(
         """
         INSERT INTO paper_reader_messages(
-          paper_id, role, content, source, model_provider_id, model, created_at
+          library_paper_id, role, content, source, model_provider_id, model, created_at
         )
         VALUES (?, 'user', ?, 'chat', '', '', ?)
         """,
@@ -834,7 +975,7 @@ def paper_reader_chat_stream(
     cursor = conn.execute(
         """
         INSERT INTO paper_reader_messages(
-          paper_id, role, content, source, model_provider_id, model, context_json, created_at
+          library_paper_id, role, content, source, model_provider_id, model, context_json, created_at
         )
         VALUES (?, 'assistant', ?, 'chat', ?, ?, ?, ?)
         """,
@@ -877,7 +1018,7 @@ def paper_reader_chat_stream(
 
 def delete_reader_message(conn: DbConnection, paper_id: int, message_id: int) -> dict[str, object]:
     cursor = conn.execute(
-        "DELETE FROM paper_reader_messages WHERE id = ? AND paper_id = ?",
+        "DELETE FROM paper_reader_messages WHERE id = ? AND library_paper_id = ?",
         (int(message_id), int(paper_id)),
     )
     if cursor.rowcount == 0:
@@ -1126,7 +1267,7 @@ def generate_reader_followup_questions(
         SELECT {READER_MESSAGE_PROJECTION}
         FROM paper_reader_messages
         WHERE id = ?
-          AND paper_id = ?
+          AND library_paper_id = ?
         """,
         (anchor_message_id, paper_id),
     ).fetchone()
@@ -1138,7 +1279,7 @@ def generate_reader_followup_questions(
         anchor_payload = None
     if not anchor_payload:
         raise RuntimeError("Anchor message was not found for this paper")
-    paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
+    paper = _reader_paper_record(conn, paper_id)
     if not paper:
         raise RuntimeError(f"Paper not found: {paper_id}")
     anchor_payload["context_text"] = (
@@ -1177,7 +1318,7 @@ def save_reader_note_to_obsidian(
 ) -> dict[str, object]:
     if not settings.obsidian_vault_path and not obsidian_remote_enabled(settings):
         raise ObsidianNotConfiguredError()
-    paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
+    paper = _reader_paper_record(conn, paper_id)
     if not paper:
         raise RuntimeError(f"Paper not found: {paper_id}")
 
@@ -1195,6 +1336,9 @@ def save_reader_note_to_obsidian(
             model_provider_id=smart_save["model"].get("provider_id", ""),
             model=smart_save["model"].get("model", ""),
         )
+        from .artifact_index import enqueue_artifact_index
+
+        enqueue_artifact_index(conn, settings, artifact)
         export = export_artifact_to_obsidian(conn, settings, int(artifact["id"]))
         return {
             "ok": True,

@@ -203,8 +203,9 @@ async function projectRecommendationPaperRows(db, projectId, {
         p.arxiv_id,
         p.title,
         p.published_at,
-        p.text_status,
-        p.link,
+        COALESCE(text_asset.status, 'pending') AS text_status,
+        COALESCE(source.source_url, '') AS link,
+        p.id AS library_paper_id,
         r.state AS recommendation_state,
         r.importance,
         r.relation_type,
@@ -214,29 +215,26 @@ async function projectRecommendationPaperRows(db, projectId, {
         j.usefulness_score,
         j.confidence
       FROM project_paper_recommendations r
-      JOIN arxiv_papers p ON p.id = r.paper_id
+      JOIN papers p ON p.id = r.paper_id
+      LEFT JOIN LATERAL (
+        SELECT ps.source_url
+        FROM paper_sources ps
+        WHERE ps.paper_id = p.id
+        ORDER BY ps.updated_at DESC, ps.id DESC
+        LIMIT 1
+      ) source ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT pa.status
+        FROM paper_assets pa
+        WHERE pa.paper_id = p.id AND pa.asset_type = 'text'
+        ORDER BY pa.updated_at DESC, pa.id DESC
+        LIMIT 1
+      ) text_asset ON TRUE
       LEFT JOIN project_paper_judgments j
-        ON j.project_id = r.project_id AND j.paper_id = r.paper_id
+        ON j.project_id = r.project_id AND j.paper_id = r.source_arxiv_paper_id
       WHERE r.project_id = $1
         AND r.state IN (${stateParams})
-        AND NOT EXISTS (
-          SELECT 1 FROM arxiv_paper_tombstones t
-          WHERE t.arxiv_id = p.arxiv_id
-        )
-        AND NOT EXISTS (
-          SELECT 1
-          FROM papers lp
-          WHERE lp.arxiv_id = p.arxiv_id
-            AND lp.library_status IN ('archived', 'discarded')
-        )
-        AND NOT EXISTS (
-          SELECT 1
-          FROM paper_sources ps
-          JOIN papers lp ON lp.id = ps.paper_id
-          WHERE ps.source_type = 'arxiv'
-            AND ps.source_identifier = p.arxiv_id
-            AND lp.library_status IN ('archived', 'discarded')
-        )
+        AND p.library_status NOT IN ('archived', 'discarded')
         ${linkedClause}
       ORDER BY
         CASE r.state WHEN 'pending' THEN 0 WHEN 'accepted' THEN 1 ELSE 2 END,
@@ -321,21 +319,38 @@ export async function getProjectDetail(projectId, db = { query }) {
           p.id,
           p.arxiv_id,
           p.title,
-          p.link,
+          COALESCE(source.source_url, '') AS link,
+          p.id AS library_paper_id,
           pp.relation,
           pp.note,
           pp.updated_at,
+          COALESCE(r.importance, '') AS importance,
           COALESCE(NULLIF(ppm.quality_score, 0), ppm.score) AS project_score
         FROM project_papers pp
-        JOIN arxiv_papers p ON p.id = pp.paper_id
+        JOIN papers p ON p.id = pp.paper_id
+        LEFT JOIN LATERAL (
+          SELECT ps.source_url
+          FROM paper_sources ps
+          WHERE ps.paper_id = p.id
+          ORDER BY ps.updated_at DESC, ps.id DESC
+          LIMIT 1
+        ) source ON TRUE
+        LEFT JOIN project_paper_recommendations r
+          ON r.project_id = pp.project_id
+         AND r.paper_id = pp.paper_id
+         AND r.state = 'accepted'
         LEFT JOIN project_paper_matches ppm
-          ON ppm.project_id = pp.project_id AND ppm.paper_id = pp.paper_id
+          ON ppm.project_id = pp.project_id
+         AND ppm.paper_id = r.source_arxiv_paper_id
         WHERE pp.project_id = $1
           AND NOT (
             pp.relation = 'candidate'
             AND pp.note = 'auto_matched_by_project_context'
           )
-        ORDER BY COALESCE(ppm.score, 0) DESC, pp.updated_at DESC
+        ORDER BY
+          CASE r.importance WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END,
+          COALESCE(ppm.score, 0) DESC,
+          pp.updated_at DESC
       `,
       [id]
     ),
@@ -434,6 +449,7 @@ export async function getProjectDetail(projectId, db = { query }) {
 
   const recommendationPayload = recommendedPapers.map((paper) => ({
     id: Number(paper.id),
+    library_paper_id: Number(paper.library_paper_id || 0),
     arxiv_id: paper.arxiv_id,
     title: paper.title,
     published_at: paper.published_at,
@@ -451,11 +467,13 @@ export async function getProjectDetail(projectId, db = { query }) {
     project: projectRow(row),
     papers: papers.rows.map((paper) => ({
       id: Number(paper.id),
+      library_paper_id: Number(paper.library_paper_id || 0),
       arxiv_id: paper.arxiv_id,
       title: paper.title,
       link: paper.link,
       relation: paper.relation,
       note: paper.note,
+      importance: paper.importance || "",
       project_score: numberValue(paper.project_score),
       updated_at: paper.updated_at
     })),
@@ -657,127 +675,11 @@ function readingStateForStatus(status, existing = "") {
   return existing || "unread";
 }
 
-function yearFromTimestamp(value) {
-  const match = text(value).match(/^(\d{4})/);
-  if (!match) return null;
-  const year = Number.parseInt(match[1], 10);
-  return year >= 1000 && year <= 9999 ? year : null;
-}
-
-async function paperIdForArxivPaperId(client, arxivPaperId) {
-  const arxivResult = await client.query("SELECT * FROM arxiv_papers WHERE id = $1", [arxivPaperId]);
-  const arxiv = maybeOne(arxivResult);
-  if (!arxiv) return null;
-
-  const arxivId = text(arxiv.arxiv_id);
-  let sourceType = "arxiv";
-  let longTermArxivId = arxivId;
-  if (arxivId.startsWith("reader-upload-")) {
-    sourceType = "upload";
-    longTermArxivId = "";
-  } else if (arxivId.startsWith("reader-url-")) {
-    sourceType = "url";
-    longTermArxivId = "";
-  }
-  const canonicalKey = longTermArxivId
-    ? `arxiv:${longTermArxivId.toLowerCase()}`
-    : `${sourceType}:${arxivId.toLowerCase()}`;
-  const existingResult = await client.query(
-    `
-      SELECT id
-      FROM papers
-      WHERE arxiv_id = $1 OR canonical_key = $2
-      ORDER BY id
-      LIMIT 1
-    `,
-    [longTermArxivId || arxivId, canonicalKey]
-  );
-  const existing = maybeOne(existingResult);
-  if (existing) return Number(existing.id);
-
-  const sourceResult = await client.query(
-    `
-      SELECT p.id
-      FROM papers p
-      JOIN paper_sources s ON s.paper_id = p.id
-      WHERE s.source_type = 'arxiv' AND s.source_identifier = $1
-      ORDER BY p.id
-      LIMIT 1
-    `,
-    [arxivId]
-  );
-  const source = maybeOne(sourceResult);
-  if (source) return Number(source.id);
-
-  const now = nowIso();
-  const link = text(arxiv.link) || (arxivId ? `https://arxiv.org/abs/${arxivId}` : "");
-  const pdfLink = text(arxiv.pdf_link) || (arxivId ? `https://arxiv.org/pdf/${arxivId}` : "");
-  const inserted = await client.query(
-    `
-      INSERT INTO papers(
-        canonical_key, title, authors_json, abstract, published_at, year, arxiv_id,
-      library_status, reading_state, created_at, updated_at
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, 'candidate', 'unread', $8, $8)
-      ON CONFLICT(canonical_key) DO UPDATE SET
-        title = excluded.title,
-        authors_json = excluded.authors_json,
-        abstract = excluded.abstract,
-        published_at = excluded.published_at,
-        year = excluded.year,
-        arxiv_id = excluded.arxiv_id,
-        updated_at = excluded.updated_at
-      RETURNING id
-    `,
-    [
-      canonicalKey,
-      text(arxiv.title),
-      arxiv.authors_json || "[]",
-      text(arxiv.summary),
-      text(arxiv.published_at),
-      yearFromTimestamp(arxiv.published_at),
-      longTermArxivId,
-      now
-    ]
-  );
-  const paperId = Number(inserted.rows[0].id);
-  await client.query(
-    `
-      INSERT INTO paper_sources(
-        paper_id, source_type, source_identifier, source_url, metadata_json,
-        fetched_batch_id, created_at, updated_at
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
-      ON CONFLICT(paper_id, source_type, source_identifier) DO UPDATE SET
-        source_url = excluded.source_url,
-        metadata_json = excluded.metadata_json,
-        fetched_batch_id = excluded.fetched_batch_id,
-        updated_at = excluded.updated_at
-    `,
-    [
-      paperId,
-      sourceType,
-      arxivId,
-      link,
-      toJson({
-        categories: parseJson(arxiv.categories_json, []),
-        pdf_link: pdfLink,
-        arxiv_updated_at: text(arxiv.updated_at)
-      }),
-      text(arxiv.fetched_batch_id),
-      now
-    ]
-  );
-  return paperId;
-}
-
-async function setArxivPaperLibraryStatus(client, arxivPaperId, status) {
+async function setPaperLibraryStatus(client, paperId, status) {
   const nextStatus = text(status);
   if (!VALID_LIBRARY_STATUSES.has(nextStatus)) {
     throw new ValidationError(`Invalid library status: ${nextStatus}`);
   }
-  const paperId = await paperIdForArxivPaperId(client, arxivPaperId);
-  if (!paperId) throw new NotFoundError(`arXiv paper not found: ${arxivPaperId}`);
   const currentResult = await client.query("SELECT saved_at, last_read_at, reading_state FROM papers WHERE id = $1", [paperId]);
   const current = maybeOne(currentResult);
   if (!current) throw new NotFoundError(`Paper not found: ${paperId}`);
@@ -819,11 +721,11 @@ export async function linkProjectPaper(projectId, payload = {}) {
       [id, paperId, relation, note, now]
     );
     if (relation === "reading") {
-      await setArxivPaperLibraryStatus(client, paperId, "reading");
+      await setPaperLibraryStatus(client, paperId, "reading");
     } else if (["core", "background", "candidate"].includes(relation)) {
-      await setArxivPaperLibraryStatus(client, paperId, "saved");
+      await setPaperLibraryStatus(client, paperId, "saved");
     } else if (relation === "rejected") {
-      await setArxivPaperLibraryStatus(client, paperId, "discarded");
+      await setPaperLibraryStatus(client, paperId, "discarded");
     }
   });
   return getProjectDetail(id);

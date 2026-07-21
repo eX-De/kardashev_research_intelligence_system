@@ -9,8 +9,10 @@ import {
 } from "./db.js";
 
 export const VALID_LIBRARY_STATUSES = new Set(["candidate", "saved", "reading", "read", "archived", "discarded"]);
-export const SOURCE_TYPES = new Set(["arxiv", "url", "upload", "manual"]);
+export const LIBRARY_SOURCE_VALUES = new Set(["daily", "manual"]);
 export const REPORT_PRESENCE_VALUES = new Set(["with", "without"]);
+export const IMPORTANCE_VALUES = new Set(["high", "medium", "low"]);
+export const LIBRARY_SORT_VALUES = new Set(["updated", "importance"]);
 const DEFAULT_HIDDEN_LIBRARY_STATUSES = ["archived", "discarded"];
 const ARCHIVE_PROTECTED_STATUSES = new Set(["saved", "reading", "read"]);
 const PAPER_REPORT_ARTIFACT_TYPE = "paper_report";
@@ -57,13 +59,13 @@ function normalizeLibraryStatus(value, { allowBlank = false } = {}) {
   return normalized;
 }
 
-function normalizeSourceType(value) {
-  const sourceType = text(value);
-  if (!sourceType) return "";
-  if (!SOURCE_TYPES.has(sourceType)) {
-    throw new ValidationError(`Invalid paper source type: ${sourceType}`);
+function normalizeLibrarySource(value) {
+  const source = text(value);
+  if (!source) return "";
+  if (!LIBRARY_SOURCE_VALUES.has(source)) {
+    throw new ValidationError(`Invalid paper source: ${source}`);
   }
-  return sourceType;
+  return source;
 }
 
 function normalizeReportPresence(value) {
@@ -73,6 +75,23 @@ function normalizeReportPresence(value) {
     throw new ValidationError(`Invalid report presence: ${reportPresence}`);
   }
   return reportPresence;
+}
+
+function normalizeImportance(value) {
+  const importance = text(value);
+  if (!importance) return "";
+  if (!IMPORTANCE_VALUES.has(importance)) {
+    throw new ValidationError(`Invalid paper importance: ${importance}`);
+  }
+  return importance;
+}
+
+function normalizeLibrarySort(value) {
+  const sort = text(value) || "updated";
+  if (!LIBRARY_SORT_VALUES.has(sort)) {
+    throw new ValidationError(`Invalid library sort: ${sort}`);
+  }
+  return sort;
 }
 
 function normalizeLimit(value, fallback = 100) {
@@ -98,6 +117,7 @@ function paperPayload(row) {
     venue: row.venue,
     doi: row.doi,
     arxiv_id: row.arxiv_id,
+    importance: text(row.importance),
     library_status: row.library_status,
     reading_state: row.reading_state,
     user_tags: parseJson(row.user_tags_json, []),
@@ -161,8 +181,10 @@ function readingStateForStatus(status, existing = "") {
 function buildLibraryFilter(params = {}) {
   const filter = {
     library_status: normalizeLibraryStatus(params.status ?? params.library_status, { allowBlank: true }),
-    source_type: normalizeSourceType(params.source_type),
+    source: normalizeLibrarySource(params.source),
     report_presence: normalizeReportPresence(params.report_presence),
+    importance: normalizeImportance(params.importance),
+    sort: normalizeLibrarySort(params.sort),
     project_id: optionalInteger(params.project_id, "project_id", { minimum: 1 }),
     query: text(params.q ?? params.query),
     date_from: text(params.date_from).slice(0, 10),
@@ -180,9 +202,20 @@ function buildLibraryFilter(params = {}) {
     values.push(...DEFAULT_HIDDEN_LIBRARY_STATUSES);
     clauses.push(`p.library_status NOT IN ($${values.length - 1}, $${values.length})`);
   }
-  if (filter.source_type) {
-    values.push(filter.source_type);
-    clauses.push(`EXISTS (SELECT 1 FROM paper_sources s WHERE s.paper_id = p.id AND s.source_type = $${values.length})`);
+  if (filter.source) {
+    const manualSourceSql = `EXISTS (
+      SELECT 1
+      FROM paper_sources source_filter
+      WHERE source_filter.paper_id = p.id
+        AND (
+          COALESCE(source_filter.fetched_batch_id, '') = 'reader-import'
+          OR source_filter.source_type IN ('url', 'upload', 'web', 'manual')
+          OR COALESCE(source_filter.source_identifier, '') LIKE 'reader-upload-%'
+          OR COALESCE(source_filter.source_identifier, '') LIKE 'reader-url-%'
+          OR COALESCE(source_filter.source_identifier, '') LIKE 'reader-web-%'
+        )
+    )`;
+    clauses.push(filter.source === "manual" ? manualSourceSql : `NOT ${manualSourceSql}`);
   }
   if (filter.report_presence) {
     const operator = filter.report_presence === "with" ? "EXISTS" : "NOT EXISTS";
@@ -194,6 +227,18 @@ function buildLibraryFilter(params = {}) {
           AND report_filter.scope_id = p.id
           AND report_filter.artifact_type = 'paper_report'
           AND report_filter.status <> 'removed'
+      )
+    `);
+  }
+  if (filter.importance) {
+    values.push(filter.importance);
+    clauses.push(`
+      EXISTS (
+        SELECT 1
+        FROM project_paper_recommendations importance_recommendation
+        WHERE importance_recommendation.paper_id = p.id
+          AND importance_recommendation.state = 'accepted'
+          AND importance_recommendation.importance = $${values.length}
       )
     `);
   }
@@ -215,9 +260,8 @@ function buildLibraryFilter(params = {}) {
     clauses.push(`
       EXISTS (
         SELECT 1
-        FROM arxiv_papers ap
-        JOIN project_papers pp ON pp.paper_id = ap.id
-        WHERE ap.arxiv_id = p.arxiv_id
+        FROM project_papers pp
+        WHERE pp.paper_id = p.id
           AND pp.project_id = $${values.length}
           AND NOT (pp.relation = 'candidate' AND pp.note = 'auto_matched_by_project_context')
       )
@@ -234,13 +278,40 @@ export async function getPaperLibrary(params = {}, db = { query }) {
   const { filter, values, where } = buildLibraryFilter(params);
   const limitParam = values.length + 1;
   const offsetParam = values.length + 2;
+  const innerImportanceOrder = filter.sort === "importance" ? "COALESCE(ai.importance_rank, 3)," : "";
+  const outerImportanceOrder = filter.sort === "importance" ? "f.importance_rank," : "";
   const rowsResult = await db.query(
     `
-      WITH filtered AS (
-        SELECT p.*
+      WITH accepted_importance AS (
+        SELECT
+          r.paper_id,
+          MIN(
+            CASE r.importance
+              WHEN 'high' THEN 0
+              WHEN 'medium' THEN 1
+              WHEN 'low' THEN 2
+              ELSE 3
+            END
+          ) AS importance_rank
+        FROM project_paper_recommendations r
+        WHERE r.state = 'accepted'
+        GROUP BY r.paper_id
+      ),
+      filtered AS (
+        SELECT
+          p.*,
+          CASE ai.importance_rank
+            WHEN 0 THEN 'high'
+            WHEN 1 THEN 'medium'
+            WHEN 2 THEN 'low'
+            ELSE ''
+          END AS importance,
+          COALESCE(ai.importance_rank, 3) AS importance_rank
         FROM papers p
+        LEFT JOIN accepted_importance ai ON ai.paper_id = p.id
         ${where}
         ORDER BY
+          ${innerImportanceOrder}
           CASE p.library_status
             WHEN 'reading' THEN 0
             WHEN 'saved' THEN 1
@@ -282,6 +353,7 @@ export async function getPaperLibrary(params = {}, db = { query }) {
       LEFT JOIN chunk_counts cc ON cc.paper_id = f.id
       LEFT JOIN artifact_counts afc ON afc.paper_id = f.id
       ORDER BY
+        ${outerImportanceOrder}
         CASE f.library_status
           WHEN 'reading' THEN 0
           WHEN 'saved' THEN 1
@@ -310,8 +382,8 @@ export async function getPaperLibrary(params = {}, db = { query }) {
   };
 }
 
-async function paperReportPayload(db, legacyArxivPaperId, libraryPaperId) {
-  if (!legacyArxivPaperId || !libraryPaperId) return null;
+async function paperReportPayload(db, libraryPaperId) {
+  if (!libraryPaperId) return null;
   const result = await db.query(
     `
       SELECT *
@@ -319,23 +391,17 @@ async function paperReportPayload(db, legacyArxivPaperId, libraryPaperId) {
       WHERE scope_type = 'paper'
         AND scope_id = $1
         AND artifact_type = $2
-      ORDER BY
-        CASE
-          WHEN source_json::jsonb ->> 'source_key' = $3 THEN 0
-          ELSE 1
-        END,
-        updated_at DESC,
-        id DESC
+      ORDER BY updated_at DESC, id DESC
       LIMIT 1
     `,
-    [libraryPaperId, PAPER_REPORT_ARTIFACT_TYPE, `paper_report:${legacyArxivPaperId}`]
+    [libraryPaperId, PAPER_REPORT_ARTIFACT_TYPE]
   );
   const row = maybeOne(result);
   if (!row || row.status === "removed") return null;
   const content = parseJson(row.content_json, {});
   const source = parseJson(row.source_json, {});
   return {
-    paper_id: Number(legacyArxivPaperId),
+    paper_id: Number(libraryPaperId),
     artifact_id: Number(row.id),
     status: row.status,
     prompt: content.prompt || "",
@@ -363,7 +429,6 @@ export async function getPaperLibraryDetail(paperId, db = { query }) {
     sources,
     assets,
     chunks,
-    legacy,
     artifacts
   ] = await Promise.all([
     db.query(
@@ -394,9 +459,6 @@ export async function getPaperLibraryDetail(paperId, db = { query }) {
       `,
       [id]
     ),
-    paper.arxiv_id
-      ? db.query("SELECT id FROM arxiv_papers WHERE arxiv_id = $1", [paper.arxiv_id])
-      : Promise.resolve({ rows: [] }),
     db.query(
       `
         SELECT id, artifact_type, title, status, updated_at
@@ -407,34 +469,44 @@ export async function getPaperLibraryDetail(paperId, db = { query }) {
       [id]
     )
   ]);
-  const legacyRow = maybeOne(legacy);
-  const legacyArxivPaperId = legacyRow ? Number(legacyRow.id) : null;
-  const linkedProjects = legacyArxivPaperId
-    ? await db.query(
+  const linkedProjects = await db.query(
         `
-          SELECT pp.project_id, rp.name AS project_name, pp.relation, pp.note, pp.updated_at
+          SELECT
+            pp.project_id,
+            rp.name AS project_name,
+            pp.relation,
+            pp.note,
+            COALESCE(r.importance, '') AS importance,
+            pp.updated_at
           FROM project_papers pp
           JOIN research_projects rp ON rp.id = pp.project_id
+          LEFT JOIN project_paper_recommendations r
+            ON r.project_id = pp.project_id
+           AND r.paper_id = pp.paper_id
+           AND r.state = 'accepted'
           WHERE pp.paper_id = $1
             AND NOT (pp.relation = 'candidate' AND pp.note = 'auto_matched_by_project_context')
           ORDER BY pp.updated_at DESC
         `,
-        [legacyArxivPaperId]
-      )
-    : { rows: [] };
-  const report = await paperReportPayload(db, legacyArxivPaperId, id);
+        [id]
+      );
+  const report = await paperReportPayload(db, id);
+  const linkedProjectRows = linkedProjects.rows || [];
+  const importance = ["high", "medium", "low"].find((value) => (
+    linkedProjectRows.some((project) => project.importance === value)
+  )) || "";
 
   return {
-    paper,
-    legacy_arxiv_paper_id: legacyArxivPaperId,
+    paper: { ...paper, importance },
     sources: sources.rows.map(sourcePayload),
     assets: assets.rows.map(assetPayload),
     chunks: chunks.rows.map(chunkPayload),
-    linked_projects: linkedProjects.rows.map((project) => ({
+    linked_projects: linkedProjectRows.map((project) => ({
       project_id: Number(project.project_id),
       project_name: project.project_name,
       relation: project.relation,
       note: project.note,
+      importance: project.importance || "",
       updated_at: project.updated_at
     })),
     artifacts: artifacts.rows.map((artifact) => ({

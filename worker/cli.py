@@ -43,12 +43,15 @@ from .knowledge import sync_project_context_documents_from_project_notes
 from .obsidian import OBSIDIAN_NOT_CONFIGURED, ObsidianNotConfiguredError, sync_obsidian
 from .obsidian_remote import obsidian_remote_enabled
 from .paper_reports import ensure_paper_reports_for_recommendations, process_paper_report_queue
+from .papers import prune_unqualified_arxiv_library_papers
 from .project_chat_profiles import refresh_project_chat_profiles
+from .search_backfill import backfill_search_indexes
 from .project_status import run_daily_project_status_sql
 from .paper_reader import (
     generate_reader_followup_questions,
     import_reader_pdfs,
     import_reader_urls,
+    import_reader_webpages,
     paper_reader_chat_stream,
     save_reader_note_to_obsidian,
 )
@@ -738,9 +741,11 @@ def _archive_daily_filtered_papers(
         require_text_complete=False,
         reason="prefilter_rejected",
     )
+    library_prune_result = prune_unqualified_arxiv_library_papers(conn)
     _mark_daily_archive_statuses(conn, job_id, [*selected_paper_ids, *unselected_paper_ids])
     return {
         **zero_match_result,
+        **library_prune_result,
         "prefilter_rejected_papers_considered": prefilter_result["zero_match_papers_considered"],
         "prefilter_rejected_papers_archived": prefilter_result["zero_match_papers_archived"],
         "prefilter_rejected_files_deleted": prefilter_result["zero_match_files_deleted"],
@@ -829,9 +834,9 @@ def _refresh_daily_paper_statuses(conn, job_id: int, step_key: str | None = None
         int(row["paper_id"])
         for row in conn.execute(
             f"""
-            SELECT DISTINCT paper_id
+            SELECT DISTINCT source_arxiv_paper_id AS paper_id
             FROM project_paper_recommendations
-            WHERE paper_id IN ({placeholders})
+            WHERE source_arxiv_paper_id IN ({placeholders})
             """,
             paper_ids,
         ).fetchall()
@@ -1065,10 +1070,30 @@ def _cache_text_progress_callback(
             conn,
             job_id,
             steps,
-            3,
+            DAILY_STEP_INDEX["cache_text"],
             "running",
             accumulated,
             {"cache_text_progress": progress},
+        )
+
+    return callback
+
+
+def _project_judgment_progress_callback(
+    conn,
+    job_id: int,
+    steps: list[dict[str, Any]],
+    accumulated: dict[str, Any],
+) -> Callable[[dict[str, Any]], None]:
+    def callback(progress: dict[str, Any]) -> None:
+        _update_daily_progress(
+            conn,
+            job_id,
+            steps,
+            DAILY_STEP_INDEX["judge_project_papers"],
+            "running",
+            accumulated,
+            {"project_judgment_progress": progress},
         )
 
     return callback
@@ -1269,7 +1294,8 @@ def _retry_papers_for_run(conn, settings) -> tuple[list[DbRow], dict[int, dict[s
                 JOIN project_paper_judgments j ON j.paper_id = p.id
                 JOIN research_projects rp ON rp.id = j.project_id
                 LEFT JOIN project_paper_recommendations r
-                  ON r.project_id = j.project_id AND r.paper_id = j.paper_id
+                  ON r.project_id = j.project_id
+                 AND r.source_arxiv_paper_id = j.paper_id
                 WHERE r.paper_id IS NULL
                   AND {run_daily_project_status_sql("rp")}
                   {tombstone_filter}
@@ -1287,13 +1313,12 @@ def _retry_papers_for_run(conn, settings) -> tuple[list[DbRow], dict[int, dict[s
                 f"""
                 SELECT DISTINCT p.*
                 FROM arxiv_papers p
-                JOIN project_paper_recommendations r ON r.paper_id = p.id
+                JOIN project_paper_recommendations r ON r.source_arxiv_paper_id = p.id
                 JOIN research_projects rp ON rp.id = r.project_id
                 WHERE NOT EXISTS (
                     SELECT 1
-                    FROM paper_sources ps
-                    JOIN artifacts af ON af.scope_id = ps.paper_id
-                    WHERE ps.source_identifier = p.arxiv_id
+                    FROM artifacts af
+                    WHERE af.scope_id = r.paper_id
                       AND af.scope_type = 'paper'
                       AND af.artifact_type = 'paper_report'
                       AND af.status IN ('done', 'ready')
@@ -1860,6 +1885,12 @@ def run_daily_job(
                 conn,
                 settings,
                 paper_ids=selected_paper_ids,
+                progress_callback=_project_judgment_progress_callback(
+                    conn,
+                    job_id,
+                    steps,
+                    accumulated,
+                ),
             ),
         )
         accumulated.update(explain_result)
@@ -1926,6 +1957,11 @@ def cmd_api_paper_recommendation(args: argparse.Namespace) -> None:
     _print_json(result)
 
 
+def cmd_backfill_search_indexes(_: argparse.Namespace) -> None:
+    result = _with_db(lambda conn, settings: backfill_search_indexes(conn, settings))
+    _print_json(result)
+
+
 def cmd_api_paper_report(args: argparse.Namespace) -> None:
     payload = _read_json_stdin("paper report")
     result = _with_db(
@@ -1976,6 +2012,12 @@ def cmd_api_reader_upload(_: argparse.Namespace) -> None:
 def cmd_api_reader_urls(_: argparse.Namespace) -> None:
     payload = _read_json_stdin("paper reader urls")
     result = _with_db(lambda conn, settings: import_reader_urls(conn, settings, payload))
+    _print_json(result)
+
+
+def cmd_api_reader_web(_: argparse.Namespace) -> None:
+    payload = _read_json_stdin("paper reader webpages")
+    result = _with_db(lambda conn, settings: import_reader_webpages(conn, settings, payload))
     _print_json(result)
 
 
@@ -2139,6 +2181,9 @@ def build_parser() -> argparse.ArgumentParser:
     init = sub.add_parser("init-db")
     init.set_defaults(func=cmd_init_db)
 
+    backfill_search = sub.add_parser("backfill-search-indexes")
+    backfill_search.set_defaults(func=cmd_backfill_search_indexes)
+
     sync = sub.add_parser("sync-obsidian")
     sync.set_defaults(func=cmd_sync_obsidian)
 
@@ -2199,6 +2244,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     api_reader_urls = sub.add_parser("api-reader-urls")
     api_reader_urls.set_defaults(func=cmd_api_reader_urls)
+
+    api_reader_web = sub.add_parser("api-reader-web")
+    api_reader_web.set_defaults(func=cmd_api_reader_web)
 
     api_reader_save = sub.add_parser("api-reader-save")
     api_reader_save.add_argument("paper_id")

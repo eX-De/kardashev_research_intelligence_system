@@ -23,6 +23,7 @@ IDENTITY_TABLES = {
     "research_projects",
     "paper_reader_messages",
     "artifacts",
+    "artifact_chunks",
 }
 
 TABLE_ORDER = [
@@ -55,8 +56,11 @@ TABLE_ORDER = [
     "project_paper_matches",
     "project_paper_judgments",
     "project_paper_recommendations",
+    "paper_reader_references",
     "paper_reader_messages",
     "project_notes",
+    "artifact_chunk_embeddings",
+    "artifact_chunks",
     "artifacts",
 ]
 

@@ -8,6 +8,7 @@ from typing import Any
 
 from .config import Settings
 from .artifacts import content_hash, export_artifact_to_obsidian, upsert_artifact
+from .artifact_index import enqueue_artifact_index
 from .db import clean_unicode, from_json, to_json, utc_now
 from .llm import (
     ChatJsonError,
@@ -456,6 +457,7 @@ def generate_daily_report(
         model=settings.llm_chat_model,
         input_hash=content_hash(body, source_payload),
     )
+    index_job = enqueue_artifact_index(conn, settings, artifact)
     exported_path = ""
     export_enabled = (
         bool(settings.obsidian_vault_path) or obsidian_remote_enabled(settings)
@@ -480,4 +482,5 @@ def generate_daily_report(
         "daily_report_mode": "llm",
         "daily_report_project_matches": len(project_rows),
         "daily_report_global_papers": len(global_rows),
+        "daily_report_index_job": index_job,
     }

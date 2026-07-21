@@ -58,6 +58,7 @@ test("paper library status events mark library, reader, reports, notifications, 
   assert.ok(cache.stale.some((target) => Array.isArray(target) && target.join("/") === "paper-reports/summary"));
   assert.ok(cache.stale.some((target) => Array.isArray(target) && target.join("/") === "notifications"));
   assert.ok(cache.stale.some((target) => Array.isArray(target) && target.join("/") === "project/7"));
+  assert.ok(cache.stale.some((target) => target?.namespace === "artifact"));
 });
 
 test("papers.changed marks paper list namespaces without a single paper id", () => {

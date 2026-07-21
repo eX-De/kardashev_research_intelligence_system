@@ -69,6 +69,8 @@ services:
   worker:
     image: ${KRIS_IMAGE:-exde1968/kardashev-research-intelligence-system:latest}
     command: ["python", "-m", "worker.service"]
+    init: true
+    shm_size: "512mb"
     depends_on:
       db:
         condition: service_healthy

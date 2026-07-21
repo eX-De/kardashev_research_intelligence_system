@@ -159,6 +159,7 @@ export function DailyTasksSettingsView({
           <TextField label="PDF 缓存目录" name="arxiv_pdf_dir" placeholder="./data/arxiv_pdfs" value={settings.arxiv_pdf_dir} onChange={onSettingChange} />
           <TextField label="TXT 输出目录" name="arxiv_text_dir" placeholder="./data/arxiv_text" value={settings.arxiv_text_dir} onChange={onSettingChange} />
           <NumberField label="Embedding 请求并发数" name="embedding_concurrency" min="1" step="1" value={settings.embedding_concurrency} onChange={onSettingChange} />
+          <NumberField label="项目级判定并发数" name="project_judgment_concurrency" min="1" max="8" step="1" value={settings.project_judgment_concurrency ?? 3} onChange={onSettingChange} />
           <NumberField label="报告队列并发数" name="paper_report_queue_concurrency" min="1" max="8" step="1" value={settings.paper_report_queue_concurrency} onChange={onSettingChange} />
           <NumberField label="历史补洞上限" name="retry_daily_max_results" min="1" step="1" value={settings.retry_daily_max_results} onChange={onSettingChange} />
         </SettingsSection>

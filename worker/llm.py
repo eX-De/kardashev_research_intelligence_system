@@ -3,19 +3,21 @@ from __future__ import annotations
 import hashlib
 import json
 import socket
-from .db_types import DbConnection, DbRow
 import urllib.error
 import urllib.request
-from typing import Any
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from typing import Any, Callable
 
 from .config import Settings
 from .db import clean_unicode, from_json, to_json, utc_now
+from .db_types import DbConnection, DbRow
 from .project_status import run_daily_project_status_sql
 
 
 PROJECT_JUDGMENT_PROMPT_VERSION = "project_judgment_v1"
 PROJECT_JUDGMENT_CANDIDATE_QUALITY_THRESHOLD = 0.40
 PROJECT_JUDGMENT_PER_PROJECT_LIMIT = 10
+PROJECT_JUDGMENT_MAX_CONCURRENCY = 8
 PROJECT_JUDGMENT_REPORT_CONFIDENCE_THRESHOLD = 0.65
 PROJECT_JUDGMENT_REPORT_USEFULNESS_THRESHOLD = 0.60
 PROJECT_JUDGMENT_REPORT_RELATIONS = {"direct", "indirect"}
@@ -332,11 +334,32 @@ def generate_missing_project_judgments(
     settings: Settings,
     paper_ids: list[int] | None = None,
     per_project_limit: int = PROJECT_JUDGMENT_PER_PROJECT_LIMIT,
+    progress_callback: Callable[[dict[str, int]], None] | None = None,
 ) -> dict[str, int]:
     candidates = _candidate_rows(conn, paper_ids, per_project_limit)
     created = 0
     filtered = 0
     skipped = 0
+    pending: list[tuple[DbRow, dict[str, object], str]] = []
+    configured_concurrency = min(
+        max(1, int(settings.project_judgment_concurrency or 3)),
+        PROJECT_JUDGMENT_MAX_CONCURRENCY,
+    )
+
+    def report_progress(completed: int, effective_concurrency: int) -> None:
+        if not progress_callback:
+            return
+        progress_callback(
+            {
+                "total": len(candidates),
+                "completed": completed,
+                "created": created,
+                "filtered": filtered,
+                "skipped": skipped,
+                "concurrency": effective_concurrency,
+            }
+        )
+
     for row in candidates:
         payload = _judgment_payload(row)
         input_hash = _input_hash(payload)
@@ -346,60 +369,85 @@ def generate_missing_project_judgments(
         ):
             skipped += 1
             continue
-        response = _call_chat(settings, _project_judgment_prompt(payload))
-        if not isinstance(response, dict):
-            skipped += 1
-            continue
-        judgment = _normalize_judgment(response, _score(row["retrieval_quality"]))
-        passes = judgment_passes_report_filter(judgment)
-        if not passes:
-            filtered += 1
-        now = utc_now()
-        conn.execute(
-            """
-            INSERT INTO project_paper_judgments(
-              project_id, paper_id, relation_type, relevance_score, usefulness_score,
-              confidence, suggested_action, reason, evidence_mapping_json,
-              missing_evidence, input_hash, prompt_version, raw_json, created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(project_id, paper_id) DO UPDATE SET
-              relation_type = excluded.relation_type,
-              relevance_score = excluded.relevance_score,
-              usefulness_score = excluded.usefulness_score,
-              confidence = excluded.confidence,
-              suggested_action = excluded.suggested_action,
-              reason = excluded.reason,
-              evidence_mapping_json = excluded.evidence_mapping_json,
-              missing_evidence = excluded.missing_evidence,
-              input_hash = excluded.input_hash,
-              prompt_version = excluded.prompt_version,
-              raw_json = excluded.raw_json,
-              updated_at = excluded.updated_at
-            """,
-            (
-                int(row["project_id"]),
-                int(row["paper_id"]),
-                judgment["relation_type"],
-                float(judgment["relevance_score"]),
-                float(judgment["usefulness_score"]),
-                float(judgment["confidence"]),
-                judgment["suggested_action"],
-                judgment["reason"],
-                to_json(judgment["evidence_mapping"]),
-                judgment["missing_evidence"],
-                input_hash,
-                PROJECT_JUDGMENT_PROMPT_VERSION,
-                to_json(judgment["raw"]),
-                now,
-                now,
-            ),
-        )
-        conn.commit()
-        created += 1
+        pending.append((row, payload, input_hash))
+
+    effective_concurrency = min(configured_concurrency, len(pending)) if pending else 0
+    report_progress(skipped, effective_concurrency)
+    if not pending:
+        return {
+            "project_judgment_candidates": len(candidates),
+            "project_judgments_created": created,
+            "project_judgments_filtered": filtered,
+            "project_judgments_skipped": skipped,
+            "project_judgment_concurrency": configured_concurrency,
+        }
+
+    with ThreadPoolExecutor(
+        max_workers=effective_concurrency,
+        thread_name_prefix="project-judgment",
+    ) as executor:
+        futures: dict[Future[dict[str, object] | None], tuple[DbRow, str]] = {
+            executor.submit(_call_chat, settings, _project_judgment_prompt(payload)): (row, input_hash)
+            for row, payload, input_hash in pending
+        }
+        for future in as_completed(futures):
+            row, input_hash = futures[future]
+            response = future.result()
+            if not isinstance(response, dict):
+                skipped += 1
+            else:
+                judgment = _normalize_judgment(response, _score(row["retrieval_quality"]))
+                passes = judgment_passes_report_filter(judgment)
+                if not passes:
+                    filtered += 1
+                now = utc_now()
+                conn.execute(
+                    """
+                    INSERT INTO project_paper_judgments(
+                      project_id, paper_id, relation_type, relevance_score, usefulness_score,
+                      confidence, suggested_action, reason, evidence_mapping_json,
+                      missing_evidence, input_hash, prompt_version, raw_json, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(project_id,paper_id) DO UPDATE SET
+                      relation_type = excluded.relation_type,
+                      relevance_score = excluded.relevance_score,
+                      usefulness_score = excluded.usefulness_score,
+                      confidence = excluded.confidence,
+                      suggested_action = excluded.suggested_action,
+                      reason = excluded.reason,
+                      evidence_mapping_json = excluded.evidence_mapping_json,
+                      missing_evidence = excluded.missing_evidence,
+                      input_hash = excluded.input_hash,
+                      prompt_version = excluded.prompt_version,
+                      raw_json = excluded.raw_json,
+                      updated_at = excluded.updated_at
+                    """,
+                    (
+                        int(row["project_id"]),
+                        int(row["paper_id"]),
+                        judgment["relation_type"],
+                        float(judgment["relevance_score"]),
+                        float(judgment["usefulness_score"]),
+                        float(judgment["confidence"]),
+                        judgment["suggested_action"],
+                        judgment["reason"],
+                        to_json(judgment["evidence_mapping"]),
+                        judgment["missing_evidence"],
+                        input_hash,
+                        PROJECT_JUDGMENT_PROMPT_VERSION,
+                        to_json(judgment["raw"]),
+                        now,
+                        now,
+                    ),
+                )
+                conn.commit()
+                created += 1
+            report_progress(skipped + created, effective_concurrency)
     return {
         "project_judgment_candidates": len(candidates),
         "project_judgments_created": created,
         "project_judgments_filtered": filtered,
         "project_judgments_skipped": skipped,
+        "project_judgment_concurrency": configured_concurrency,
     }

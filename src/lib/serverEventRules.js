@@ -27,6 +27,7 @@ export const SERVER_EVENTS = Object.freeze({
   READER_PAPER_UPDATED: "reader.paper.updated",
   READER_PAPERS_IMPORTED: "reader.papers.imported",
   SETTINGS_CHANGED: "settings.changed",
+  SEARCH_COMPLETED: "search.completed",
   TASK_FAILED: "task.failed",
   TASK_FINISHED: "task.finished",
   TASK_STARTED: "task.started"
@@ -79,6 +80,7 @@ function markArtifactChanged(cache, artifactId) {
 function markPaperChanged(cache, paperId) {
   cache.markStale(["inbox"]);
   cache.markStale(["library"]);
+  cache.markStale(cacheNamespace("artifact"));
   cache.markStale(cacheNamespace("reader", "papers"));
   cache.markStale(["paper-reports"]);
   cache.markStale(["paper-reports", "summary"]);
@@ -208,6 +210,11 @@ export function applyServerEvent(cache, event) {
     cache.markStale(["health", "summary"]);
     if (scheduler) cache.setCache(["jobs", "status"], { scheduler });
     else cache.markStale(["jobs", "status"]);
+    return;
+  }
+
+  if (type === SERVER_EVENTS.SEARCH_COMPLETED) {
+    cache.markStale(["search", "job", asStringId(data?.worker_job_id)]);
     return;
   }
 

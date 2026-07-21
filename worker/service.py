@@ -30,7 +30,12 @@ from .cli import (
     run_sync_obsidian_job,
 )
 from .knowledge import save_manual_project_context
-from .paper_reader import import_reader_pdfs, import_reader_urls, save_reader_note_to_obsidian
+from .paper_reader import import_reader_pdfs, import_reader_urls, import_reader_webpages, save_reader_note_to_obsidian
+from .artifact_index import index_artifact, remove_artifact_index
+from .search_backfill import backfill_search_indexes
+from .unified_search import deep_search
+from .experiment_reports import index_experiment_report
+from .library_search_index import index_library_paper
 
 
 DISPATCHERS = {
@@ -225,6 +230,33 @@ def _publish_artifact_domain_events(conn: Any, worker_job: dict[str, Any], resul
     if not isinstance(result, dict):
         return
     job_type = str(worker_job.get("job_type") or "")
+    if job_type in {"artifact-index", "experiment-report-index"}:
+        payload = _payload(worker_job)
+        artifact_id = _optional_int(payload.get("artifact_id") or result.get("artifact_id"))
+        artifact = _compact_artifact_payload(result, "artifact") or {
+            "artifact_id": artifact_id,
+            "id": artifact_id,
+        }
+        insert_app_event(
+            conn,
+            "artifact.updated",
+            {
+                "artifact": artifact,
+                "artifact_id": artifact_id,
+                "reason": "search_index_updated",
+                "index_result": {
+                    key: result.get(key)
+                    for key in (
+                        "artifact_chunks_created",
+                        "artifact_embeddings_created",
+                        "artifact_chunks_removed",
+                        "unchanged",
+                    )
+                    if key in result
+                },
+            },
+        )
+        return
     daily_report_artifact_id = _optional_int(result.get("daily_report_artifact_id"))
     if daily_report_artifact_id:
         insert_app_event(
@@ -269,13 +301,18 @@ def _publish_reader_domain_events(conn: Any, worker_job: dict[str, Any], result:
         return
     job_type = str(worker_job.get("job_type") or "")
     payload = _payload(worker_job)
-    if job_type in {"reader-import-upload", "reader-import-url"}:
+    if job_type in {"reader-import-upload", "reader-import-url", "reader-import-web"}:
         imported = result.get("imported") if isinstance(result.get("imported"), list) else []
+        source_by_job_type = {
+            "reader-import-upload": "upload",
+            "reader-import-url": "url",
+            "reader-import-web": "web",
+        }
         insert_app_event(
             conn,
             "reader.papers.imported",
             {
-                "source": "upload" if job_type == "reader-import-upload" else "url",
+                "source": source_by_job_type[job_type],
                 "imported": [
                     {
                         "paper_id": item.get("paper_id") or item.get("id"),
@@ -332,6 +369,63 @@ def _publish_paper_report_domain_events(conn: Any, worker_job: dict[str, Any], r
             },
         )
         return
+
+    completed_reports = result.get("paper_reports_completed")
+    failed_reports = result.get("paper_reports_failures")
+    detailed_reports = [
+        report
+        for reports in (completed_reports, failed_reports)
+        if isinstance(reports, list)
+        for report in reports
+        if isinstance(report, dict)
+    ]
+    for report in detailed_reports:
+        paper_id = _optional_int(report.get("paper_id"))
+        artifact_id = _optional_int(report.get("artifact_id"))
+        status = clean_unicode(str(report.get("status") or "updated")).strip() or "updated"
+        title = clean_unicode(str(report.get("title") or "")).strip()
+        updated_at = report.get("updated_at")
+        payload = {
+            "paper": {
+                "paper_id": paper_id,
+                "id": paper_id,
+                "title": title or None,
+                "report_status": status,
+                "updated_at": updated_at,
+            },
+            "paper_report": {
+                "artifact_id": artifact_id,
+                "paper_id": paper_id,
+                "status": status,
+                "updated_at": updated_at,
+            },
+            "paper_id": paper_id,
+            "artifact_id": artifact_id,
+            "status": status,
+            "source_type": report.get("source_type") or None,
+            "manual_import": bool(report.get("manual_import")),
+            "project_ids": [],
+            "job_type": job_type,
+        }
+        if status == "done" and payload["manual_import"]:
+            notification_key = artifact_id or paper_id or "unknown"
+            payload["notification"] = {
+                "id": f"manual-paper-report-completed-{notification_key}",
+                "type": "manual_paper_report_completed",
+                "severity": "ok",
+                "title": "论文报告生成完成",
+                "detail": title or (f"论文 {paper_id}" if paper_id else "手动导入论文"),
+                "created_at": updated_at,
+                "source": {
+                    "paper_id": paper_id,
+                    "artifact_id": artifact_id,
+                    "source_type": report.get("source_type") or None,
+                },
+                "channels": ["toast"],
+                "requires_action": False,
+            }
+        insert_app_event(conn, "paper_report.updated", payload)
+
     report_keys = [key for key in result if str(key).startswith("paper_reports_")]
     result_summary = _result_summary(result, PAPER_REPORT_RESULT_CHANGE_KEYS)
     if not report_keys or not result_summary:
@@ -341,6 +435,15 @@ def _publish_paper_report_domain_events(conn: Any, worker_job: dict[str, Any], r
     queued = int(result.get("paper_reports_queued") or 0) + int(result.get("paper_reports_requeued") or 0)
     deleted = int(result.get("paper_reports_deleted") or 0) + int(result.get("paper_reports_removed") or 0)
     cancelled = int(result.get("paper_reports_cancelled") or 0)
+    detailed_done = sum(1 for report in detailed_reports if report.get("status") == "done")
+    detailed_failed = sum(1 for report in detailed_reports if report.get("status") == "failed")
+    if (
+        detailed_reports
+        and detailed_done == done
+        and detailed_failed == failed
+        and not any((queued, deleted, cancelled, int(result.get("paper_reports_refreshed") or 0)))
+    ):
+        return
     status = "done" if done else "failed" if failed else "queued" if queued else "removed" if deleted else "cancelled" if cancelled else "updated"
     insert_app_event(
         conn,
@@ -408,6 +511,26 @@ def dispatch_worker_job(conn: Any, settings: Any, worker_job: dict[str, Any]) ->
     payload = _payload(worker_job)
     args = _args(payload)
 
+    if job_type == "artifact-index":
+        artifact_id = _required_int(payload.get("artifact_id"), "artifact_id")
+        if str(payload.get("action") or "index") == "remove":
+            return remove_artifact_index(conn, artifact_id)
+        return index_artifact(conn, settings, artifact_id)
+
+    if job_type == "artifact-index-backfill":
+        return backfill_search_indexes(conn, settings)
+
+    if job_type == "experiment-report-index":
+        artifact_id = _required_int(payload.get("artifact_id"), "artifact_id")
+        return index_experiment_report(conn, settings, artifact_id)
+
+    if job_type == "unified-search":
+        return deep_search(conn, settings, payload)
+
+    if job_type == "library-paper-index":
+        paper_id = _required_int(payload.get("paper_id"), "paper_id")
+        return index_library_paper(conn, settings, paper_id)
+
     if job_type == "generate-paper-reports":
         limit = _optional_int(payload.get("limit")) or _optional_int(_arg_value(args, "--limit"))
         return run_generate_paper_reports_job(conn, settings, limit=limit, job_id=job_run_id)
@@ -455,6 +578,18 @@ def dispatch_worker_job(conn: Any, settings: Any, worker_job: dict[str, Any]) ->
         body = payload.get("body") if isinstance(payload.get("body"), dict) else payload
         return import_reader_urls(conn, settings, body)
 
+    if job_type == "reader-import-web":
+        body = payload.get("body") if isinstance(payload.get("body"), dict) else payload
+        result = import_reader_webpages(conn, settings, body)
+        if not result.get("ok"):
+            errors = result.get("errors") if isinstance(result.get("errors"), list) else []
+            first_error = next(
+                (str(item.get("error") or "").strip() for item in errors if isinstance(item, dict) and item.get("error")),
+                "Webpage import failed",
+            )
+            raise RuntimeError(first_error)
+        return result
+
     if job_type == "reader-save-obsidian":
         paper_id = _required_int(payload.get("paper_id"), "paper_id")
         return save_reader_note_to_obsidian(conn, settings, paper_id)
@@ -501,6 +636,18 @@ def run_once(worker_id: str) -> dict[str, Any]:
         _publish_reader_domain_events(conn, worker_job, result)
         _publish_paper_report_domain_events(conn, worker_job, result)
         _publish_paper_domain_events(conn, worker_job, result)
+        if str(worker_job.get("job_type") or "") == "unified-search":
+            insert_app_event(
+                conn,
+                "search.completed",
+                {
+                    "worker_job_id": completed_job.get("id"),
+                    "job_id": completed_job.get("job_run_id"),
+                    "query": result.get("query"),
+                    "result_count": len(result.get("results") or []),
+                    "partial": bool((result.get("stats") or {}).get("partial")),
+                },
+            )
         return {"claimed": True, "worker_job": completed_job, "result": result}
     finally:
         conn.close()

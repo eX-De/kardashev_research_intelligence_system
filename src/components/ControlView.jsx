@@ -276,7 +276,7 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
     notify("设置已保存", { type: "success" });
   }, [notify]);
 
-  const saveCurrentSettings = useCallback(async ({ notifyOnSuccess = false, forceSuccessToast = false, force = false } = {}) => {
+  const saveCurrentSettings = useCallback(async ({ forceSuccessToast = false, force = false } = {}) => {
     const payload = settingsPayload(settingsRef.current, providersRef.current);
     const requestedSignature = JSON.stringify(payload);
     if (!force && requestedSignature === lastSavedSignatureRef.current) {
@@ -304,7 +304,7 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
       setProviders(savedProviders);
       setSaveStatus("saved");
       setStatusMessage("Settings saved");
-      if (notifyOnSuccess) showSaveSuccess({ force: forceSuccessToast });
+      showSaveSuccess({ force: forceSuccessToast });
       refreshControl({ hydrate: false }).catch((error) => setStatusMessage(error.message));
     } catch (error) {
       if (requestId !== saveRequestRef.current || editVersion !== editVersionRef.current) return;
@@ -333,7 +333,6 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
     saveTimerRef.current = setTimeout(() => {
       saveTimerRef.current = null;
       saveCurrentSettings({
-        notifyOnSuccess: Boolean(autosave.notifyOnSuccess),
         forceSuccessToast: Boolean(autosave.forceSuccessToast)
       });
     }, autosave.delay ?? AUTO_SAVE_DELAY_MS);
@@ -352,7 +351,6 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
     const nextDelay = options.delay ?? AUTO_SAVE_DELAY_MS;
     pendingAutosaveRef.current = {
       delay: Math.min(current.delay ?? nextDelay, nextDelay),
-      notifyOnSuccess: Boolean(current.notifyOnSuccess || options.notifyOnSuccess),
       forceSuccessToast: Boolean(current.forceSuccessToast || options.forceSuccessToast)
     };
   }
@@ -465,8 +463,7 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
         return;
       }
       updateSetting(name, data.relative_path ?? data.path ?? "", {
-        delay: QUICK_SAVE_DELAY_MS,
-        notifyOnSuccess: true
+        delay: QUICK_SAVE_DELAY_MS
       });
       setStatusMessage("路径已选择");
       notify("路径已选择，正在保存", { type: "info" });
@@ -484,7 +481,6 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
       saveTimerRef.current = null;
     }
     saveCurrentSettings({
-      notifyOnSuccess: true,
       forceSuccessToast: true,
       force: true
     });
@@ -492,16 +488,14 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
 
   function addProvider() {
     queueAutosave({
-      delay: QUICK_SAVE_DELAY_MS,
-      notifyOnSuccess: true
+      delay: QUICK_SAVE_DELAY_MS
     });
     setProviders((current) => [...current, { id: nextProviderId(current), name: "", base_url: "", api_key: "", chat_models: "", embedding_models: "", clear_api_key: false }]);
   }
 
   function removeProvider(index) {
     queueAutosave({
-      delay: QUICK_SAVE_DELAY_MS,
-      notifyOnSuccess: true
+      delay: QUICK_SAVE_DELAY_MS
     });
     setProviders((current) => {
       const next = current.filter((_, providerIndex) => providerIndex !== index);

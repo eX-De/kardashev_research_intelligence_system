@@ -8,11 +8,12 @@ from worker.arxiv_archive import archive_zero_match_papers
 from worker.api import library_paper_detail as api_library_paper_detail
 from worker.arxiv_text import replace_arxiv_chunks_for_paper
 from worker.config import Settings
-from worker.paper_reports import queue_paper_report
+from worker.paper_reports import paper_report_payload, queue_paper_report
 from worker.papers import (
     list_paper_library,
-    paper_id_for_arxiv_paper_id,
     paper_library_detail,
+    promote_arxiv_paper_to_library,
+    prune_unqualified_arxiv_library_papers,
     set_arxiv_paper_library_status,
     upsert_paper_from_arxiv,
 )
@@ -115,6 +116,27 @@ class PaperLibraryTests(unittest.TestCase):
         self.assertEqual(listed["items"], [])
         self.assertEqual(paper_count, 0)
 
+    def test_reading_missing_report_state_does_not_create_library_paper(self) -> None:
+        conn = connect_test_db()
+        arxiv_paper_id = _insert_arxiv_paper(conn, "2605.19997")
+        conn.commit()
+
+        payload = paper_report_payload(conn, arxiv_paper_id)
+
+        self.assertIsNone(payload)
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM papers").fetchone()["count"], 0)
+
+    def test_full_text_cache_does_not_create_library_paper(self) -> None:
+        conn = _conn()
+        arxiv_paper_id = _insert_arxiv_paper(conn, "2605.19998")
+        paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (arxiv_paper_id,)).fetchone()
+
+        replace_arxiv_chunks_for_paper(conn, paper, "--- page 1 ---\nInternal discovery full text.")
+        conn.commit()
+
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM papers").fetchone()["count"], 0)
+        self.assertGreater(conn.execute("SELECT COUNT(*) AS count FROM arxiv_text_chunks").fetchone()["count"], 0)
+
     def test_library_default_list_excludes_archived_and_discarded_papers(self) -> None:
         conn = _conn()
         archived_arxiv_id = _insert_arxiv_paper(conn, "2605.20001")
@@ -191,15 +213,16 @@ class PaperLibraryTests(unittest.TestCase):
         arxiv_paper_id = _insert_arxiv_paper(conn, "2605.32001")
         row = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (arxiv_paper_id,)).fetchone()
         library_paper_id = upsert_paper_from_arxiv(conn, row)
-        queue_paper_report(conn, arxiv_paper_id, prompt="Summarize")
+        queue_paper_report(conn, library_paper_id, prompt="Summarize")
 
         detail = api_library_paper_detail(conn, library_paper_id)
 
-        self.assertEqual(detail["legacy_arxiv_paper_id"], arxiv_paper_id)
-        self.assertEqual(detail["paper_report"]["paper_id"], arxiv_paper_id)
+        self.assertNotIn("legacy_arxiv_paper_id", detail)
+        self.assertEqual(detail["id"], library_paper_id)
+        self.assertEqual(detail["paper_report"]["paper_id"], library_paper_id)
         self.assertEqual(detail["paper_report"]["status"], "queued")
 
-    def test_archive_zero_match_soft_archives_candidate_library_paper(self) -> None:
+    def test_archive_zero_match_does_not_create_library_paper(self) -> None:
         conn = _conn()
         arxiv_paper_id = _insert_arxiv_paper(conn, "2605.20003")
         conn.commit()
@@ -208,16 +231,15 @@ class PaperLibraryTests(unittest.TestCase):
 
         self.assertEqual(result["zero_match_papers_archived"], 1)
         self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM arxiv_papers").fetchone()["count"], 1)
-        self.assertEqual(conn.execute("SELECT library_status FROM papers").fetchone()["library_status"], "archived")
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM papers").fetchone()["count"], 0)
         self.assertEqual(list_paper_library(conn)["total"], 0)
-        self.assertEqual(list_paper_library(conn, library_status="archived")["total"], 1)
+        self.assertEqual(list_paper_library(conn, library_status="archived")["total"], 0)
 
     def test_archive_zero_match_skips_saved_library_paper(self) -> None:
         conn = _conn()
         arxiv_paper_id = _insert_arxiv_paper(conn, "2605.10002")
-        paper_id = paper_id_for_arxiv_paper_id(conn, arxiv_paper_id)
+        paper_id = promote_arxiv_paper_to_library(conn, arxiv_paper_id, library_status="saved")
         self.assertIsNotNone(paper_id)
-        set_arxiv_paper_library_status(conn, arxiv_paper_id, "saved")
         conn.commit()
 
         result = archive_zero_match_papers(conn, test_settings(), [arxiv_paper_id])
@@ -229,7 +251,7 @@ class PaperLibraryTests(unittest.TestCase):
     def test_archive_zero_match_skips_paper_artifact(self) -> None:
         conn = _conn()
         arxiv_paper_id = _insert_arxiv_paper(conn, "2605.10003")
-        paper_id = paper_id_for_arxiv_paper_id(conn, arxiv_paper_id)
+        paper_id = promote_arxiv_paper_to_library(conn, arxiv_paper_id)
         self.assertIsNotNone(paper_id)
         conn.execute(
             """
@@ -245,6 +267,34 @@ class PaperLibraryTests(unittest.TestCase):
         self.assertEqual(result["zero_match_papers_archived"], 0)
         self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM arxiv_papers").fetchone()["count"], 1)
         self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM artifacts").fetchone()["count"], 1)
+
+    def test_prune_removes_only_unqualified_automatic_candidates(self) -> None:
+        conn = _conn()
+        removable_arxiv_id = _insert_arxiv_paper(conn, "2605.10004")
+        protected_arxiv_id = _insert_arxiv_paper(conn, "2605.10005")
+        removable_id = promote_arxiv_paper_to_library(conn, removable_arxiv_id)
+        protected_id = promote_arxiv_paper_to_library(conn, protected_arxiv_id)
+        conn.execute(
+            "INSERT INTO research_projects(name, created_at, updated_at) VALUES ('Pending Project', 'now', 'now')"
+        )
+        project_id = int(conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"])
+        conn.execute(
+            """
+            INSERT INTO project_paper_recommendations(
+              project_id, paper_id, state, created_at, updated_at
+            )
+            VALUES (?, ?, 'pending', 'now', 'now')
+            """,
+            (project_id, protected_arxiv_id),
+        )
+        conn.commit()
+
+        result = prune_unqualified_arxiv_library_papers(conn)
+
+        self.assertEqual(result["unqualified_library_papers_removed"], 1)
+        self.assertIsNone(conn.execute("SELECT id FROM papers WHERE id = ?", (removable_id,)).fetchone())
+        self.assertIsNotNone(conn.execute("SELECT id FROM papers WHERE id = ?", (protected_id,)).fetchone())
+        self.assertEqual(conn.execute("SELECT COUNT(*) AS count FROM arxiv_papers").fetchone()["count"], 2)
 
 
 if __name__ == "__main__":

@@ -9,20 +9,23 @@ from pathlib import Path
 from typing import Any
 
 from .arxiv_text import (
+    chunk_text,
     download_pdf,
     extract_pdf_text_to_file,
-    pdf_url,
-    replace_arxiv_chunks_for_paper,
-    safe_arxiv_filename,
 )
 from .config import Settings
 from .artifacts import PAPER_REPORT_ARTIFACT_TYPE, content_hash, upsert_artifact
+from .artifact_index import enqueue_artifact_index
+from .library_search_index import enqueue_library_paper_index
 from .db import clean_unicode, from_json, utc_now
-from .papers import paper_id_for_arxiv_paper_id
+from .papers import (
+    replace_paper_chunks,
+    upsert_paper_asset,
+)
 from .project_status import run_daily_project_status_sql
 
 
-PAPER_READER_DEFAULT_PROMPT = """请阅读这篇论文 PDF，输出结构化解读：
+PAPER_READER_DEFAULT_PROMPT = """请阅读这份研究文档，输出结构化解读：
 
 1. 研究问题和背景
 2. 方法和实验设计
@@ -33,10 +36,11 @@ PAPER_READER_DEFAULT_PROMPT = """请阅读这篇论文 PDF，输出结构化解�
 请尽量使用中文，保留关键英文术语。"""
 
 PAPER_READER_ANALYSIS_SYSTEM = (
-    "You are a research paper reading assistant. Read the supplied full PDF text and answer accurately from it."
+    "You are a research document reading assistant. Read the supplied extracted document text and answer accurately from it."
 )
 
 VALID_REPORT_STATUSES = {"queued", "processing", "done", "failed", "cancelled", "removed"}
+MANUAL_IMPORT_SOURCE_TYPES = {"upload", "url", "web", "manual"}
 
 
 def _paper_filter(
@@ -57,9 +61,6 @@ def _report_source_key(paper_id: int) -> str:
 
 
 def _paper_report_artifact_row(conn: DbConnection, paper_id: int) -> DbRow | None:
-    library_paper_id = paper_id_for_arxiv_paper_id(conn, int(paper_id))
-    if library_paper_id is None:
-        return None
     rows = conn.execute(
         """
         SELECT *
@@ -69,7 +70,7 @@ def _paper_report_artifact_row(conn: DbConnection, paper_id: int) -> DbRow | Non
           AND artifact_type = ?
         ORDER BY updated_at DESC, id DESC
         """,
-        (int(library_paper_id), PAPER_REPORT_ARTIFACT_TYPE),
+        (int(paper_id), PAPER_REPORT_ARTIFACT_TYPE),
     ).fetchall()
     source_key = _report_source_key(paper_id)
     fallback = rows[0] if rows else None
@@ -85,11 +86,32 @@ def _paper_report_state(
     paper_id: int,
     row: DbRow | None = None,
 ) -> dict[str, Any] | None:
-    paper = conn.execute("SELECT title, arxiv_id, link FROM arxiv_papers WHERE id = ?", (int(paper_id),)).fetchone()
+    paper = conn.execute(
+        """
+        SELECT
+          paper.id,
+          paper.title,
+          paper.arxiv_id,
+          COALESCE((
+            SELECT source.source_url
+            FROM paper_sources source
+            WHERE source.paper_id = paper.id AND source.source_url != ''
+            ORDER BY source.updated_at DESC, source.id DESC
+            LIMIT 1
+          ), '') AS link,
+          COALESCE((
+            SELECT source.source_type
+            FROM paper_sources source
+            WHERE source.paper_id = paper.id
+            ORDER BY source.updated_at DESC, source.id DESC
+            LIMIT 1
+          ), '') AS source_type
+        FROM papers paper
+        WHERE paper.id = ?
+        """,
+        (int(paper_id),),
+    ).fetchone()
     if not paper:
-        return None
-    library_paper_id = paper_id_for_arxiv_paper_id(conn, int(paper_id))
-    if library_paper_id is None:
         return None
     row = row if row is not None else _paper_report_artifact_row(conn, int(paper_id))
     content = from_json(row["content_json"], {}) if row else {}
@@ -104,9 +126,9 @@ def _paper_report_state(
     return {
         "artifact_id": int(row["id"]) if row else None,
         "paper_id": int(paper_id),
-        "library_paper_id": int(library_paper_id),
         "arxiv_id": paper["arxiv_id"],
         "link": paper["link"],
+        "source_type": paper["source_type"],
         "title": paper["title"],
         "status": row["status"] if row else "queued",
         "prompt": content.get("prompt") or "",
@@ -131,8 +153,7 @@ def _save_paper_report_state(
     commit: bool = True,
 ) -> dict[str, object]:
     content = {
-        "paper_id": int(state["library_paper_id"]),
-        "legacy_arxiv_paper_id": int(state["paper_id"]),
+        "paper_id": int(state["paper_id"]),
         "arxiv_id": state.get("arxiv_id") or "",
         "link": state.get("link") or "",
         "prompt": state.get("prompt") or "",
@@ -146,14 +167,13 @@ def _save_paper_report_state(
     source = {
         "source_key": source_key,
         "generated_from": "paper_report_queue",
-        "legacy_arxiv_paper_id": int(state["paper_id"]),
         "source_text_hash": state.get("source_text_hash") or "",
     }
     markdown = clean_unicode(str(state.get("report_markdown") or ""))
     artifact = upsert_artifact(
         conn,
         scope_type="paper",
-        scope_id=int(state["library_paper_id"]),
+        scope_id=int(state["paper_id"]),
         artifact_type=PAPER_REPORT_ARTIFACT_TYPE,
         title=clean_unicode(str(state.get("title") or f"Paper {state['paper_id']} Full Report")),
         content_markdown=markdown,
@@ -168,6 +188,21 @@ def _save_paper_report_state(
     )
     state["artifact_id"] = int(artifact["id"]) if artifact else state.get("artifact_id")
     return artifact
+
+
+def _paper_report_result(state: dict[str, Any]) -> dict[str, object]:
+    source_type = clean_unicode(str(state.get("source_type") or "")).strip().lower()
+    arxiv_id = clean_unicode(str(state.get("arxiv_id") or "")).strip().lower()
+    return {
+        "paper_id": int(state["paper_id"]),
+        "artifact_id": int(state["artifact_id"]) if state.get("artifact_id") else None,
+        "title": clean_unicode(str(state.get("title") or "")).strip(),
+        "status": clean_unicode(str(state.get("status") or "")).strip(),
+        "source_type": source_type,
+        "manual_import": source_type in MANUAL_IMPORT_SOURCE_TYPES or arxiv_id.startswith("reader-"),
+        "updated_at": state.get("finished_at") or state.get("updated_at"),
+        "error_message": clean_unicode(str(state.get("error_message") or "")).strip(),
+    }
 
 
 def _report_rows_for_queue(
@@ -199,18 +234,9 @@ def _report_rows_for_queue(
     selected = None if paper_ids is None else {int(paper_id) for paper_id in paper_ids}
     result: list[dict[str, Any]] = []
     for row in rows:
-        source = from_json(row["source_json"], {})
-        content = from_json(row["content_json"], {})
-        legacy_id = None
-        if isinstance(source, dict):
-            legacy_id = source.get("legacy_arxiv_paper_id")
-        if legacy_id is None and isinstance(content, dict):
-            legacy_id = content.get("legacy_arxiv_paper_id")
         try:
-            paper_id = int(legacy_id)
+            paper_id = int(row["scope_id"])
         except (TypeError, ValueError):
-            paper_id = _legacy_paper_id_for_library_paper(conn, int(row["scope_id"] or 0))
-        if paper_id is None:
             continue
         if selected is not None and paper_id not in selected:
             continue
@@ -220,26 +246,23 @@ def _report_rows_for_queue(
     return result
 
 
-def _legacy_paper_id_for_library_paper(conn: DbConnection, library_paper_id: int) -> int | None:
-    row = conn.execute(
-        """
-        SELECT ap.id
-        FROM arxiv_papers ap
-        JOIN paper_sources ps ON ps.source_identifier = ap.arxiv_id
-        WHERE ps.paper_id = ?
-        ORDER BY ap.id
-        LIMIT 1
-        """,
-        (int(library_paper_id),),
-    ).fetchone()
-    return int(row["id"]) if row else None
-
-
 def _source_projects_for_recommended_papers(
     conn: DbConnection,
     paper_ids: list[int] | tuple[int, ...] | set[int] | None = None,
 ) -> dict[int, list[int]]:
-    paper_clause, paper_params = _paper_filter("r", paper_ids)
+    paper_clause = ""
+    paper_params: list[Any] = []
+    if paper_ids is not None:
+        ids = sorted({int(paper_id) for paper_id in paper_ids})
+        if not ids:
+            paper_clause = "AND 1 = 0"
+        else:
+            placeholders = ", ".join("?" for _ in ids)
+            paper_clause = (
+                f"AND (r.paper_id IN ({placeholders}) "
+                f"OR r.source_arxiv_paper_id IN ({placeholders}))"
+            )
+            paper_params = [*ids, *ids]
     rows = conn.execute(
         f"""
         SELECT r.paper_id, r.project_id
@@ -304,20 +327,34 @@ def ensure_paper_reports_for_recommendations(
 
 
 def sync_paper_report_for_recommendation_state(conn: DbConnection, paper_id: int) -> dict[str, int]:
-    project_ids = _source_projects_for_recommended_papers(conn, [paper_id]).get(int(paper_id), [])
+    paper_id = int(paper_id)
+    project_ids = _source_projects_for_recommended_papers(conn, [paper_id]).get(paper_id, [])
     state = _paper_report_state(conn, paper_id)
     if not state or not state.get("artifact_id"):
         return {"paper_reports_deleted": 0, "paper_reports_refreshed": 0}
 
     if not project_ids:
         paper = conn.execute(
-            "SELECT arxiv_id, categories_json FROM arxiv_papers WHERE id = ?",
-            (int(paper_id),),
+            """
+            SELECT
+              p.arxiv_id,
+              COALESCE(source.source_type, '') AS source_type
+            FROM papers p
+            LEFT JOIN LATERAL (
+              SELECT ps.source_type
+              FROM paper_sources ps
+              WHERE ps.paper_id = p.id
+              ORDER BY ps.updated_at DESC, ps.id DESC
+              LIMIT 1
+            ) source ON TRUE
+            WHERE p.id = ?
+            """,
+            (paper_id,),
         ).fetchone()
         source_project_ids = state.get("source_project_ids") or []
-        categories = set(from_json(paper["categories_json"], [])) if paper else set()
         arxiv_id = str(paper["arxiv_id"] or "") if paper else ""
-        if "reader" in categories or arxiv_id.startswith("reader-") or not source_project_ids:
+        source_type = str(paper["source_type"] or "") if paper else ""
+        if source_type in {"upload", "url", "web", "manual"} or arxiv_id.startswith("reader-") or not source_project_ids:
             return {"paper_reports_deleted": 0, "paper_reports_refreshed": 0}
         state["status"] = "removed"
         state["finished_at"] = utc_now()
@@ -342,9 +379,8 @@ def queue_paper_report(
     force: bool = False,
     prompt: str | None = None,
 ) -> dict[str, int]:
-    if not conn.execute("SELECT id FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone():
+    if not conn.execute("SELECT id FROM papers WHERE id = ?", (paper_id,)).fetchone():
         raise RuntimeError(f"Paper not found: {paper_id}")
-    ensure_paper_reports_for_recommendations(conn, [paper_id])
     state = _paper_report_state(conn, paper_id)
     if not state:
         raise RuntimeError(f"Paper not found: {paper_id}")
@@ -458,8 +494,8 @@ def cancel_paper_report_from_queue(conn: DbConnection, paper_id: int) -> dict[st
     return {"paper_reports_cancelled": 0}
 
 
-def _read_existing_text(paper: DbRow) -> str:
-    path_text = str(paper["text_path"] or "").strip()
+def _read_existing_text(path_value: object) -> str:
+    path_text = str(path_value or "").strip()
     if not path_text:
         return ""
     path = Path(path_text)
@@ -469,45 +505,91 @@ def _read_existing_text(paper: DbRow) -> str:
 
 
 def _ensure_full_text(conn: DbConnection, settings: Settings, paper_id: int) -> str:
-    paper = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
+    paper = conn.execute("SELECT * FROM papers WHERE id = ?", (paper_id,)).fetchone()
     if not paper:
         raise RuntimeError(f"Paper not found: {paper_id}")
-    existing_text = _read_existing_text(paper)
+    text_asset = conn.execute(
+        """
+        SELECT *
+        FROM paper_assets
+        WHERE paper_id = ? AND asset_type = 'text'
+        ORDER BY CASE WHEN status = 'complete' AND path != '' THEN 0 ELSE 1 END,
+                 updated_at DESC,
+                 id DESC
+        LIMIT 1
+        """,
+        (paper_id,),
+    ).fetchone()
+    existing_text = _read_existing_text(text_asset["path"] if text_asset else "")
     if existing_text:
         return existing_text
 
-    stem = safe_arxiv_filename(str(paper["arxiv_id"]))
-    pdf_path = Path(str(paper["pdf_path"] or "").strip() or settings.arxiv_pdf_dir / f"{stem}.pdf")
-    text_path = Path(str(paper["text_path"] or "").strip() or settings.arxiv_text_dir / f"{stem}.txt")
-    if not pdf_path.exists():
-        download_pdf(pdf_url(paper), pdf_path)
-    char_count = extract_pdf_text_to_file(pdf_path, text_path)
-    conn.execute(
+    pdf_asset = conn.execute(
         """
-        UPDATE arxiv_papers
-        SET pdf_path = ?,
-            text_path = ?,
-            text_extracted_at = ?,
-            text_status = 'complete',
-            text_error = '',
-            text_char_count = ?
-        WHERE id = ?
+        SELECT *
+        FROM paper_assets
+        WHERE paper_id = ? AND asset_type = 'pdf'
+        ORDER BY CASE WHEN path != '' THEN 0 WHEN url != '' THEN 1 ELSE 2 END,
+                 updated_at DESC,
+                 id DESC
+        LIMIT 1
         """,
-        (str(pdf_path), str(text_path), utc_now(), char_count, paper_id),
+        (paper_id,),
+    ).fetchone()
+    if not pdf_asset:
+        raise RuntimeError("Full text and PDF asset are both missing")
+    stem = f"paper-{int(paper_id)}"
+    pdf_path = Path(str(pdf_asset["path"] or "").strip() or settings.arxiv_pdf_dir / f"{stem}.pdf")
+    text_path_value = str(text_asset["path"] or "").strip() if text_asset else ""
+    text_path = Path(text_path_value) if text_path_value else settings.arxiv_text_dir / f"{stem}.txt"
+    if not pdf_path.exists():
+        pdf_url_value = clean_unicode(str(pdf_asset["url"] or "")).strip()
+        if not pdf_url_value:
+            raise RuntimeError("PDF asset file is missing and has no download URL")
+        download_pdf(pdf_url_value, pdf_path)
+    char_count = extract_pdf_text_to_file(pdf_path, text_path)
+    upsert_paper_asset(
+        conn,
+        paper_id,
+        asset_type="pdf",
+        path=str(pdf_path),
+        url=str(pdf_asset["url"] or ""),
+        status="complete",
     )
-    refreshed = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
-    text = _read_existing_text(refreshed)
-    replace_arxiv_chunks_for_paper(conn, refreshed, text)
+    text_asset_id = upsert_paper_asset(
+        conn,
+        paper_id,
+        asset_type="text",
+        path=str(text_path),
+        status="complete",
+        metadata={"char_count": int(char_count)},
+    )
+    text = _read_existing_text(text_path)
+    metadata_text = clean_unicode(
+        f"Title: {paper['title']}\n\nAbstract: {paper['abstract']}"
+    ).strip()
+    chunks = [
+        {
+            "source": "metadata",
+            "page_start": None,
+            "page_end": None,
+            "text": metadata_text,
+            "token_count": max(1, len(metadata_text) // 4),
+            "char_count": len(metadata_text),
+        },
+        *chunk_text(text),
+    ]
+    replace_paper_chunks(conn, paper_id, chunks, text_asset_id=text_asset_id)
     conn.commit()
     return text
 
 
 def _analysis_messages(paper_text: str, prompt: str) -> list[dict[str, str]]:
     user_message = (
-        "下面是 PyMuPDF 从论文 PDF 中解析出的完整文本，按页保留。"
+        "下面是从来源文档中提取并清洗后的完整正文；PDF 文本可能保留分页，网页文本可能保留 Markdown 结构。"
         "请基于这份文本完成用户要求；不要声称无法读取正文，除非文本本身确实缺失。\n\n"
         "请只返回一个 JSON 对象，不要输出 JSON 之外的文字。JSON 字段：\n"
-        "- title: 论文正式标题，使用论文正文中的标题，去掉换行和多余空格。\n"
+        "- title: 文档正式标题，使用正文中的标题，去掉换行和多余空格。\n"
         "- markdown: 完整中文解读报告，使用 Markdown。\n\n"
         "<paper_text>\n"
         f"{paper_text}\n"
@@ -705,11 +787,13 @@ def process_paper_report_queue(
     settings: Settings,
     paper_ids: list[int] | tuple[int, ...] | set[int] | None = None,
     limit: int | None = None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     target = max(1, int(limit)) if limit else None
     considered = 0
     done = 0
     failed = 0
+    completed_reports: list[dict[str, object]] = []
+    failed_reports: list[dict[str, object]] = []
     while target is None or considered < target:
         paper_id = _claim_queued_report(conn, paper_ids)
         if paper_id is None:
@@ -726,7 +810,7 @@ def process_paper_report_queue(
             prompt = clean_unicode(str(state.get("prompt") or "")).strip() or _settings_report_prompt(settings)
             provider_id = settings.paper_report_provider_id or settings.llm_chat_provider_id
             model = settings.paper_report_model or settings.llm_chat_model
-            paper = conn.execute("SELECT title FROM arxiv_papers WHERE id = ?", (paper_id,)).fetchone()
+            paper = conn.execute("SELECT title FROM papers WHERE id = ?", (paper_id,)).fetchone()
             current_title = str(paper["title"] if paper else "").strip()
             messages = _analysis_messages(paper_text, prompt)
             raw_response = _call_chat_text(
@@ -741,10 +825,11 @@ def process_paper_report_queue(
             finished = utc_now()
             if generated_title and generated_title != current_title:
                 conn.execute(
-                    "UPDATE arxiv_papers SET title = ? WHERE id = ?",
-                    (generated_title, paper_id),
+                    "UPDATE papers SET title = ?, updated_at = ? WHERE id = ?",
+                    (generated_title, finished, paper_id),
                 )
                 state["title"] = generated_title
+                enqueue_library_paper_index(conn, settings, paper_id)
             state.update(
                 {
                     "status": "done",
@@ -758,8 +843,10 @@ def process_paper_report_queue(
                     "finished_at": finished,
                 }
             )
-            _save_paper_report_state(conn, state, commit=False)
+            artifact = _save_paper_report_state(conn, state, commit=False)
             conn.commit()
+            enqueue_artifact_index(conn, settings, artifact)
+            completed_reports.append(_paper_report_result(state))
             done += 1
         except Exception as exc:
             finished = utc_now()
@@ -777,6 +864,7 @@ def process_paper_report_queue(
                 state["finished_at"] = finished
                 _save_paper_report_state(conn, state, commit=False)
                 conn.commit()
+                failed_reports.append(_paper_report_result(state))
             except Exception as record_exc:
                 try:
                     conn.rollback()
@@ -791,6 +879,8 @@ def process_paper_report_queue(
         "paper_reports_considered": considered,
         "paper_reports_done": done,
         "paper_reports_failed": failed,
+        "paper_reports_completed": completed_reports,
+        "paper_reports_failures": failed_reports,
     }
 
 

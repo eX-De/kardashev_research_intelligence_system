@@ -297,9 +297,9 @@ def _row_value(row: DbRow, key: str, default: object = "") -> object:
 
 
 def _legacy_library_paper_id(conn: DbConnection, legacy_arxiv_paper_id: int) -> int | None:
-    from .papers import paper_id_for_arxiv_paper_id
+    from .papers import promote_arxiv_paper_to_library
 
-    paper_id = paper_id_for_arxiv_paper_id(conn, int(legacy_arxiv_paper_id))
+    paper_id = promote_arxiv_paper_to_library(conn, int(legacy_arxiv_paper_id))
     return int(paper_id) if paper_id is not None else None
 
 
@@ -308,6 +308,8 @@ def _migrate_legacy_paper_reading_reports(conn: DbConnection) -> int:
     for row in rows:
         legacy_paper_id = int(row["paper_id"])
         library_paper_id = _legacy_library_paper_id(conn, legacy_paper_id)
+        if library_paper_id is None:
+            continue
         paper = conn.execute(
             "SELECT title, arxiv_id, link FROM arxiv_papers WHERE id = ?",
             (legacy_paper_id,),
@@ -321,7 +323,6 @@ def _migrate_legacy_paper_reading_reports(conn: DbConnection) -> int:
         markdown = clean_unicode(str(_row_value(row, "report_markdown", "")))
         content = {
             "paper_id": library_paper_id,
-            "legacy_arxiv_paper_id": legacy_paper_id,
             "arxiv_id": paper["arxiv_id"] if paper else "",
             "link": paper["link"] if paper else "",
             "prompt": _row_value(row, "prompt", ""),
@@ -333,8 +334,7 @@ def _migrate_legacy_paper_reading_reports(conn: DbConnection) -> int:
         }
         source = {
             "legacy_table": "paper_reading_reports",
-            "legacy_arxiv_paper_id": legacy_paper_id,
-            "source_key": f"paper_report:{legacy_paper_id}",
+            "source_key": f"paper_report:{library_paper_id}",
             "source_text_hash": _row_value(row, "source_text_hash", ""),
             "legacy_created_at": _row_value(row, "created_at", ""),
             "legacy_updated_at": _row_value(row, "updated_at", ""),
@@ -342,14 +342,14 @@ def _migrate_legacy_paper_reading_reports(conn: DbConnection) -> int:
         upsert_artifact(
             conn,
             scope_type="paper",
-            scope_id=library_paper_id if library_paper_id is not None else legacy_paper_id,
+            scope_id=library_paper_id,
             artifact_type=PAPER_REPORT_ARTIFACT_TYPE,
             title=title,
             content_markdown=markdown,
             content_json=content,
             status=clean_unicode(str(_row_value(row, "status", "queued") or "queued")),
             source_json=source,
-            source_key=f"paper_report:{legacy_paper_id}",
+            source_key=f"paper_report:{library_paper_id}",
             model_provider_id=clean_unicode(str(_row_value(row, "model_provider_id", ""))),
             model=clean_unicode(str(_row_value(row, "model", ""))),
             input_hash=clean_unicode(str(_row_value(row, "source_text_hash", "")))
@@ -442,9 +442,22 @@ def generate_project_index_artifact(conn: DbConnection, project_id: int) -> dict
         raise RuntimeError(f"Project not found: {project_id}")
     papers = conn.execute(
         """
-        SELECT pp.relation, pp.note, p.arxiv_id, p.title, p.link, p.published_at
+        SELECT
+          pp.relation,
+          pp.note,
+          p.arxiv_id,
+          p.title,
+          COALESCE(source.source_url, '') AS link,
+          p.published_at
         FROM project_papers pp
-        JOIN arxiv_papers p ON p.id = pp.paper_id
+        JOIN papers p ON p.id = pp.paper_id
+        LEFT JOIN LATERAL (
+          SELECT ps.source_url
+          FROM paper_sources ps
+          WHERE ps.paper_id = p.id
+          ORDER BY ps.updated_at DESC, ps.id DESC
+          LIMIT 1
+        ) source ON TRUE
         WHERE pp.project_id = ?
         ORDER BY pp.updated_at DESC
         """,

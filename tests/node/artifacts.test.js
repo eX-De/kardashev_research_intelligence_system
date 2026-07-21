@@ -30,7 +30,7 @@ function artifactRow(overrides = {}) {
   };
 }
 
-function createArtifactsPool(rows = [artifactRow()]) {
+function createArtifactsPool(rows = [artifactRow()], relatedRows = []) {
   const calls = [];
   return {
     calls,
@@ -58,6 +58,9 @@ function createArtifactsPool(rows = [artifactRow()]) {
         }
         if (normalized.startsWith("SELECT * FROM ARTIFACTS WHERE ID = $1")) {
           return { rows: rows.filter((row) => Number(row.id) === Number(params[0])) };
+        }
+        if (normalized.includes("FROM ARXIV_PAPERS P") && normalized.includes("P.ARXIV_ID = ANY($1::TEXT[])")) {
+          return { rows: relatedRows.filter((row) => params[0].includes(row.arxiv_id)) };
         }
         if (normalized.startsWith("SELECT COUNT(*)::INT AS TOTAL FROM ARTIFACTS")) {
           return { rows: [{ total: filteredRows().length }] };
@@ -151,7 +154,109 @@ test("getArtifactDetail returns { artifact } and raises not found", async () => 
     const data = await getArtifactDetail(3);
     assert.equal(data.artifact.id, 3);
     assert.equal(data.artifact.content_markdown, "# Index");
+    assert.deepEqual(data.artifact.related_papers, []);
     await assert.rejects(() => getArtifactDetail(9), /Artifact not found/);
+  } finally {
+    setPoolForTesting(null);
+  }
+});
+
+test("getArtifactDetail resolves a daily report snapshot to pending and assigned papers", async () => {
+  const dailyReport = artifactRow({
+    id: "8",
+    scope_type: "system",
+    scope_id: null,
+    artifact_type: "daily_report",
+    title: "Daily",
+    source_json: JSON.stringify({
+      project_candidates: [
+        { arxiv_id: "2607.00001", project: "Alpha" },
+        { arxiv_id: "2607.00002", project: "Beta" },
+        { arxiv_id: "2607.00001", project: "Gamma" }
+      ]
+    })
+  });
+  const fake = createArtifactsPool([dailyReport], [
+    {
+      id: "101",
+      arxiv_id: "2607.00001",
+      title: "Pending Paper",
+      link: "https://arxiv.org/abs/2607.00001",
+      published_at: "2026-07-18T00:00:00Z",
+      library_paper_id: null,
+      project_id: "7",
+      project_name: "Alpha",
+      state: "pending",
+      relation_type: "direct",
+      reason: "Useful for Alpha",
+      updated_at: "2026-07-19T00:00:00Z"
+    },
+    {
+      id: "101",
+      arxiv_id: "2607.00001",
+      title: "Pending Paper",
+      link: "https://arxiv.org/abs/2607.00001",
+      published_at: "2026-07-18T00:00:00Z",
+      library_paper_id: null,
+      project_id: "9",
+      project_name: "Gamma",
+      state: "pending",
+      relation_type: "indirect",
+      reason: "Useful for Gamma",
+      updated_at: "2026-07-18T00:00:00Z"
+    },
+    {
+      id: "102",
+      arxiv_id: "2607.00002",
+      title: "Assigned Paper",
+      link: "https://arxiv.org/abs/2607.00002",
+      published_at: "2026-07-17T00:00:00Z",
+      library_paper_id: "202",
+      project_id: "8",
+      project_name: "Beta",
+      state: "accepted",
+      relation_type: "direct",
+      reason: "Assigned to Beta",
+      updated_at: "2026-07-19T00:00:00Z"
+    }
+  ]);
+  setPoolForTesting(fake.pool);
+  try {
+    const data = await getArtifactDetail(8);
+    assert.deepEqual(data.artifact.related_papers, [
+      {
+        id: 101,
+        arxiv_id: "2607.00001",
+        title: "Pending Paper",
+        link: "https://arxiv.org/abs/2607.00001",
+        published_at: "2026-07-18T00:00:00Z",
+        library_paper_id: null,
+        state: "pending",
+        relation_type: "direct",
+        reason: "Useful for Alpha",
+        projects: [
+          { project_id: 7, project_name: "Alpha", state: "pending" },
+          { project_id: 9, project_name: "Gamma", state: "pending" }
+        ]
+      },
+      {
+        id: 102,
+        arxiv_id: "2607.00002",
+        title: "Assigned Paper",
+        link: "https://arxiv.org/abs/2607.00002",
+        published_at: "2026-07-17T00:00:00Z",
+        library_paper_id: 202,
+        state: "assigned",
+        relation_type: "direct",
+        reason: "Assigned to Beta",
+        projects: [
+          { project_id: 8, project_name: "Beta", state: "assigned" }
+        ]
+      }
+    ]);
+    assert.deepEqual(fake.calls[1].params, [["2607.00001", "2607.00002"]]);
+    assert.match(fake.calls[1].sql, /r\.state IN \('pending', 'accepted'\)/);
+    assert.match(fake.calls[1].sql, /arxiv_paper_tombstones/);
   } finally {
     setPoolForTesting(null);
   }
