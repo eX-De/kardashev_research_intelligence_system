@@ -1,4 +1,7 @@
+import { useTranslation } from "react-i18next";
+
 import { fmtDate } from "../lib/dashboard.js";
+import { dailyStepLabel } from "../lib/systemMessages.js";
 import "../styles/TaskControlPanel.css";
 
 function schedulerMode(scheduler) {
@@ -7,75 +10,82 @@ function schedulerMode(scheduler) {
   return "off";
 }
 
-function schedulerSummary(scheduler) {
-  if (scheduler?.enabled) return `定时执行 · 下次执行 ${fmtDate(scheduler.next_run_at)}`;
+function schedulerSummary(scheduler, locale, t) {
+  if (scheduler?.enabled) return t("taskControl.scheduler.nextRun", { value: fmtDate(scheduler.next_run_at, locale) });
   if (scheduler?.startup_daily?.enabled) {
     return scheduler.startup_daily.last_skip_reason === "already_completed_today"
-      ? "访问触发 · 今日已完成"
-      : "访问触发 · 每日首次打开页面时运行";
+      ? t("taskControl.scheduler.completedToday")
+      : t("taskControl.scheduler.firstVisit");
   }
-  return "未启用";
+  return t("taskControl.scheduler.disabled");
 }
 
 export function TaskControlPanel({ scheduler, recovery = null, onStartStartup, onStartScheduler, onStopScheduler, onRunNow, onResumeDaily, onRetryDaily, onRunJob }) {
+  const { i18n, t } = useTranslation(["settings", "system"]);
   const activeMode = schedulerMode(scheduler);
   const hasRecovery = Boolean(recovery);
-  const recoveryCount = recovery?.total ? `${recovery.completed || 0}/${recovery.total}` : `${recovery?.completed || 0} 步`;
+  const recoveryCount = recovery?.total
+    ? `${recovery.completed || 0}/${recovery.total}`
+    : t("taskControl.recovery.steps", { count: recovery?.completed || 0 });
+  const failedStep = dailyStepLabel(recovery?.failed_step, recovery?.failed_label, t);
 
   return (
     <section className="panel task-control-panel">
       <div className="panel-title">
-        <h2>任务控制</h2>
-        <p>{schedulerSummary(scheduler)}</p>
+        <span className="task-control-eyebrow">{t("daily.eyebrow")}</span>
+        <h2>{t("taskControl.title")}</h2>
+        <p>{schedulerSummary(scheduler, i18n.resolvedLanguage || i18n.language, t)}</p>
       </div>
       <div className="task-mode-grid">
-        <button className={`mode-card ${activeMode === "startup" ? "active" : ""}`} onClick={onStartStartup} type="button">
-          <span>访问触发</span>
-          <strong>每日首次访问执行</strong>
-          <p>每天第一次打开 dashboard 页面自动执行一次完整流程。</p>
+        <button aria-pressed={activeMode === "startup"} className={`mode-card ${activeMode === "startup" ? "active" : ""}`} onClick={onStartStartup} type="button">
+          <span>{t("taskControl.modes.startup.label")}</span>
+          <strong>{t("taskControl.modes.startup.title")}</strong>
+          <p>{t("taskControl.modes.startup.description")}</p>
         </button>
-        <button className={`mode-card ${activeMode === "scheduler" ? "active" : ""}`} onClick={onStartScheduler} type="button">
-          <span>定时触发</span>
-          <strong>按时间定时执行</strong>
-          <p>保持 dashboard 进程运行，到点自动执行每日流程。</p>
+        <button aria-pressed={activeMode === "scheduler"} className={`mode-card ${activeMode === "scheduler" ? "active" : ""}`} onClick={onStartScheduler} type="button">
+          <span>{t("taskControl.modes.scheduler.label")}</span>
+          <strong>{t("taskControl.modes.scheduler.title")}</strong>
+          <p>{t("taskControl.modes.scheduler.description")}</p>
         </button>
-        <button className={`mode-card ${activeMode === "off" ? "active" : ""}`} onClick={onStopScheduler} type="button">
-          <span>关闭</span>
-          <strong>关闭自动执行</strong>
-          <p>不自动运行，只保留手动执行入口。</p>
+        <button aria-pressed={activeMode === "off"} className={`mode-card ${activeMode === "off" ? "active" : ""}`} onClick={onStopScheduler} type="button">
+          <span>{t("taskControl.modes.off.label")}</span>
+          <strong>{t("taskControl.modes.off.title")}</strong>
+          <p>{t("taskControl.modes.off.description")}</p>
         </button>
       </div>
       {hasRecovery ? (
         <div className="task-recovery-banner">
-          <strong>上次每日流程可继续</strong>
-          <p>失败在：{recovery.failed_label || "未知阶段"}，已完成 {recoveryCount}。</p>
+          <strong>{t("taskControl.recovery.title")}</strong>
+          <p>{t("taskControl.recovery.detail", { count: recoveryCount, failedStep })}</p>
         </div>
       ) : null}
       <div className="task-action-panel">
-        <button className="primary run-now-button" onClick={hasRecovery ? onResumeDaily : onRunNow} type="button">
-          {hasRecovery ? "继续上次每日流程" : "立即执行每日流程"}
-        </button>
-        <button disabled={!hasRecovery} onClick={hasRecovery ? onRunNow : onResumeDaily} type="button">
-          {hasRecovery ? "重新执行今日流程" : "恢复上次每日流程"}
-        </button>
-        <button onClick={onRetryDaily} type="button">
-          补跑历史论文
-        </button>
+        <div className="task-primary-actions">
+          <button className="primary run-now-button" onClick={hasRecovery ? onResumeDaily : onRunNow} type="button">
+            {hasRecovery ? t("taskControl.actions.resume") : t("taskControl.actions.runNow")}
+          </button>
+          <button disabled={!hasRecovery} onClick={hasRecovery ? onRunNow : onResumeDaily} type="button">
+            {hasRecovery ? t("taskControl.actions.rerun") : t("taskControl.actions.resumePrevious")}
+          </button>
+          <button onClick={onRetryDaily} type="button">
+            {t("taskControl.actions.retryHistory")}
+          </button>
+        </div>
         <div className="task-shortcuts">
           <button onClick={() => onRunJob("sync-obsidian")} type="button">
-            Sync Obsidian
+            {t("taskControl.shortcuts.syncObsidian")}
           </button>
           <button onClick={() => onRunJob("fetch-arxiv")} type="button">
-            Fetch arXiv
+            {t("taskControl.shortcuts.fetchArxiv")}
           </button>
           <button onClick={() => onRunJob("cache-arxiv-text")} type="button">
-            Cache PDF/TXT
+            {t("taskControl.shortcuts.cacheText")}
           </button>
           <button onClick={() => onRunJob("generate-paper-reports")} type="button">
-            Full Paper Reports
+            {t("taskControl.shortcuts.paperReports")}
           </button>
           <button onClick={() => onRunJob("generate-reports")} type="button">
-            Generate Daily Report
+            {t("taskControl.shortcuts.dailyReport")}
           </button>
         </div>
       </div>

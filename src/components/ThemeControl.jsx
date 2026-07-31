@@ -1,4 +1,6 @@
-import { THEME_LABELS, useTheme } from "../lib/theme.jsx";
+import { useTranslation } from "react-i18next";
+
+import { useTheme } from "../lib/theme.jsx";
 import "../styles/ThemeControl.css";
 
 const THEME_ICONS = {
@@ -8,13 +10,16 @@ const THEME_ICONS = {
 };
 
 export function ThemeControl() {
+  const { t } = useTranslation("common");
   const { mode, modes, setMode, systemTheme } = useTheme();
-  const systemLabel = THEME_LABELS[systemTheme] || systemTheme;
+  const systemLabel = t(`theme.${systemTheme}`);
 
   return (
-    <div className="theme-control" role="radiogroup" aria-label="主题模式">
+    <div className="theme-control" role="radiogroup" aria-label={t("theme.label")}>
       {modes.map((item) => {
-        const label = item === "system" ? `跟随系统，当前${systemLabel}` : THEME_LABELS[item];
+        const label = item === "system"
+          ? t("theme.systemCurrent", { current: systemLabel })
+          : t(`theme.${item}`);
         return (
           <button
             aria-checked={mode === item}

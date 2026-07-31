@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 
 import { DailyRunProgressCard } from "./DailyRunProgressCard.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
 import { formatMetricCount, VisionMetric } from "./VisionMetric.jsx";
 import { api, fmtDate, postJson } from "../lib/dashboard.js";
 import { useCachedApi } from "../lib/apiCache.jsx";
+import { formatNotification } from "../lib/systemMessages.js";
 import "../styles/DashboardView.css";
 
 const SOURCE_UPDATE_COMMAND = `git pull
@@ -16,8 +18,9 @@ npm run start:api`;
 const DEFAULT_DOCKER_SERVICE = "app";
 
 function DashboardRunSkeleton() {
+  const { t } = useTranslation("dashboard");
   return (
-    <div className="dashboard-run-skeleton" role="status" aria-label="读取今日状态" aria-live="polite">
+    <div className="dashboard-run-skeleton" role="status" aria-label={t("page.loadingToday")} aria-live="polite">
       <span className="dashboard-skeleton-bar is-kicker" />
       <span className="dashboard-skeleton-bar is-run-title" />
       <span className="dashboard-skeleton-bar is-run-copy" />
@@ -41,13 +44,12 @@ function DashboardFeedSkeleton({ recent = false, rows = 3, title }) {
   );
 }
 
-function dashboardRunState(currentJob, latestJob) {
+function dashboardRunState(currentJob, latestJob, t) {
   if (currentJob) {
     return {
       kind: "running",
       tone: "running",
-      title: "后台任务正在执行",
-      detail: "任务状态会在完成后自动更新。"
+      title: t("runState.running.title"), detail: t("runState.running.detail")
     };
   }
 
@@ -56,8 +58,7 @@ function dashboardRunState(currentJob, latestJob) {
     return {
       kind: "failed",
       tone: "attention",
-      title: "最近一轮任务未完成",
-      detail: "请查看需要关注中的详情，或从任务控制页重新执行。"
+      title: t("runState.failed.title"), detail: t("runState.failed.detail")
     };
   }
 
@@ -65,8 +66,7 @@ function dashboardRunState(currentJob, latestJob) {
     return {
       kind: "queued",
       tone: "queued",
-      title: "任务正在排队",
-      detail: "后台工作进程会在可用时开始处理。"
+      title: t("runState.queued.title"), detail: t("runState.queued.detail")
     };
   }
 
@@ -74,82 +74,71 @@ function dashboardRunState(currentJob, latestJob) {
     return {
       kind: "completed",
       tone: "ready",
-      title: "最近一轮任务已完成",
-      detail: "结果已同步到对应的论文、报告或研究产物中。"
+      title: t("runState.completed.title"), detail: t("runState.completed.detail")
     };
   }
 
   return {
     kind: "idle",
     tone: "ready",
-    title: "暂无正在运行的任务",
-    detail: "你可以从右侧选择下一项工作。"
+    title: t("runState.idle.title"), detail: t("runState.idle.detail")
   };
 }
 
-function dashboardHeroCopy({ dailyRunNotification, dailyReportNotification, recoverableNotification, arxivRateLimitNotification, runState }) {
+function dashboardHeroCopy({ dailyRunNotification, dailyReportNotification, recoverableNotification, arxivRateLimitNotification, runState }, t) {
   if (dailyRunNotification) {
     return {
-      title: "每日流程正在推进",
-      detail: "当前阶段、处理进度和缓存状态显示在下方。"
+      title: t("hero.daily.title"), detail: t("hero.daily.detail")
     };
   }
 
   if (recoverableNotification) {
     return {
-      title: "每日流程可以从中断处继续",
-      detail: "已完成的阶段会保留；你可以继续处理，或明确选择重新执行。"
+      title: t("hero.recoverable.title"), detail: t("hero.recoverable.detail")
     };
   }
 
   if (dailyReportNotification) {
     return {
-      title: "今日科研情报日报已就绪",
-      detail: "本轮每日流程已经完成；你可以直接打开日报查看筛选结果与项目级判断。"
+      title: t("hero.report.title"), detail: t("hero.report.detail")
     };
   }
 
   if (arxivRateLimitNotification) {
     return {
-      title: "来源同步暂时受限",
-      detail: "等待来源恢复后，可以从下方重新执行每日流程。"
+      title: t("hero.rateLimited.title"), detail: t("hero.rateLimited.detail")
     };
   }
 
   const copy = {
     running: {
-      title: "研究数据正在更新",
-      detail: "后台任务完成后，相关论文、报告和研究产物会自动同步。"
+      title: t("hero.running.title"), detail: t("hero.running.detail")
     },
     failed: {
-      title: "需要检查上一轮处理",
-      detail: "任务详情和后续操作会显示在下方及状态中心。"
+      title: t("hero.failed.title"), detail: t("hero.failed.detail")
     },
     queued: {
-      title: "下一项任务正在等待执行",
-      detail: "后台工作进程可用后会自动开始处理。"
+      title: t("hero.queued.title"), detail: t("hero.queued.detail")
     },
     completed: {
-      title: "本轮研究工作已同步",
-      detail: "你可以查看结果，或从右侧继续下一项工作。"
+      title: t("hero.completed.title"), detail: t("hero.completed.detail")
     },
     idle: {
-      title: "工作区已准备就绪",
-      detail: "从右侧选择下一项工作，或等待计划任务启动。"
+      title: t("hero.idle.title"), detail: t("hero.idle.detail")
     }
   };
 
   return copy[runState.kind] || copy.idle;
 }
 
-function dashboardTopStatus({ dailyRunNotification, dailyReportNotification, recoverableNotification, arxivRateLimitNotification, runState }) {
-  if (dailyRunNotification) return { tone: "running", label: "每日流程运行中" };
-  if (recoverableNotification) return { tone: "queued", label: "可继续执行" };
-  if (dailyReportNotification) return { tone: "ready", label: "每日报告已就绪" };
-  if (arxivRateLimitNotification || runState.kind === "failed") return { tone: "attention", label: "需要处理" };
-  if (runState.kind === "running") return { tone: "running", label: "后台任务运行中" };
-  if (runState.kind === "queued") return { tone: "queued", label: "任务排队中" };
-  return { tone: "ready", label: "系统正常" };
+function dashboardTopStatus({ dailyRunNotification, dailyReportNotification, recoverableNotification, arxivRateLimitNotification, runState }, t) {
+  if (dailyRunNotification) return { tone: "running", label: t("topStatus.daily") };
+  if (recoverableNotification) return { tone: "queued", label: t("topStatus.recoverable") };
+  if (dailyReportNotification) return { tone: "ready", label: t("topStatus.report") };
+  if (arxivRateLimitNotification || runState.kind === "failed") return { tone: "attention", label: t("topStatus.attention") };
+  if (runState.kind === "running") return { tone: "running", label: t("topStatus.running") };
+  if (runState.kind === "queued") return { tone: "queued", label: t("topStatus.queued") };
+  return { tone: "ready", label: t("topStatus.ready") };
 }
 
 function artifactPath(artifactId) {
@@ -170,31 +159,31 @@ function updateFromNotification(item) {
   return update && typeof update === "object" ? update : {};
 }
 
-function updateDialogTitle(kind) {
-  if (kind === "source") return "源码更新命令";
-  if (kind === "docker") return "Docker 更新命令";
-  return "更新说明";
+function updateDialogTitle(kind, t) {
+  if (kind === "source") return t("update.sourceTitle");
+  if (kind === "docker") return t("update.dockerTitle");
+  return t("update.releaseTitle");
 }
 
-function updateDialogDescription(kind) {
-  if (kind === "source") return "适合从 GitHub 源码运行的部署。执行前请先停止或切换正在运行的服务进程。";
-  if (kind === "docker") return "适合 Docker Compose 部署。服务名不是 app 时，请把命令里的 app 改成实际服务名。";
-  return "本弹窗显示该版本的 GitHub Release 说明；如果没有发布说明，会显示版本和链接信息。";
+function updateDialogDescription(kind, t) {
+  if (kind === "source") return t("update.sourceDescription");
+  if (kind === "docker") return t("update.dockerDescription");
+  return t("update.releaseDescription");
 }
 
-function releaseNotesText(update) {
+function releaseNotesText(update, t) {
   const notes = String(update.release_notes || "").trim();
   if (notes) return notes;
-  const tag = update.latest_tag || update.latest_version || "新版本";
-  return `这个版本没有可用的 GitHub Release 更新说明。\n\n版本：${tag}`;
+  const tag = update.latest_tag || update.latest_version || t("update.newVersion");
+  return t("update.noNotes", { tag });
 }
 
-async function copyText(text) {
+async function copyText(text, t) {
   if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(text);
     return;
   }
-  if (typeof document === "undefined") throw new Error("复制不可用，请手动复制命令。");
+  if (typeof document === "undefined") throw new Error(t("update.copyUnavailable"));
   const textarea = document.createElement("textarea");
   textarea.value = text;
   textarea.setAttribute("readonly", "");
@@ -207,22 +196,26 @@ async function copyText(text) {
 }
 
 function UpdateNotificationCard({ item, onOpen }) {
+  const { t, i18n } = useTranslation("dashboard");
+  const { t: systemT } = useTranslation("system");
+  const message = formatNotification(item, systemT);
   const update = updateFromNotification(item);
   return (
     <article className={`vision-feed-item vision-update-available ${item.severity || ""}`} key={item.id}>
-      <strong>{item.title}</strong>
-      <p>{item.detail}{item.created_at ? ` · ${fmtDate(item.created_at)}` : ""}</p>
+      <strong>{message.title}</strong>
+      <p>{message.detail}{item.created_at ? ` · ${fmtDate(item.created_at, i18n.resolvedLanguage)}` : ""}</p>
       <div className="vision-feed-actions">
-        <button className="primary" onClick={() => onOpen("release", item)} type="button">查看更新说明</button>
-        <button onClick={() => onOpen("source", item)} type="button">源码更新命令</button>
-        <button onClick={() => onOpen("docker", item)} type="button">Docker 更新命令</button>
+        <button className="primary" onClick={() => onOpen("release", item)} type="button">{t("update.viewNotes")}</button>
+        <button onClick={() => onOpen("source", item)} type="button">{t("update.sourceTitle")}</button>
+        <button onClick={() => onOpen("docker", item)} type="button">{t("update.dockerTitle")}</button>
       </div>
-      {update.release_url ? <p><a href={update.release_url} target="_blank" rel="noreferrer">GitHub 页面</a></p> : null}
+      {update.release_url ? <p><a href={update.release_url} target="_blank" rel="noreferrer">{t("update.githubPage")}</a></p> : null}
     </article>
   );
 }
 
 function UpdateDialog({ dialog, onClose, onCopy }) {
+  const { t, i18n } = useTranslation("dashboard");
   const [dockerService, setDockerService] = useState(DEFAULT_DOCKER_SERVICE);
   const update = updateFromNotification(dialog.item);
   const dockerServiceName = dockerService.trim() || DEFAULT_DOCKER_SERVICE;
@@ -232,23 +225,23 @@ function UpdateDialog({ dialog, onClose, onCopy }) {
   ];
   const command = dialog.kind === "docker" ? dockerCommands.join("\n") : SOURCE_UPDATE_COMMAND;
   const isCommand = dialog.kind === "source" || dialog.kind === "docker";
-  const title = updateDialogTitle(dialog.kind);
-  const description = updateDialogDescription(dialog.kind);
+  const title = updateDialogTitle(dialog.kind, t);
+  const description = updateDialogDescription(dialog.kind, t);
   return (
     <div className="modal-backdrop" role="presentation">
       <article aria-modal="true" aria-labelledby="update-dialog-title" className="modal-dialog update-dialog" role="dialog">
         <header className="modal-header">
           <div>
-            <span>应用更新</span>
+            <span>{t("update.appUpdate")}</span>
             <h2 id="update-dialog-title">{title}</h2>
             <p>{description}</p>
           </div>
-          <button aria-label="关闭" className="modal-close" onClick={onClose} type="button">×</button>
+          <button aria-label={t("update.close")} className="modal-close" onClick={onClose} type="button">×</button>
         </header>
         {dialog.kind === "docker" ? (
           <div className="modal-body">
             <label className="service-name-field">
-              <span>服务名</span>
+              <span>{t("update.serviceName")}</span>
               <input
                 autoComplete="off"
                 spellCheck="false"
@@ -261,7 +254,7 @@ function UpdateDialog({ dialog, onClose, onCopy }) {
               {dockerCommands.map((line) => (
                 <div className="command-line-row" key={line}>
                   <code>{line}</code>
-                  <button onClick={() => onCopy(line, "Docker 命令")} type="button">复制</button>
+                  <button onClick={() => onCopy(line, t("update.dockerCommand"))} type="button">{t("update.copy")}</button>
                 </div>
               ))}
             </div>
@@ -273,19 +266,19 @@ function UpdateDialog({ dialog, onClose, onCopy }) {
         ) : (
           <div className="modal-body">
             <div className="release-meta">
-              <strong>{update.release_name || update.latest_tag || update.latest_version || "新版本"}</strong>
+              <strong>{update.release_name || update.latest_tag || update.latest_version || t("update.newVersion")}</strong>
               <p>
-                当前 {update.current_version || "未知"} · 最新 {update.latest_version || update.latest_tag || "未知"}
-                {update.published_at ? ` · 发布于 ${fmtDate(update.published_at)}` : ""}
+                {t("update.currentLatest", { current: update.current_version || t("update.unknown"), latest: update.latest_version || update.latest_tag || t("update.unknown") })}
+                {update.published_at ? ` · ${t("update.publishedAt", { date: fmtDate(update.published_at, i18n.resolvedLanguage) })}` : ""}
               </p>
             </div>
-            <pre className="release-notes">{releaseNotesText(update)}</pre>
+            <pre className="release-notes">{releaseNotesText(update, t)}</pre>
           </div>
         )}
         <div className="modal-actions">
-          {isCommand ? <button className="primary" onClick={() => onCopy(command, title)} type="button">复制全部</button> : null}
-          {update.release_url ? <a className="modal-link-button" href={update.release_url} target="_blank" rel="noreferrer">打开 GitHub 页面</a> : null}
-          <button onClick={onClose} type="button">关闭</button>
+          {isCommand ? <button className="primary" onClick={() => onCopy(command, title)} type="button">{t("update.copyAll")}</button> : null}
+          {update.release_url ? <a className="modal-link-button" href={update.release_url} target="_blank" rel="noreferrer">{t("update.openGithub")}</a> : null}
+          <button onClick={onClose} type="button">{t("update.close")}</button>
         </div>
       </article>
     </div>
@@ -293,41 +286,50 @@ function UpdateDialog({ dialog, onClose, onCopy }) {
 }
 
 function DailyRunRecoveryCard({ item, onResume, onRunNow }) {
+  const { t } = useTranslation("dashboard");
+  const { t: systemT } = useTranslation("system");
+  const message = formatNotification(item, systemT);
   const recovery = recoveryFromNotification(item) || {};
-  const count = recovery.total ? `${recovery.completed || 0}/${recovery.total}` : `${recovery.completed || 0} 步`;
+  const count = recovery.total ? `${recovery.completed || 0}/${recovery.total}` : t("run.steps", { count: recovery.completed || 0 });
   return (
     <article className="vision-run-card recoverable">
-      <strong>{item?.title || "每日流程可继续"}</strong>
-      <p>{item?.detail || `上次流程失败在：${recovery.failed_label || "未知阶段"}，已完成 ${count}。`}</p>
+      <strong>{message.title || t("run.recoveryTitle")}</strong>
+      <p>{message.detail || t("run.recoveryDetail", { stage: recovery.failed_label || t("run.unknownStage"), count })}</p>
       <div className="vision-run-actions">
-        <button className="primary" onClick={onResume} type="button">继续上次每日流程</button>
-        <button onClick={onRunNow} type="button">重新执行今日流程</button>
+        <button className="primary" onClick={onResume} type="button">{t("run.resume")}</button>
+        <button onClick={onRunNow} type="button">{t("run.rerunToday")}</button>
       </div>
     </article>
   );
 }
 
 function DailyRunIssueCard({ item, onRunNow }) {
+  const { t } = useTranslation("dashboard");
+  const { t: systemT } = useTranslation("system");
+  const message = formatNotification(item, systemT);
   return (
     <article className="vision-run-card bad">
-      <strong>{item?.title || "每日流程失败"}</strong>
-      <p>{item?.detail || "每日流程失败，请查看通知详情。"}</p>
+      <strong>{message.title || t("run.failedTitle")}</strong>
+      <p>{message.detail || t("run.failedDetail")}</p>
       <div className="vision-run-actions">
-        <button className="primary" onClick={onRunNow} type="button">重新执行每日流程</button>
+        <button className="primary" onClick={onRunNow} type="button">{t("run.rerun")}</button>
       </div>
     </article>
   );
 }
 
 function DailyReportReadyCard({ item }) {
+  const { t } = useTranslation("dashboard");
+  const { t: systemT } = useTranslation("system");
+  const message = formatNotification(item, systemT);
   const artifactId = Number(item?.source?.artifact_id || 0);
   return (
     <article className="vision-run-card ready">
-      <strong>{item?.title || "每日报告已生成"}</strong>
-      <p>{item?.detail || "本轮每日流程已经完成，日报可以查看。"}</p>
+      <strong>{message.title || t("run.reportTitle")}</strong>
+      <p>{message.detail || t("run.reportDetail")}</p>
       {artifactId > 0 ? (
         <div className="vision-run-actions">
-          <Link className="primary" to={artifactPath(artifactId)}>查看每日报告</Link>
+          <Link className="primary" to={artifactPath(artifactId)}>{t("run.viewReport")}</Link>
         </div>
       ) : null}
     </article>
@@ -335,6 +337,10 @@ function DailyReportReadyCard({ item }) {
 }
 
 export function DashboardView({ setStatusMessage, notify = () => {} }) {
+  const { t, i18n } = useTranslation("dashboard");
+  const { t: systemT } = useTranslation("system");
+  const { t: artifactsT } = useTranslation("artifacts");
+  const { t: papersT } = useTranslation("papers");
   const [updateDialog, setUpdateDialog] = useState(null);
   const healthQuery = useCachedApi(["health", "summary"], () => api("/api/health/summary"), { staleTime: 60000 });
   const jobStatusQuery = useCachedApi(["jobs", "status"], () => api("/api/jobs/status"), { staleTime: 5000 });
@@ -367,15 +373,15 @@ export function DashboardView({ setStatusMessage, notify = () => {} }) {
   const currentJob = jobStatus?.scheduler?.current_job;
   const latestJob = health?.latest_job;
   const reportCount = counts.paper_report_artifacts ?? counts.paper_reading_reports ?? 0;
-  const runState = dashboardRunState(currentJob, latestJob);
+  const runState = dashboardRunState(currentJob, latestJob, t);
   const dailyRunNotification = notifications.find((item) => item.progress);
   const dailyReportNotification = notifications.find((item) => (
     item.type === "daily_run_completed" && Number(item?.source?.artifact_id || 0) > 0
   ));
   const recoverableNotification = notifications.find((item) => item.type === "daily_run_recoverable");
   const arxivRateLimitNotification = notifications.find((item) => item.type === "arxiv_rate_limited");
-  const heroCopy = dashboardHeroCopy({ dailyRunNotification, dailyReportNotification, recoverableNotification, arxivRateLimitNotification, runState });
-  const topStatus = dashboardTopStatus({ dailyRunNotification, dailyReportNotification, recoverableNotification, arxivRateLimitNotification, runState });
+  const heroCopy = dashboardHeroCopy({ dailyRunNotification, dailyReportNotification, recoverableNotification, arxivRateLimitNotification, runState }, t);
+  const topStatus = dashboardTopStatus({ dailyRunNotification, dailyReportNotification, recoverableNotification, arxivRateLimitNotification, runState }, t);
   const listNotifications = notifications.filter((item) => (
     item.id !== dailyRunNotification?.id
     && item.id !== dailyReportNotification?.id
@@ -385,17 +391,17 @@ export function DashboardView({ setStatusMessage, notify = () => {} }) {
   const recentUpdates = [
     ...artifacts.map((artifact) => ({
       id: `artifact-${artifact.id}`,
-      type: "产物",
+      type: t("page.artifactType"),
       title: artifact.title,
-      meta: `${artifact.artifact_type} · ${artifact.status}`,
+      meta: `${artifactsT(`type.${artifact.artifact_type}`, { defaultValue: artifact.artifact_type })} · ${artifactsT(`status.${artifact.status}`, { defaultValue: artifact.status })}`,
       at: artifact.updated_at,
       to: artifactPath(artifact.id)
     })),
     ...papers.map((paper) => ({
       id: `paper-${paper.id}`,
-      type: "论文",
+      type: t("page.paperType"),
       title: paper.title,
-      meta: `${paper.arxiv_id || paper.venue || paper.canonical_key || "paper"} · ${paper.library_status}`,
+      meta: `${paper.arxiv_id || paper.venue || paper.canonical_key || "paper"} · ${papersT(`library.status.${paper.library_status}`, { defaultValue: paper.library_status })}`,
       at: paper.updated_at,
       to: paperPath(paper.id)
     }))
@@ -407,7 +413,7 @@ export function DashboardView({ setStatusMessage, notify = () => {} }) {
     setStatusMessage(message);
     try {
       const data = await postJson(endpoint, body);
-      setStatusMessage(data.message || "每日流程已完成");
+      setStatusMessage(data.message || t("run.completed"));
       await refresh();
     } catch (error) {
       setStatusMessage(error.message);
@@ -415,17 +421,17 @@ export function DashboardView({ setStatusMessage, notify = () => {} }) {
   }
 
   function resumeDailyRun() {
-    runDailyCommand("/api/jobs/resume-daily", {}, "正在继续上次每日流程...");
+    runDailyCommand("/api/jobs/resume-daily", {}, t("run.resuming"));
   }
 
   function runDailyNow() {
-    const ok = window.confirm("今天已有失败但可恢复的每日流程。重新执行会新建一轮流程，可能重复抓取、匹配和消耗 LLM。确定重新执行？");
+    const ok = window.confirm(t("run.confirmRerun"));
     if (!ok) return;
-    runDailyCommand("/api/jobs/run-now", { force: true }, "正在重新执行今日流程...");
+    runDailyCommand("/api/jobs/run-now", { force: true }, t("run.rerunningToday"));
   }
 
   function rerunDaily() {
-    runDailyCommand("/api/jobs/run-now", {}, "正在重新执行每日流程...");
+    runDailyCommand("/api/jobs/run-now", {}, t("run.rerunning"));
   }
 
   function openUpdateDialog(kind, item) {
@@ -434,12 +440,12 @@ export function DashboardView({ setStatusMessage, notify = () => {} }) {
 
   async function copyUpdateCommand(command, label) {
     try {
-      await copyText(command);
-      const message = `${label}复制成功`;
+      await copyText(command, t);
+      const message = t("update.copied", { label });
       setStatusMessage(message);
       notify(message, { type: "success" });
     } catch (error) {
-      const message = error.message || "复制失败，请手动复制命令。";
+      const message = error.message || t("update.copyFailed");
       setStatusMessage(message);
       notify(message, { type: "error" });
     }
@@ -449,8 +455,8 @@ export function DashboardView({ setStatusMessage, notify = () => {} }) {
     <section className="view vision-dashboard">
       <header className="vision-topbar">
         <div className="vision-brand">
-          <span>研究智能</span>
-          <h1>研究工作台</h1>
+          <span>{t("page.eyebrow")}</span>
+          <h1>{t("page.title")}</h1>
         </div>
         <div className="vision-top-actions">
           <span className={`vision-live-state ${topStatus.tone}`}><i aria-hidden="true" />{topStatus.label}</span>
@@ -462,7 +468,7 @@ export function DashboardView({ setStatusMessage, notify = () => {} }) {
         <section className={`vision-hero ${topStatus.tone}`} aria-labelledby="vision-run-title">
           <div className="vision-hero-art" aria-hidden="true" />
           <div className="vision-hero-copy">
-            <span>今日运行</span>
+            <span>{t("page.today")}</span>
             <h2 id="vision-run-title">{heroCopy.title}</h2>
             <p>{heroCopy.detail}</p>
           </div>
@@ -497,60 +503,63 @@ export function DashboardView({ setStatusMessage, notify = () => {} }) {
           <div className="vision-actions-art" aria-hidden="true" />
           <div className="vision-actions-content">
             <header>
-              <span>工作入口</span>
-              <h2 id="vision-actions-title">下一步</h2>
+              <span>{t("page.actions")}</span>
+              <h2 id="vision-actions-title">{t("page.next")}</h2>
             </header>
-            <nav className="vision-action-list" aria-label="工作区快捷入口">
+            <nav className="vision-action-list" aria-label={t("page.shortcutsAria")}>
               <Link to="/papers/inbox">
-                <span><strong>待判断</strong><small>候选论文与人工决策</small></span>
+                <span><strong>{t("page.inbox")}</strong><small>{t("page.inboxHint")}</small></span>
                 <b aria-hidden="true">→</b>
               </Link>
               <Link to="/papers/reports">
-                <span><strong>报告队列</strong><small>{formatMetricCount(reportCount)} 个全文分析任务</small></span>
+                <span><strong>{t("page.reports")}</strong><small>{t("page.reportTasks", { count: formatMetricCount(reportCount, i18n.resolvedLanguage) })}</small></span>
                 <b aria-hidden="true">→</b>
               </Link>
               <Link to="/artifacts">
-                <span><strong>研究产物</strong><small>日报、摘要与可交付结果</small></span>
+                <span><strong>{t("page.artifacts")}</strong><small>{t("page.artifactsHint")}</small></span>
                 <b aria-hidden="true">→</b>
               </Link>
               <Link to="/settings">
-                <span><strong>自动化设置</strong><small>来源、规则与后台任务</small></span>
+                <span><strong>{t("page.settings")}</strong><small>{t("page.settingsHint")}</small></span>
                 <b aria-hidden="true">→</b>
               </Link>
             </nav>
           </div>
         </aside>
 
-        <section className="vision-stats" aria-label="研究规模">
-          <VisionMetric label="项目" value={counts.projects} hint="研究项目" tone="violet" to="/projects" />
-          <VisionMetric label="论文仓库" value={counts.papers} hint="长期论文对象" tone="blue" to="/papers/library" />
-          <VisionMetric label="报告队列" value={reportCount} hint="全文分析任务" tone="coral" to="/papers/reports" />
-          <VisionMetric label="上下文" value={counts.knowledge_documents || counts.notes} hint="知识来源" tone="gold" to="/artifacts" />
+        <section className="vision-stats" aria-label={t("page.scaleAria")}>
+          <VisionMetric label={t("page.projects")} value={counts.projects} hint={t("page.projectsHint")} tone="violet" to="/projects" />
+          <VisionMetric label={t("page.library")} value={counts.papers} hint={t("page.libraryHint")} tone="blue" to="/papers/library" />
+          <VisionMetric label={t("page.reports")} value={reportCount} hint={t("page.reportsHint")} tone="coral" to="/papers/reports" />
+          <VisionMetric label={t("page.context")} value={counts.knowledge_documents || counts.notes} hint={t("page.contextHint")} tone="gold" to="/artifacts" />
         </section>
 
         <section className="vision-attention-card" aria-labelledby="vision-attention-title">
           <header className="vision-card-heading">
             <div>
-              <span>状态中心</span>
-              <h2 id="vision-attention-title">需要关注</h2>
+              <span>{t("page.statusCenter")}</span>
+              <h2 id="vision-attention-title">{t("page.attention")}</h2>
             </div>
-            <em>{loading ? "同步中" : listNotifications.length ? `${listNotifications.length} 项` : "全部清晰"}</em>
+            <em>{loading ? t("page.syncing") : listNotifications.length ? t("page.items", { count: listNotifications.length }) : t("page.allClear")}</em>
           </header>
           {loading ? (
-            <DashboardFeedSkeleton rows={3} title="读取通知" />
+            <DashboardFeedSkeleton rows={3} title={t("page.loadingNotifications")} />
           ) : (
             <div className="vision-feed-list">
               {listNotifications.map((item) => (
                 item.type === "app_update_available" ? (
                   <UpdateNotificationCard item={item} key={item.id} onOpen={openUpdateDialog} />
                 ) : (
-                  <article className={`vision-feed-item ${item.severity || ""}`} key={item.id}>
-                    <strong>{item.title}</strong>
-                    <p>{item.detail}{item.created_at ? ` · ${fmtDate(item.created_at)}` : ""}</p>
-                  </article>
+                  (() => {
+                    const message = formatNotification(item, systemT);
+                    return <article className={`vision-feed-item ${item.severity || ""}`} key={item.id}>
+                      <strong>{message.title}</strong>
+                      <p>{message.detail}{item.created_at ? ` · ${fmtDate(item.created_at, i18n.resolvedLanguage)}` : ""}</p>
+                    </article>;
+                  })()
                 )
               ))}
-              {!listNotifications.length ? <p className="vision-empty">当前没有需要处理的通知。</p> : null}
+              {!listNotifications.length ? <p className="vision-empty">{t("page.noNotifications")}</p> : null}
             </div>
           )}
         </section>
@@ -560,22 +569,22 @@ export function DashboardView({ setStatusMessage, notify = () => {} }) {
             <div className="vision-recent-art" aria-hidden="true" />
             <header className="vision-card-heading">
               <div>
-                <span>研究流</span>
-                <h2 id="vision-recent-title">最近更新</h2>
+                <span>{t("page.flow")}</span>
+                <h2 id="vision-recent-title">{t("page.recent")}</h2>
               </div>
             </header>
           </div>
           {loading ? (
-            <DashboardFeedSkeleton recent rows={4} title="读取最近更新" />
+            <DashboardFeedSkeleton recent rows={4} title={t("page.loadingRecent")} />
           ) : (
             <div className="vision-feed-list vision-recent-list">
               {recentUpdates.length ? recentUpdates.map((item) => (
                 <Link className="vision-feed-item vision-recent-item" key={item.id} to={item.to}>
                   <span className="vision-item-type">{item.type}</span>
                   <strong>{item.title}</strong>
-                  <p>{item.meta} · {fmtDate(item.at)}</p>
+                  <p>{item.meta} · {fmtDate(item.at, i18n.resolvedLanguage)}</p>
                 </Link>
-              )) : <p className="vision-empty">暂无最近更新。</p>}
+              )) : <p className="vision-empty">{t("page.noRecent")}</p>}
             </div>
           )}
         </section>

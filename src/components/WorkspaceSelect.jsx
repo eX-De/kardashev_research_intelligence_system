@@ -1,4 +1,6 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { useTranslation } from "react-i18next";
 import "../styles/WorkspaceSelect.css";
 
 function normalizeOptions(options) {
@@ -9,9 +11,13 @@ function normalizeOptions(options) {
 }
 
 export function WorkspaceSelect({ ariaLabel, className = "", disabled = false, onChange, options, value }) {
+  const { t } = useTranslation("common");
   const selectId = useId();
   const rootRef = useRef(null);
+  const triggerRef = useRef(null);
+  const menuRef = useRef(null);
   const [open, setOpen] = useState(false);
+  const [menuPosition, setMenuPosition] = useState(null);
   const normalized = useMemo(() => normalizeOptions(options), [options]);
   const selectedIndex = Math.max(0, normalized.findIndex((option) => String(option.value) === String(value)));
   const [activeIndex, setActiveIndex] = useState(selectedIndex);
@@ -24,11 +30,49 @@ export function WorkspaceSelect({ ariaLabel, className = "", disabled = false, o
   useEffect(() => {
     if (!open) return undefined;
     function closeOnOutsidePointer(event) {
-      if (!rootRef.current?.contains(event.target)) setOpen(false);
+      if (!rootRef.current?.contains(event.target) && !menuRef.current?.contains(event.target)) setOpen(false);
     }
     document.addEventListener("pointerdown", closeOnOutsidePointer);
     return () => document.removeEventListener("pointerdown", closeOnOutsidePointer);
   }, [open]);
+
+  const updateMenuPosition = useCallback(() => {
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    const viewportPadding = 12;
+    const menuGap = 7;
+    const preferredHeight = 248;
+    const spaceBelow = window.innerHeight - rect.bottom - viewportPadding - menuGap;
+    const spaceAbove = rect.top - viewportPadding - menuGap;
+    const placement = spaceBelow >= Math.min(180, preferredHeight) || spaceBelow >= spaceAbove ? "bottom" : "top";
+    const availableHeight = placement === "bottom" ? spaceBelow : spaceAbove;
+    const width = Math.min(rect.width, window.innerWidth - viewportPadding * 2);
+    const left = Math.min(Math.max(viewportPadding, rect.left), window.innerWidth - viewportPadding - width);
+
+    setMenuPosition({
+      bottom: placement === "top" ? window.innerHeight - rect.top + menuGap : undefined,
+      left,
+      maxHeight: Math.max(96, Math.min(preferredHeight, availableHeight)),
+      placement,
+      top: placement === "bottom" ? rect.bottom + menuGap : undefined,
+      width
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setMenuPosition(null);
+      return undefined;
+    }
+    updateMenuPosition();
+    window.addEventListener("resize", updateMenuPosition);
+    window.addEventListener("scroll", updateMenuPosition, true);
+    return () => {
+      window.removeEventListener("resize", updateMenuPosition);
+      window.removeEventListener("scroll", updateMenuPosition, true);
+    };
+  }, [open, updateMenuPosition]);
 
   function moveActive(direction) {
     if (!normalized.length) return;
@@ -80,6 +124,44 @@ export function WorkspaceSelect({ ariaLabel, className = "", disabled = false, o
     }
   }
 
+  const menu = open && menuPosition ? (
+    <div
+      aria-label={ariaLabel}
+      className="workspace-select-menu is-portalled"
+      data-placement={menuPosition.placement}
+      id={`${selectId}-listbox`}
+      ref={menuRef}
+      role="listbox"
+      style={{
+        bottom: menuPosition.bottom,
+        left: menuPosition.left,
+        maxHeight: menuPosition.maxHeight,
+        top: menuPosition.top,
+        width: menuPosition.width
+      }}
+    >
+      {normalized.map((option, index) => {
+        const selectedOption = String(option.value) === String(value);
+        return (
+          <button
+            aria-selected={selectedOption}
+            className={`${selectedOption ? "is-selected" : ""} ${activeIndex === index ? "is-active" : ""}`.trim()}
+            disabled={option.disabled}
+            id={`${selectId}-option-${index}`}
+            key={String(option.value)}
+            onClick={() => choose(option)}
+            onMouseEnter={() => { if (!option.disabled) setActiveIndex(index); }}
+            role="option"
+            type="button"
+          >
+            <span>{option.label}</span>
+            <i aria-hidden="true">✓</i>
+          </button>
+        );
+      })}
+    </div>
+  ) : null;
+
   return (
     <div className={`workspace-select ${open ? "is-open" : ""} ${className}`.trim()} ref={rootRef}>
       <button
@@ -92,34 +174,13 @@ export function WorkspaceSelect({ ariaLabel, className = "", disabled = false, o
         disabled={disabled}
         onClick={() => setOpen((current) => !current)}
         onKeyDown={onKeyDown}
+        ref={triggerRef}
         type="button"
       >
-        <span>{selected?.label || "请选择"}</span>
+        <span>{selected?.label || t("actions.select")}</span>
         <svg aria-hidden="true" fill="none" viewBox="0 0 20 20" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7"><path d="m6.5 8 3.5 3.5L13.5 8" /></svg>
       </button>
-      {open ? (
-        <div aria-label={ariaLabel} className="workspace-select-menu" id={`${selectId}-listbox`} role="listbox">
-          {normalized.map((option, index) => {
-            const selectedOption = String(option.value) === String(value);
-            return (
-              <button
-                aria-selected={selectedOption}
-                className={`${selectedOption ? "is-selected" : ""} ${activeIndex === index ? "is-active" : ""}`.trim()}
-                disabled={option.disabled}
-                id={`${selectId}-option-${index}`}
-                key={String(option.value)}
-                onClick={() => choose(option)}
-                onMouseEnter={() => { if (!option.disabled) setActiveIndex(index); }}
-                role="option"
-                type="button"
-              >
-                <span>{option.label}</span>
-                <i aria-hidden="true">✓</i>
-              </button>
-            );
-          })}
-        </div>
-      ) : null}
+      {menu ? createPortal(<div className="workspace-select-portal">{menu}</div>, document.body) : null}
     </div>
   );
 }

@@ -1,13 +1,14 @@
-export const PAPER_SOURCE_FILTER_OPTIONS = [
-  ["all", "全部来源"],
-  ["daily", "每日任务"],
-  ["manual", "手动导入"]
-];
+export const PAPER_SOURCE_FILTER_CODES = ["all", "daily", "manual"];
+
+export function paperSourceFilterOptions(t) {
+  return PAPER_SOURCE_FILTER_CODES.map((value) => [value, t(`sourceFilter.${value}`)]);
+}
 
 export const RECENT_MANUAL_IMPORT_WINDOW_MS = 30 * 60 * 1000;
 
-export function paperSourceFilterLabel(source) {
-  return PAPER_SOURCE_FILTER_OPTIONS.find(([value]) => value === source)?.[1] || "全部来源";
+export function paperSourceFilterLabel(source, t) {
+  const value = PAPER_SOURCE_FILTER_CODES.includes(source) ? source : "all";
+  return t(`sourceFilter.${value}`);
 }
 
 export function isRecentManualPaperImport(item, now = Date.now()) {

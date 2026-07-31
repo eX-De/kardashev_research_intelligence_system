@@ -1,4 +1,5 @@
 import { InlineLoader } from "./Loading.jsx";
+import { useTranslation } from "react-i18next";
 import "../styles/WorkspacePaneLoader.css";
 
 function ListSkeleton({ rows }) {
@@ -40,14 +41,15 @@ export function WorkspacePaneLoader({
   className = "",
   description = "",
   rows = 6,
-  title = "读取工作区",
+  title,
   variant = "detail"
 }) {
+  const { t } = useTranslation("common");
   const classes = ["workspace-pane-loader", `is-${variant}`, className].filter(Boolean).join(" ");
   return (
     <div className={classes} role="status" aria-live="polite">
       <header className="workspace-pane-loader-head">
-        <InlineLoader label={title} />
+        <InlineLoader label={title === undefined ? t("loading.workspace") : title} />
         {description ? <p>{description}</p> : null}
       </header>
       {variant === "list" ? <ListSkeleton rows={rows} /> : <DetailSkeleton report={variant === "report"} />}

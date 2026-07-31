@@ -1,0 +1,136 @@
+{
+  "dailySteps": {
+    "preparing": "Preparing",
+    "sync_context_sources": "Sync context sources",
+    "refresh_project_chat_profiles": "Refresh project chat profiles",
+    "fetch_arxiv": "Fetch arXiv",
+    "snapshot": "Create paper snapshot",
+    "cache_text": "Cache PDF/TXT",
+    "rank_global": "Global paper matching",
+    "rank_project": "Project paper matching",
+    "judge_project_papers": "Project-level evaluation",
+    "paper_recommendations": "Generate paper recommendations",
+    "paper_reports": "Queue full-paper reports",
+    "archive_zero_match": "Archive unmatched papers",
+    "generate_daily_report_artifact": "Generate daily report artifact"
+  },
+  "notifications": {
+    "unknown": {
+      "title": "System notification"
+    },
+    "empty": {
+      "title": "No notifications",
+      "detail": "There are no new task completions, papers, or experiment sync events."
+    },
+    "daily_run_progress": {
+      "title": "Daily run in progress"
+    },
+    "daily_run_recoverable": {
+      "title": "Daily run can be resumed",
+      "detail": "The previous run failed at {{failedStep}} after completing {{completed}}/{{total}} stages. Resume the previous run to continue."
+    },
+    "arxiv_rate_limited": {
+      "title": "arXiv is temporarily rate limiting requests",
+      "detail": "arXiv rate limiting occurred during {{failedStep}} and retries were exhausted. Try again later or increase the arXiv request interval in Settings.",
+      "detailWithRetry": "arXiv rate limiting occurred during {{failedStep}} and retries were exhausted. arXiv recommends waiting {{retryAfter}} seconds; you can also increase the request interval in Settings."
+    },
+    "job_running": {
+      "title": "Task running"
+    },
+    "job_failed": {
+      "title": "Task failed",
+      "detail": "{{job}} · {{message}}",
+      "noMessage": "{{job}} · No error details were recorded"
+    },
+    "daily_run_completed": {
+      "title": "Daily run completed",
+      "fallback": "The run completed",
+      "parts": {
+        "newPapers_one": "{{count}} new paper",
+        "newPapers_other": "{{count}} new papers",
+        "projectMatches_one": "{{count}} project candidate",
+        "projectMatches_other": "{{count}} project candidates",
+        "paperReports_one": "{{count}} full-paper report",
+        "paperReports_other": "{{count}} full-paper reports",
+        "archived_one": "{{count}} zero-match paper archived",
+        "archived_other": "{{count}} zero-match papers archived",
+        "filtered_one": "{{count}} project evaluation filtered out",
+        "filtered_other": "{{count}} project evaluations filtered out",
+        "dailyReport": "Daily report {{path}}"
+      }
+    },
+    "arxiv_papers_arrived": {
+      "title": "New papers arrived",
+      "detail_one": "{{count}} new arXiv paper was added",
+      "detail_other": "{{count}} new arXiv papers were added"
+    },
+    "obsidian_sync_completed": {
+      "title": "Obsidian synced",
+      "detail_one": "{{count}} note updated and {{chunks}} chunks indexed",
+      "detail_other": "{{count}} notes updated and {{chunks}} chunks indexed",
+      "fallback": "Obsidian sync completed"
+    },
+    "paper_text_cached": {
+      "title": "Paper text cached",
+      "pdf_one": "{{count}} PDF cached",
+      "pdf_other": "{{count}} PDFs cached",
+      "text_one": "{{count}} paper converted to TXT",
+      "text_other": "{{count}} papers converted to TXT",
+      "failed_one": "{{count}} paper failed",
+      "failed_other": "{{count}} papers failed"
+    },
+    "paper_matching_completed": {
+      "title": "Paper matching completed",
+      "detail_one": "{{count}} match",
+      "detail_other": "{{count}} matches"
+    },
+    "paper_report_queue_processing": {
+      "title": "Generating full-paper reports",
+      "detail": "{{processing}} processing, {{queued}} queued"
+    },
+    "paper_report_queue_failed": {
+      "title": "Full-paper report generation failed",
+      "detail_one": "{{count}} report failed. Retry it in the report queue or check the LLM and PDF/TXT configuration.",
+      "detail_other": "{{count}} reports failed. Retry them in the report queue or check the LLM and PDF/TXT configuration."
+    },
+    "paper_report_queue_backlog": {
+      "title": "Full-paper reports are waiting",
+      "detail_one": "{{count}} paper is queued and will be generated with the configured concurrency.",
+      "detail_other": "{{count}} papers are queued and will be generated with the configured concurrency."
+    },
+    "paper_report_completed": {
+      "title": "Full-paper reports generated",
+      "detail_one": "{{count}} full-paper report completed",
+      "detail_other": "{{count}} full-paper reports completed"
+    },
+    "experiment_report_arrived": {
+      "title": "Experiment report received",
+      "project": "Project {{id}}",
+      "source": "Source {{source}}",
+      "updated": "Updated {{value}}"
+    },
+    "app_update_available": {
+      "title": "A new version is available",
+      "detail": "Current: {{current}}; latest: {{latest}}. View the release notes or copy an update command for your deployment."
+    }
+  },
+  "errors": {
+    "unknown": "The operation failed. Please try again.",
+    "auth_required": "Please sign in first.",
+    "invalid_password": "The password is incorrect.",
+    "invalid_json": "The request data is invalid.",
+    "daily_run_recoverable": "A failed daily run can be resumed. Resume it, or confirm that you want to start a new run.",
+    "obsidian_not_configured": "Obsidian is optional. Configure it in Settings before using this feature.",
+    "stream_required": "Paper chat requires a streaming connection."
+  },
+  "obsidian": {
+    "remote": "Remote",
+    "configured": "Configured",
+    "optionalSetup": "Obsidian is optional. Configure a usable vault path in Settings to export or select paths inside the vault.",
+    "optionalNotConfigured": "Optional: not configured",
+    "pathMissing": "The configured Obsidian vault path is unavailable. Check it in Settings.",
+    "pathDoesNotExist": "Path does not exist",
+    "unavailable": "Unavailable",
+    "operationFailed": "Obsidian operation failed."
+  }
+}

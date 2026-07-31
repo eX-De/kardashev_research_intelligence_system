@@ -1,0 +1,15 @@
+{
+  "title": "KRIS 研究智能系统",
+  "auth": {
+    "checking": "正在验证访问状态",
+    "loginFailed": "密码验证失败",
+    "loggedIn": "已登录",
+    "noPassword": "无密码模式",
+    "logoutFailed": "退出登录失败"
+  },
+  "status": {
+    "idle": "空闲",
+    "ready": "就绪",
+    "dailyStarted": "每日流程已在后台启动"
+  }
+}

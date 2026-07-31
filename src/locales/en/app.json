@@ -1,0 +1,15 @@
+{
+  "title": "KRIS Research Intelligence System",
+  "auth": {
+    "checking": "Verifying access",
+    "loginFailed": "Password verification failed",
+    "loggedIn": "Logged in",
+    "noPassword": "Passwordless mode",
+    "logoutFailed": "Failed to log out"
+  },
+  "status": {
+    "idle": "Idle",
+    "ready": "Ready",
+    "dailyStarted": "The daily workflow has started in the background"
+  }
+}

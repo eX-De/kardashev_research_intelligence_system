@@ -87,6 +87,7 @@ function notification(
   detail,
   {
     createdAt = null,
+    data = null,
     source = {},
     channels = ["list"],
     requiresAction = false,
@@ -104,6 +105,7 @@ function notification(
     channels: channels || ["list"],
     requires_action: Boolean(requiresAction)
   };
+  if (data && typeof data === "object") item.data = data;
   if (progress) item.progress = progress;
   return item;
 }
@@ -337,6 +339,11 @@ function arxivRateLimitedNotification(failed = {}) {
         suggested_action: String(error.suggested_action || ""),
         technical_message: String(error.technical_message || failed.message || "")
       },
+      data: {
+        failed_step: String(progress.current_key || ""),
+        failed_label: failedStep,
+        retry_after_seconds: retryAfter
+      },
       requiresAction: true
     }
   );
@@ -390,6 +397,10 @@ function updateNotification(status = {}) {
     severity: "warn",
     title: "有新版本可用",
     detail: `当前 ${current}，最新 ${latest}。可以查看更新说明，或复制适合当前部署方式的更新命令。`,
+    data: {
+      current_version: current,
+      latest_version: latest
+    },
     created_at: update.checked_at || update.published_at,
     source: { update },
     channels: ["list", "toast"],
@@ -412,6 +423,10 @@ registerNotificationBuilder("daily_run_progress", "每日流程运行中的步�
       String(progress.current_label || "准备中"),
       {
         createdAt: runningDaily.started_at,
+        data: {
+          current_key: String(progress.current_key || ""),
+          current_label: String(progress.current_label || "")
+        },
         source: { job_id: runningDaily.id, job_type: runningDaily.job_type },
         progress
       }
@@ -438,6 +453,12 @@ registerNotificationBuilder("daily_run_recoverable", "可恢复的失败每日�
           job_id: recoverable.id,
           job_type: recoverable.job_type,
           recovery
+        },
+        data: {
+          completed: recovery.completed,
+          failed_label: recovery.failed_label,
+          failed_step: recovery.failed_step,
+          total: recovery.total
         },
         requiresAction: true
       }
@@ -474,6 +495,7 @@ registerNotificationBuilder("job_running", "非每日流程任务运行中", asy
       jobTitle(running.job_type),
       {
         createdAt: running.started_at,
+        data: { job_type: running.job_type },
         source: { job_id: running.id, job_type: running.job_type }
       }
     )
@@ -502,6 +524,10 @@ registerNotificationBuilder("job_failed", "最近失败任务", async (context) 
       `${jobTitle(failed.job_type)} · ${failed.message || "未记录错误信息"}`,
       {
         createdAt: activityTime(failed),
+        data: {
+          job_type: failed.job_type,
+          message: String(failed.message || "")
+        },
         source: { job_id: failed.id, job_type: failed.job_type }
       }
     )
@@ -534,6 +560,14 @@ registerNotificationBuilder("daily_run_completed", "每日流程完成摘要", a
       parts.length ? parts.join("，") : completedDaily.message || "流程已完成",
       {
         createdAt: completedDaily.finished_at,
+        data: {
+          archived,
+          daily_report_path: String(meta.daily_report_path || ""),
+          filtered,
+          new_papers: newPapers,
+          paper_reports: paperReports,
+          project_matches: projectMatches
+        },
         source: {
           job_id: completedDaily.id,
           job_type: completedDaily.job_type,
@@ -560,6 +594,7 @@ registerNotificationBuilder("arxiv_papers_arrived", "新 arXiv 论文入库", as
       `${count} 篇新 arXiv 论文已入库`,
       {
         createdAt: paperJob.finished_at,
+        data: { count },
         source: { job_id: paperJob.id, job_type: paperJob.job_type }
       }
     )
@@ -583,6 +618,7 @@ registerNotificationBuilder("obsidian_sync_completed", "Obsidian 同步完成", 
       indexed ? `${indexed} 篇笔记更新，${chunks} 个 chunk 入库` : "Obsidian 同步完成",
       {
         createdAt: syncJob.finished_at,
+        data: { chunks, indexed },
         source: { job_id: syncJob.id, job_type: syncJob.job_type }
       }
     )
@@ -611,6 +647,11 @@ registerNotificationBuilder("paper_text_cached", "PDF/TXT 缓存完成", async (
       parts.join("，"),
       {
         createdAt: textJob.finished_at,
+        data: {
+          failed_count: failedCount,
+          pdf_count: pdfCount,
+          text_count: textCount
+        },
         source: { job_id: textJob.id, job_type: textJob.job_type }
       }
     )
@@ -633,6 +674,7 @@ registerNotificationBuilder("paper_matching_completed", "论文匹配完成", as
       `${count} 条匹配结果`,
       {
         createdAt: rankJob.finished_at,
+        data: { count },
         source: { job_id: rankJob.id, job_type: rankJob.job_type }
       }
     )
@@ -648,7 +690,8 @@ registerNotificationBuilder("paper_report_queue_processing", "全文报告队列
       "paper_report_queue_processing",
       "info",
       "全文报告生成中",
-      `${stats.processing} 篇处理中，${stats.queued} 篇排队中`
+      `${stats.processing} 篇处理中，${stats.queued} 篇排队中`,
+      { data: { processing: stats.processing, queued: stats.queued } }
     )
   ];
 });
@@ -662,7 +705,8 @@ registerNotificationBuilder("paper_report_queue_failed", "全文报告生成失�
       "paper_report_queue_failed",
       "bad",
       "全文报告生成失败",
-      `${failed} 篇报告失败，需要在报告队列中重试或检查 LLM/PDF/TXT 配置。`
+      `${failed} 篇报告失败，需要在报告队列中重试或检查 LLM/PDF/TXT 配置。`,
+      { data: { failed } }
     )
   ];
 });
@@ -676,7 +720,8 @@ registerNotificationBuilder("paper_report_queue_backlog", "全文报告队列排
       "paper_report_queue_backlog",
       "warn",
       "全文报告等待生成",
-      `${queued} 篇论文正在排队，server 运行时会按配置并发自动生成。`
+      `${queued} 篇论文正在排队，server 运行时会按配置并发自动生成。`,
+      { data: { queued } }
     )
   ];
 });
@@ -697,6 +742,7 @@ registerNotificationBuilder("paper_report_completed", "最近全文报告生成�
       `${count} 篇全文报告完成`,
       {
         createdAt: reportJob.finished_at,
+        data: { count },
         source: { job_id: reportJob.id, job_type: reportJob.job_type }
       }
     )
@@ -720,6 +766,12 @@ registerNotificationBuilder("experiment_report_arrived", "KRIS agent 实验报�
       detailParts.join(" · "),
       {
         createdAt: updatedAt,
+        data: {
+          project_id: projectId,
+          source_agent: sourceAgent,
+          title: String(report.title || ""),
+          updated_at: updatedAt
+        },
         source: {
           artifact_id: report.id,
           project_id: projectId,

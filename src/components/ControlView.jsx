@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Link, useLocation } from "react-router-dom";
 
 import { DailyTasksSettingsView } from "./DailyTasksSettingsView.jsx";
@@ -9,6 +10,7 @@ import { useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { api, chooseLocalPath, postJson } from "../lib/dashboard.js";
 import { friendlyObsidianMessage, obsidianCapabilityFrom } from "../lib/obsidianCapability.js";
 import { normalizeProviders, providerPayload } from "../lib/settingsProviders.js";
+import { dailyStepLabel, formatApiError } from "../lib/systemMessages.js";
 import "../styles/ControlView.css";
 
 const AUTO_SAVE_DELAY_MS = 850;
@@ -19,32 +21,32 @@ const QUICK_SAVE_FIELDS = new Set([
 ]);
 const SUCCESS_TOAST_THROTTLE_MS = 2500;
 const SETTINGS_PAGES = {
-  "/settings/daily-tasks": { key: "daily-tasks", eyebrow: "自动化工作区", title: "每日任务" },
-  "/settings/data": { key: "data", eyebrow: "数据工作区", title: "数据与存储" },
-  "/settings/models": { key: "models", eyebrow: "模型工作区", title: "模型与路由" }
+  "/settings/daily-tasks": { key: "daily-tasks", translationKey: "pages.daily" },
+  "/settings/data": { key: "data", translationKey: "pages.data" },
+  "/settings/models": { key: "models", translationKey: "pages.models" }
 };
 const SETTINGS_ENTRIES = [
-  { to: "/settings/daily-tasks", index: "01", type: "daily", eyebrow: "AUTOMATION", label: "每日任务", description: "配置调度、论文抓取、检索推荐与任务恢复。" },
-  { to: "/settings/data", index: "02", type: "data", eyebrow: "KNOWLEDGE", label: "数据与存储", description: "管理 Obsidian、知识库范围与论文存储目录。" },
-  { to: "/settings/models", index: "03", type: "models", eyebrow: "INTELLIGENCE", label: "模型与路由", description: "维护 Provider，并为不同研究任务分配模型。" }
+  { to: "/settings/daily-tasks", index: "01", type: "daily", eyebrow: "AUTOMATION", translationKey: "entries.daily" },
+  { to: "/settings/data", index: "02", type: "data", eyebrow: "KNOWLEDGE", translationKey: "entries.data" },
+  { to: "/settings/models", index: "03", type: "models", eyebrow: "INTELLIGENCE", translationKey: "entries.models" }
 ];
 const DAILY_JOB_TYPES = new Set(["run-daily", "resume-daily", "retry-daily"]);
 const ABOUT_LINKS = [
   {
     title: "KRIS GitHub",
-    description: "查看主项目源码、Issue 与版本发布记录",
+    translationKey: "about.links.krisGithub",
     href: "https://github.com/eX-De/kardashev_research_intelligence_system",
     logo: "github"
   },
   {
     title: "KRIS Docker Hub",
-    description: "获取最新容器镜像与历史版本标签",
+    translationKey: "about.links.dockerHub",
     href: "https://hub.docker.com/r/exde1968/kardashev-research-intelligence-system",
     logo: "docker"
   },
   {
     title: "kris-agent GitHub",
-    description: "查看配套 Agent 的安装与使用说明",
+    translationKey: "about.links.agentGithub",
     href: "https://github.com/eX-De/kris-agent",
     logo: "github"
   }
@@ -68,11 +70,12 @@ function settingsSignature(settings, providers) {
 }
 
 function HealthItem({ label, loading = false, value, state = "neutral" }) {
+  const { t } = useTranslation("settings");
   return (
     <div
       className={`health-item ${loading ? "loading" : state}`}
       aria-busy={loading || undefined}
-      aria-label={loading ? `${label} 正在检查` : undefined}
+      aria-label={loading ? t("health.checking", { label }) : undefined}
     >
       <span>{label}</span>
       <strong>{loading ? <i className="health-checking-skeleton" aria-hidden="true" /> : value}</strong>
@@ -90,13 +93,14 @@ function SettingsEntryIcon({ type }) {
 }
 
 function HealthGrid({ health, loading = false, settings }) {
-  const obsidianCapability = obsidianCapabilityFrom({ health, settings });
+  const { t } = useTranslation("settings");
+  const obsidianCapability = obsidianCapabilityFrom({ health, settings, t });
   const llmState = health?.llm?.configured ? "ok" : "warn";
   return (
     <div className="health-grid">
       <HealthItem label="Database" loading={loading} value={health?.database?.ok ? "OK" : "Error"} state={health?.database?.ok ? "ok" : "bad"} />
       <HealthItem label="Obsidian" loading={loading} value={obsidianCapability.label} state={obsidianCapability.state} />
-      <HealthItem label="LLM" loading={loading} value={health?.llm?.configured ? `${health.llm.providers?.length || 0} providers` : "Not configured"} state={llmState} />
+      <HealthItem label="LLM" loading={loading} value={health?.llm?.configured ? t("health.providers", { count: health.llm.providers?.length || 0 }) : t("health.notConfigured")} state={llmState} />
     </div>
   );
 }
@@ -127,15 +131,16 @@ function AboutLogo({ type }) {
 }
 
 function AboutPanel() {
+  const { t } = useTranslation("settings");
   return (
     <section className="panel about-panel">
       <header className="settings-about-heading">
         <div>
-          <span>Resources</span>
-          <h2>项目资源</h2>
-          <p>KRIS 源码、容器镜像与配套 Agent。</p>
+          <span>{t("about.eyebrow")}</span>
+          <h2>{t("about.title")}</h2>
+          <p>{t("about.description")}</p>
         </div>
-        <em>OPEN SOURCE</em>
+        <em>{t("about.badge")}</em>
       </header>
       <div className="about-action-row">
         {ABOUT_LINKS.map((item) => (
@@ -143,7 +148,7 @@ function AboutPanel() {
             <AboutLogo type={item.logo} />
             <span className="about-action-copy">
               <strong className="about-action-title">{item.title}</strong>
-              <small>{item.description}</small>
+              <small>{t(item.translationKey)}</small>
             </span>
             <i className="about-action-arrow" aria-hidden="true">↗</i>
           </a>
@@ -153,9 +158,13 @@ function AboutPanel() {
   );
 }
 
-function schedulerStatusMessage(scheduler) {
+function schedulerStatusMessage(scheduler, t) {
   const current = scheduler?.current_job;
-  return current ? `Running ${current.command}...` : scheduler?.last_job?.message || scheduler?.last_error?.message || "Idle";
+  return current
+    ? t("status.running", {
+      job: t(`common:jobType.${current.command}`, { defaultValue: current.command })
+    })
+    : scheduler?.last_job?.message || scheduler?.last_error?.message || t("status.idle");
 }
 
 function dailyRecoveryFromHistory(history = []) {
@@ -171,7 +180,8 @@ function dailyRecoveryFromHistory(history = []) {
     const failedStep = steps.find((step) => step?.status === "failed") || {};
     return {
       job_id: item.id,
-      failed_label: failedStep.label || progress.current_label || "未知阶段",
+      failed_step: failedStep.key || progress.current_key || "",
+      failed_label: failedStep.label || progress.current_label || "",
       completed: Number(progress.completed || steps.filter((step) => step?.status === "completed").length || 0),
       total: Number(progress.total || steps.length || 0),
     };
@@ -180,8 +190,9 @@ function dailyRecoveryFromHistory(history = []) {
 }
 
 export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) {
+  const { t } = useTranslation(["settings", "common", "system"]);
   const location = useLocation();
-  const currentPage = SETTINGS_PAGES[location.pathname] || { key: "overview", eyebrow: "系统工作区", title: "设置中心" };
+  const currentPage = SETTINGS_PAGES[location.pathname] || { key: "overview", translationKey: "pages.overview" };
   const [settings, setSettings] = useState({});
   const [providers, setProviders] = useState([]);
   const [saveStatus, setSaveStatus] = useState("idle");
@@ -245,8 +256,8 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
     if (includeTaskHistory) tasks.push(refreshHistoryCache({ force: true }));
     const [settingsData, statusData] = await Promise.all(tasks);
     if (hydrate) hydrateSettings(settingsData, { force: true });
-    setStatusMessage(schedulerStatusMessage(statusData.scheduler || {}));
-  }, [hydrateSettings, refreshHealthCache, refreshHistoryCache, refreshJobStatusCache, refreshJobsSummaryCache, refreshSettingsCache, setStatusMessage]);
+    setStatusMessage(schedulerStatusMessage(statusData.scheduler || {}, t));
+  }, [hydrateSettings, refreshHealthCache, refreshHistoryCache, refreshJobStatusCache, refreshJobsSummaryCache, refreshSettingsCache, setStatusMessage, t]);
 
   useEffect(() => {
     if (settingsQuery.data?.settings) hydrateSettings(settingsQuery.data);
@@ -254,27 +265,27 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
 
   useEffect(() => {
     if (!jobStatusQuery.data?.scheduler) return;
-    setStatusMessage(schedulerStatusMessage(jobStatusQuery.data.scheduler));
-  }, [jobStatusQuery.data, setStatusMessage]);
+    setStatusMessage(schedulerStatusMessage(jobStatusQuery.data.scheduler, t));
+  }, [jobStatusQuery.data, setStatusMessage, t]);
 
   useEffect(() => {
     if (currentPage.key !== "daily-tasks" || taskDetailsLoadedRef.current) return undefined;
     taskDetailsLoadedRef.current = true;
-    refreshHistoryCache({ force: true }).catch((error) => setStatusMessage(error.message));
+    refreshHistoryCache({ force: true }).catch((error) => setStatusMessage(formatApiError(error, t)));
     return undefined;
-  }, [currentPage.key, refreshHistoryCache, setStatusMessage]);
+  }, [currentPage.key, refreshHistoryCache, setStatusMessage, t]);
 
   useEffect(() => {
     const error = settingsQuery.error || jobStatusQuery.error || jobsSummaryQuery.error || historyQuery.error || healthQuery.error;
-    if (error) setStatusMessage(error.message);
-  }, [healthQuery.error, historyQuery.error, jobStatusQuery.error, jobsSummaryQuery.error, setStatusMessage, settingsQuery.error]);
+    if (error) setStatusMessage(formatApiError(error, t));
+  }, [healthQuery.error, historyQuery.error, jobStatusQuery.error, jobsSummaryQuery.error, setStatusMessage, settingsQuery.error, t]);
 
   const showSaveSuccess = useCallback(({ force = false } = {}) => {
     const now = Date.now();
     if (!force && now - lastSuccessToastAtRef.current < SUCCESS_TOAST_THROTTLE_MS) return;
     lastSuccessToastAtRef.current = now;
-    notify("设置已保存", { type: "success" });
-  }, [notify]);
+    notify(t("save.savedToast"), { type: "success" });
+  }, [notify, t]);
 
   const saveCurrentSettings = useCallback(async ({ forceSuccessToast = false, force = false } = {}) => {
     const payload = settingsPayload(settingsRef.current, providersRef.current);
@@ -288,7 +299,7 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
     const editVersion = editVersionRef.current;
     saveRequestRef.current = requestId;
     setSaveStatus("saving");
-    setStatusMessage("Saving settings...");
+    setStatusMessage(t("save.saving"));
 
     try {
       const data = await postJson("/api/settings", payload);
@@ -303,16 +314,17 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
       setSettings(savedSettings);
       setProviders(savedProviders);
       setSaveStatus("saved");
-      setStatusMessage("Settings saved");
+      setStatusMessage(t("save.saved"));
       showSaveSuccess({ force: forceSuccessToast });
-      refreshControl({ hydrate: false }).catch((error) => setStatusMessage(error.message));
+      refreshControl({ hydrate: false }).catch((error) => setStatusMessage(formatApiError(error, t)));
     } catch (error) {
       if (requestId !== saveRequestRef.current || editVersion !== editVersionRef.current) return;
       setSaveStatus("error");
-      setStatusMessage(error.message);
-      notify(error.message, { type: "error" });
+      const message = formatApiError(error, t);
+      setStatusMessage(message);
+      notify(message, { type: "error" });
     }
-  }, [notify, refreshControl, setStatusMessage, showSaveSuccess]);
+  }, [notify, refreshControl, setStatusMessage, showSaveSuccess, t]);
 
   useEffect(() => {
     if (!hydratedRef.current) return undefined;
@@ -391,12 +403,12 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
     ];
     if (includeHistory) refreshes.push(refreshHistoryCache({ force: true }));
     const [statusData] = await Promise.all(refreshes);
-    setStatusMessage(schedulerStatusMessage(statusData.scheduler || {}));
+    setStatusMessage(schedulerStatusMessage(statusData.scheduler || {}, t));
     return statusData;
   }
 
   async function setSchedulerMode(mode) {
-    setStatusMessage("Updating scheduler...");
+    setStatusMessage(t("status.updatingScheduler"));
     try {
       const data = await postJson("/api/jobs/scheduler/mode", { mode });
       if (data.settings) {
@@ -409,47 +421,48 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
       }
       if (data.scheduler) {
         cache.setCache(["jobs", "status"], { scheduler: data.scheduler });
-        setStatusMessage(schedulerStatusMessage(data.scheduler));
+        setStatusMessage(schedulerStatusMessage(data.scheduler, t));
       }
       cache.markStale(["health"]);
       await refreshTaskActivity({ includeHistory: false });
-      refreshHealthCache({ force: true }).catch((error) => setStatusMessage(error.message));
+      refreshHealthCache({ force: true }).catch((error) => setStatusMessage(formatApiError(error, t)));
     } catch (error) {
-      setStatusMessage(error.message);
+      setStatusMessage(formatApiError(error, t));
     }
   }
 
   async function runJob(name, endpoint = `/api/jobs/${name}`, body = {}) {
     let payload = body;
     if (name === "run-daily" && dailyRecovery && !payload.force) {
-      const ok = window.confirm("今天已有失败但可恢复的每日流程。重新执行会新建一轮流程，可能重复抓取、匹配和消耗 LLM。确定重新执行？");
+      const ok = window.confirm(t("confirm.forceDailyRun"));
       if (!ok) return;
       payload = { ...payload, force: true };
     }
-    setStatusMessage(`Running ${name}...`);
+    const localizedJob = t(`common:jobType.${name}`, { defaultValue: name });
+    setStatusMessage(t("status.running", { job: localizedJob }));
     try {
       const data = await postJson(endpoint, payload);
-      setStatusMessage(data.message || `${name} finished`);
+      setStatusMessage(t("status.finished", { job: localizedJob }));
       await refreshTaskActivity({ includeHistory: true });
     } catch (error) {
       if (error.code === "daily_run_recoverable") {
         if (!dailyRecovery) {
-          setStatusMessage(error.message);
+          setStatusMessage(formatApiError(error, t));
           await refreshTaskActivity({ includeHistory: true });
           return;
         }
-        const ok = window.confirm(`${error.message}\n\n确定重新执行今日流程？`);
+        const ok = window.confirm(`${formatApiError(error, t)}\n\n${t("confirm.rerunDaily")}`);
         if (ok) {
           await runJob(name, endpoint, { ...payload, force: true });
         }
         return;
       }
-      setStatusMessage(error.message);
+      setStatusMessage(formatApiError(error, t));
     }
   }
 
   async function pickPath(name, { mode, relativeTo, title }) {
-    setStatusMessage("正在打开本地路径选择器...");
+    setStatusMessage(t("path.opening"));
     try {
       const data = await chooseLocalPath({
         mode,
@@ -458,17 +471,17 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
         basePath: relativeTo === "obsidian_vault" ? settingsRef.current.obsidian_vault_path : undefined
       });
       if (data.cancelled) {
-        setStatusMessage("已取消路径选择");
-        notify("已取消路径选择", { type: "info" });
+        setStatusMessage(t("path.cancelled"));
+        notify(t("path.cancelled"), { type: "info" });
         return;
       }
       updateSetting(name, data.relative_path ?? data.path ?? "", {
         delay: QUICK_SAVE_DELAY_MS
       });
-      setStatusMessage("路径已选择");
-      notify("路径已选择，正在保存", { type: "info" });
+      setStatusMessage(t("path.selected"));
+      notify(t("path.saving"), { type: "info" });
     } catch (error) {
-      const message = relativeTo === "obsidian_vault" ? friendlyObsidianMessage(error) : error.message;
+      const message = relativeTo === "obsidian_vault" ? friendlyObsidianMessage(error, t) : formatApiError(error, t);
       setStatusMessage(message);
       notify(message, { type: "error" });
     }
@@ -567,25 +580,25 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
         <section className="settings-overview-card">
           <header className="settings-card-heading">
             <div>
-              <span>运行基础</span>
-              <h2>连接与服务</h2>
-              <p>数据库、知识库集成和模型服务的即时状态。</p>
+              <span>{t("overview.foundation")}</span>
+              <h2>{t("overview.title")}</h2>
+              <p>{t("overview.description")}</p>
             </div>
-            <em>{healthQuery.hasData ? (systemHealthy ? "ALL SYSTEMS READY" : "ACTION NEEDED") : "SYNCING"}</em>
+            <em>{healthQuery.hasData ? (systemHealthy ? t("overview.allReady") : t("overview.actionNeeded")) : t("overview.syncing")}</em>
           </header>
           <HealthGrid health={health} loading={(!healthQuery.hasData && !healthQuery.error) || healthQuery.refreshing} settings={settings} />
         </section>
-        <nav className="settings-entry-grid" aria-label="设置二级页面">
+        <nav className="settings-entry-grid" aria-label={t("entries.ariaLabel")}>
           {SETTINGS_ENTRIES.map((entry) => (
             <Link className={`settings-entry-card is-${entry.type}`} key={entry.to} to={entry.to}>
               <span className="settings-entry-index">{entry.index}</span>
               <span className="settings-entry-icon"><SettingsEntryIcon type={entry.type} /></span>
               <span className="settings-entry-copy">
                 <small>{entry.eyebrow}</small>
-                <strong>{entry.label}</strong>
-                <p>{entry.description}</p>
+                <strong>{t(`${entry.translationKey}.label`)}</strong>
+                <p>{t(`${entry.translationKey}.description`)}</p>
               </span>
-              <span className="settings-entry-action">进入设置 <i aria-hidden="true">→</i></span>
+              <span className="settings-entry-action">{t("entries.open")} <i aria-hidden="true">→</i></span>
             </Link>
           ))}
         </nav>
@@ -598,16 +611,16 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
     <section className="view control-view vision-settings">
       <header className="vision-topbar settings-topbar">
         <div className="vision-brand">
-          <span>{currentPage.eyebrow}</span>
-          <h1>{currentPage.title}</h1>
+          <span>{t(`${currentPage.translationKey}.eyebrow`)}</span>
+          <h1>{t(`${currentPage.translationKey}.title`)}</h1>
         </div>
         <div className="vision-top-actions">
-          <span className={`vision-live-state ${systemHealthy ? "ready" : "attention"}`}><i aria-hidden="true" />{healthQuery.hasData ? (systemHealthy ? "服务就绪" : "需要配置") : "同步状态"}</span>
+          <span className={`vision-live-state ${systemHealthy ? "ready" : "attention"}`}><i aria-hidden="true" />{healthQuery.hasData ? (systemHealthy ? t("health.ready") : t("health.needsConfiguration")) : t("health.syncing")}</span>
           <RefreshButton
             className="vision-refresh"
             busy={refreshBusy}
-            label="刷新状态"
-            onClick={() => refreshControl({ hydrate: false, includeTaskHistory: currentPage.key === "daily-tasks" }).catch((error) => setStatusMessage(error.message))}
+            label={t("actions.refreshStatus")}
+            onClick={() => refreshControl({ hydrate: false, includeTaskHistory: currentPage.key === "daily-tasks" }).catch((error) => setStatusMessage(formatApiError(error, t)))}
           />
         </div>
       </header>
@@ -616,10 +629,10 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
         <div className="settings-subpage-nav-row">
           <Link className="settings-overview-back" to="/settings">
             <span aria-hidden="true">←</span>
-            返回设置概览
+            {t("actions.backToOverview")}
           </Link>
           <button className="settings-subpage-save-button" disabled={saveStatus === "saving"} onClick={saveSettings} type="button">
-            {saveStatus === "saving" ? "保存中" : "立即保存"}
+            {saveStatus === "saving" ? t("actions.saving") : t("actions.saveNow")}
           </button>
         </div>
       ) : null}

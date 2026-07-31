@@ -1,26 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 
 import { api, postJson } from "../lib/dashboard.js";
 import "../styles/GlobalSearchDialog.css";
 
 const MODE_KEY = "kris.unified-search.mode";
-const TYPE_OPTIONS = [
-  ["all", "全部"],
-  ["paper", "论文"],
-  ["artifact", "产物"],
-  ["project", "项目"]
-];
-const ENTITY_LABELS = { paper: "论文", artifact: "产物", project: "项目" };
-const SOURCE_LABELS = {
-  paper: "论文文本",
-  paper_abstract: "标题与摘要",
-  paper_chunk: "论文全文",
-  daily_report: "日报",
-  experiment_report: "实验报告",
-  project_chat_profile: "项目 Chat 摘要",
-  project: "项目字段"
-};
+const TYPE_CODES = ["all", "paper", "artifact", "project"];
 
 function initialDeepSearch() {
   if (typeof window === "undefined") return false;
@@ -42,11 +28,11 @@ function Highlight({ query, text }) {
   ));
 }
 
-function resultMeta(result) {
-  const bits = [ENTITY_LABELS[result.entity_type] || result.entity_type];
-  const source = SOURCE_LABELS[result.source_type] || result.source_type;
+function resultMeta(result, t) {
+  const bits = [t(`search.entity.${result.entity_type}`, { defaultValue: result.entity_type })];
+  const source = t(`search.source.${result.source_type}`, { defaultValue: result.source_type });
   if (source) bits.push(source);
-  if (Number.isFinite(Number(result.score))) bits.push(`相关度 ${Math.round(Number(result.score) * 100)}%`);
+  if (Number.isFinite(Number(result.score))) bits.push(t("search.relevance", { percent: Math.round(Number(result.score) * 100) }));
   return bits.join(" · ");
 }
 
@@ -70,6 +56,7 @@ function SearchIcon() {
 }
 
 export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }) {
+  const { t } = useTranslation("papers");
   const [isRendered, setIsRendered] = useState(isOpen);
   const [isClosing, setIsClosing] = useState(false);
   const [query, setQuery] = useState("");
@@ -98,11 +85,11 @@ export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }
       if (data.status === "completed") {
         setResponse(data.result || { mode: "deep", results: [], stats: {} });
         setBusy(false);
-        setStatusMessage?.("深度搜索完成");
+        setStatusMessage?.(t("search.status.deepComplete"));
         return;
       }
       if (data.status === "failed") {
-        throw new Error(data.error || "深度搜索失败");
+        throw new Error(data.error || t("search.status.deepFailed"));
       }
       pollTimer.current = setTimeout(() => pollDeepJob(workerJobId, token), 800);
     } catch (nextError) {
@@ -111,7 +98,7 @@ export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }
       setError(nextError.message);
       setStatusMessage?.(nextError.message);
     }
-  }, [setStatusMessage]);
+  }, [setStatusMessage, t]);
 
   useEffect(() => () => {
     requestToken.current += 1;
@@ -193,7 +180,7 @@ export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }
 
   async function runSearch(value, useDeepSearch) {
     if (!value) {
-      setError("请输入搜索内容");
+      setError(t("search.errors.empty"));
       inputRef.current?.focus();
       return;
     }
@@ -213,7 +200,7 @@ export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }
         if (token !== requestToken.current) return;
         setResponse(data);
         setBusy(false);
-        setStatusMessage?.("快速搜索完成");
+        setStatusMessage?.(t("search.status.quickComplete"));
         return;
       }
 
@@ -225,7 +212,7 @@ export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }
       });
       if (token !== requestToken.current) return;
       setJob({ ...queued, requestToken: token });
-      setStatusMessage?.("深度搜索已进入队列");
+      setStatusMessage?.(t("search.status.deepQueued"));
       await pollDeepJob(queued.worker_job_id, token);
     } catch (nextError) {
       if (token !== requestToken.current) return;
@@ -251,48 +238,48 @@ export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }
 
   const stats = response?.stats || {};
   const partialFailures = Array.isArray(stats.partial_failures) ? stats.partial_failures : [];
-  const modeLabel = deepSearch ? "搜索模型已启用" : "数据库快速搜索";
+  const modeLabel = deepSearch ? t("search.mode.deep") : t("search.mode.quick");
 
   return (
     <div className={`global-search-backdrop ${isClosing ? "is-closing" : ""}`} onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section aria-label="全局搜索" aria-modal="true" className="global-search-dialog" role="dialog">
+      <section aria-label={t("search.aria.dialog")} aria-modal="true" className="global-search-dialog" role="dialog">
         <header className="global-search-header">
           <div>
-            <span>Research search</span>
-            <h2>搜索研究空间</h2>
+            <span>{t("search.eyebrow")}</span>
+            <h2>{t("search.title")}</h2>
           </div>
-          <button aria-label="关闭搜索" className="global-search-close" onClick={onClose} type="button">×</button>
+          <button aria-label={t("search.aria.close")} className="global-search-close" onClick={onClose} type="button">×</button>
         </header>
 
         <form className="global-search-form" onSubmit={submit}>
           <SearchIcon />
           <input
-            aria-label="搜索论文、产物与项目"
+            aria-label={t("search.aria.input")}
             autoComplete="off"
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索论文、产物与项目…"
+            placeholder={t("search.placeholder")}
             ref={inputRef}
             value={query}
           />
           <button
-            aria-label={deepSearch ? "关闭搜索模型" : "启用搜索模型"}
+            aria-label={deepSearch ? t("search.disableModel") : t("search.enableModel")}
             aria-pressed={deepSearch}
             className={`global-search-brain ${deepSearch ? "active" : ""}`}
             disabled={busy}
             onClick={toggleDeepSearch}
-            title={deepSearch ? "关闭搜索模型" : "启用搜索模型"}
+            title={deepSearch ? t("search.disableModel") : t("search.enableModel")}
             type="button"
           >
             <BrainIcon />
           </button>
           <button className="global-search-submit" disabled={busy} type="submit">
-            {busy ? "搜索中" : "搜索"}
+            {busy ? t("search.searching") : t("search.submit")}
           </button>
         </form>
 
         <div className="global-search-mode-note">
           <span className={deepSearch ? "model-on" : ""}><i aria-hidden="true" />{modeLabel}</span>
-          <kbd>Esc</kbd><small>关闭</small>
+          <kbd>Esc</kbd><small>{t("search.close")}</small>
         </div>
 
         <div className="global-search-content">
@@ -300,8 +287,8 @@ export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }
             <section className="global-search-state" aria-live="polite">
               <i aria-hidden="true" />
               <div>
-                <strong>{deepSearch ? "正在跨索引检索" : "正在查询数据库"}</strong>
-                <span>{deepSearch ? `任务 ${job?.worker_job_id || "排队中"} · 由搜索模型理解语义` : "快速搜索不会调用模型"}</span>
+                <strong>{deepSearch ? t("search.progress.deepTitle") : t("search.progress.quickTitle")}</strong>
+                <span>{deepSearch ? t("search.progress.deepDetail", { job: job?.worker_job_id || t("search.progress.queued") }) : t("search.progress.quickDetail")}</span>
               </div>
             </section>
           ) : null}
@@ -309,7 +296,7 @@ export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }
           {error ? <div className="global-search-error" role="alert">{error}</div> : null}
           {partialFailures.length ? (
             <div className="global-search-warning" role="status">
-              部分来源不可用，已保留其他结果：{partialFailures.map((item) => item.source).join("、")}
+              {t("search.partialFailure", { sources: partialFailures.map((item) => item.source).join(t("common.listSeparator")) })}
             </div>
           ) : null}
 
@@ -317,19 +304,19 @@ export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }
             <section className="global-search-results">
               <header>
                 <div>
-                  <span>{response.mode === "deep" ? "Semantic results" : "Database results"}</span>
-                  <strong>{response.results?.length || 0} 条结果</strong>
+                  <span>{response.mode === "deep" ? t("search.results.semantic") : t("search.results.database")}</span>
+                  <strong>{t("search.results.count", { count: response.results?.length || 0 })}</strong>
                 </div>
                 <small>
-                  {stats.query_embedding_model ? `模型 ${stats.query_embedding_model} · ` : ""}
+                  {stats.query_embedding_model ? t("search.results.model", { model: stats.query_embedding_model }) : ""}
                   {Number(stats.elapsed_ms || 0)} ms
                 </small>
               </header>
 
-              <nav className="global-search-types" aria-label="结果类型">
-                {TYPE_OPTIONS.map(([value, label]) => (
+              <nav className="global-search-types" aria-label={t("search.aria.resultTypes")}>
+                {TYPE_CODES.map((value) => (
                   <button className={activeType === value ? "active" : ""} key={value} onClick={() => setActiveType(value)} type="button">
-                    {label}
+                    {t(`search.entity.${value}`)}
                   </button>
                 ))}
               </nav>
@@ -337,31 +324,31 @@ export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }
               <div className="global-search-list">
                 {results.map((result) => (
                   <Link className="global-search-result" key={`${result.entity_type}-${result.entity_id}`} onClick={onClose} to={result.href}>
-                    <span className={`global-result-kind kind-${result.entity_type}`}>{ENTITY_LABELS[result.entity_type] || result.entity_type}</span>
+                    <span className={`global-result-kind kind-${result.entity_type}`}>{t(`search.entity.${result.entity_type}`, { defaultValue: result.entity_type })}</span>
                     <div>
-                      <small>{resultMeta(result)}</small>
+                      <small>{resultMeta(result, t)}</small>
                       <h3><Highlight query={response.query} text={result.title} /></h3>
                       <p><Highlight query={response.query} text={result.snippet} /></p>
                       <footer>
                         {(result.matched_by || []).map((item) => <span key={item}>{item}</span>)}
-                        <b>打开详情 →</b>
+                        <b>{t("search.openDetail")} →</b>
                       </footer>
                     </div>
                   </Link>
                 ))}
                 {!results.length ? (
                   <div className="global-search-empty">
-                    <strong>没有找到匹配结果</strong>
+                    <strong>{t("search.empty.title")}</strong>
                     {response.mode === "deep" ? (
-                      <span>请确认索引任务已完成，或换一个更具体的研究描述。</span>
+                      <span>{t("search.empty.deep")}</span>
                     ) : response.results?.length ? (
-                      <span>当前结果中没有这一类型，可切换到“全部”查看。</span>
+                      <span>{t("search.empty.type")}</span>
                     ) : (
                       <div className="global-search-deep-prompt">
-                        <span>快速搜索没有找到“{response.query || query}”，是否使用深度搜索继续查找？</span>
+                        <span>{t("search.empty.quick", { query: response.query || query })}</span>
                         <button disabled={busy} onClick={retryWithDeepSearch} type="button">
                           <BrainIcon />
-                          使用深度搜索
+                          {t("search.useDeep")}
                         </button>
                       </div>
                     )}
@@ -374,8 +361,8 @@ export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }
           {!busy && !error && !response ? (
             <div className="global-search-intro">
               <span className="global-search-intro-icon"><SearchIcon /></span>
-              <strong>从整个研究空间开始查找</strong>
-              <p>输入标题、作者、方法或研究问题；需要语义理解时，点击输入框右侧的 Brain 图标。</p>
+              <strong>{t("search.intro.title")}</strong>
+              <p>{t("search.intro.description")}</p>
             </div>
           ) : null}
         </div>

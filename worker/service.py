@@ -80,6 +80,12 @@ PAPER_REPORT_RESULT_CHANGE_KEYS = (
     "paper_reports_cancelled",
 )
 
+READER_IMPORT_NOTIFICATION_LABELS = {
+    "reader-import-upload": "PDF 导入",
+    "reader-import-url": "URL 导入",
+    "reader-import-web": "网页导入",
+}
+
 
 def _env_flag(name: str, default: bool = False) -> bool:
     value = os.environ.get(name)
@@ -145,6 +151,53 @@ def _result_count(result: dict[str, Any], key: str) -> int:
 
 def _result_summary(result: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
     return {key: result.get(key) for key in keys if _result_count(result, key)}
+
+
+def _reader_import_result_or_raise(result: dict[str, Any], fallback_message: str) -> dict[str, Any]:
+    if result.get("ok"):
+        return result
+    errors = result.get("errors") if isinstance(result.get("errors"), list) else []
+    first_error = next(
+        (clean_unicode(str(item.get("error") or "")).strip() for item in errors if isinstance(item, dict) and item.get("error")),
+        fallback_message,
+    )
+    raise RuntimeError(first_error)
+
+
+def _reader_import_notification(
+    worker_job: dict[str, Any],
+    *,
+    imported_count: int = 0,
+    error_count: int = 0,
+    error_message: str = "",
+) -> dict[str, Any] | None:
+    job_type = str(worker_job.get("job_type") or "")
+    label = READER_IMPORT_NOTIFICATION_LABELS.get(job_type)
+    if not label:
+        return None
+    worker_job_id = worker_job.get("id") or worker_job.get("worker_job_id") or "unknown"
+    if error_message:
+        return {
+            "id": f"{job_type}-failed-{worker_job_id}",
+            "type": "reader_import_failed",
+            "severity": "bad",
+            "title": f"{label}失败",
+            "detail": clean_unicode(error_message).strip() or "导入任务执行失败",
+            "channels": ["toast"],
+            "requires_action": False,
+        }
+    detail = f"成功 {imported_count} 篇"
+    if error_count:
+        detail += f"，失败 {error_count} 篇"
+    return {
+        "id": f"{job_type}-completed-{worker_job_id}",
+        "type": "reader_import_completed",
+        "severity": "warn" if error_count else "ok",
+        "title": f"{label}完成",
+        "detail": detail,
+        "channels": ["toast"],
+        "requires_action": False,
+    }
 
 
 def _compact_project_payload(result: dict[str, Any], fallback_id: int | None = None) -> dict[str, Any]:
@@ -303,11 +356,17 @@ def _publish_reader_domain_events(conn: Any, worker_job: dict[str, Any], result:
     payload = _payload(worker_job)
     if job_type in {"reader-import-upload", "reader-import-url", "reader-import-web"}:
         imported = result.get("imported") if isinstance(result.get("imported"), list) else []
+        errors = result.get("errors") if isinstance(result.get("errors"), list) else []
         source_by_job_type = {
             "reader-import-upload": "upload",
             "reader-import-url": "url",
             "reader-import-web": "web",
         }
+        notification = _reader_import_notification(
+            worker_job,
+            imported_count=len(imported),
+            error_count=len(errors),
+        )
         insert_app_event(
             conn,
             "reader.papers.imported",
@@ -322,7 +381,8 @@ def _publish_reader_domain_events(conn: Any, worker_job: dict[str, Any], result:
                     if isinstance(item, dict) and (item.get("paper_id") or item.get("id"))
                 ],
                 "imported_count": len(imported),
-                "error_count": len(result.get("errors") if isinstance(result.get("errors"), list) else []),
+                "error_count": len(errors),
+                "notification": notification,
             },
         )
         return
@@ -565,30 +625,17 @@ def dispatch_worker_job(conn: Any, settings: Any, worker_job: dict[str, Any]) ->
     if job_type == "reader-import-upload":
         body = payload.get("body") if isinstance(payload.get("body"), dict) else payload
         result = import_reader_pdfs(conn, settings, body)
-        if not result.get("ok"):
-            errors = result.get("errors") if isinstance(result.get("errors"), list) else []
-            first_error = next(
-                (str(item.get("error") or "").strip() for item in errors if isinstance(item, dict) and item.get("error")),
-                "PDF import failed",
-            )
-            raise RuntimeError(first_error)
-        return result
+        return _reader_import_result_or_raise(result, "PDF import failed")
 
     if job_type == "reader-import-url":
         body = payload.get("body") if isinstance(payload.get("body"), dict) else payload
-        return import_reader_urls(conn, settings, body)
+        result = import_reader_urls(conn, settings, body)
+        return _reader_import_result_or_raise(result, "URL import failed")
 
     if job_type == "reader-import-web":
         body = payload.get("body") if isinstance(payload.get("body"), dict) else payload
         result = import_reader_webpages(conn, settings, body)
-        if not result.get("ok"):
-            errors = result.get("errors") if isinstance(result.get("errors"), list) else []
-            first_error = next(
-                (str(item.get("error") or "").strip() for item in errors if isinstance(item, dict) and item.get("error")),
-                "Webpage import failed",
-            )
-            raise RuntimeError(first_error)
-        return result
+        return _reader_import_result_or_raise(result, "Webpage import failed")
 
     if job_type == "reader-save-obsidian":
         paper_id = _required_int(payload.get("paper_id"), "paper_id")
@@ -621,7 +668,11 @@ def run_once(worker_id: str) -> dict[str, Any]:
         except Exception as exc:
             failed = fail_worker_job(conn, int(worker_job["id"]), str(exc))
             failed_job = failed["worker_job"] or worker_job
-            insert_app_event(conn, "task.failed", task_event_payload(failed_job, "failed", message=str(exc)))
+            failed_payload = task_event_payload(failed_job, "failed", message=str(exc))
+            notification = _reader_import_notification(failed_job, error_message=str(exc))
+            if notification:
+                failed_payload["notification"] = notification
+            insert_app_event(conn, "task.failed", failed_payload)
             raise
         completed = complete_worker_job(
             conn,

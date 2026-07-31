@@ -405,7 +405,7 @@
 }
 
 .inbox-collapsible-section[open] .inbox-collapse-control > span::after {
-  content: "收起";
+  content: attr(data-collapse-label);
   font-size: 11px;
 }
 

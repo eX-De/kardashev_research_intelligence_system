@@ -61,15 +61,8 @@
     white-space: nowrap;
 }
 
-.reader-chat-model-control select {
+.reader-chat-model-control .workspace-select {
   width: 100%;
-    min-height: 34px;
-    border: 1px solid var(--line);
-    border-radius: 7px;
-    color: var(--ink);
-    background: #fff;
-    padding: 0 10px;
-    font-size: 13px;
 }
 
 .reader-project-context-control {
@@ -1775,20 +1768,6 @@
     letter-spacing: 0.06em;
 }
 
-.vision-reports .inbox-project-link-control::after,
-.vision-reports .reader-chat-model-control::after {
-  position: absolute;
-    right: 15px;
-    bottom: 17px;
-    width: 7px;
-    height: 7px;
-    border-right: 1.5px solid var(--vision-blue);
-    border-bottom: 1.5px solid var(--vision-blue);
-    content: "";
-    pointer-events: none;
-    transform: rotate(45deg);
-}
-
 .vision-reports .reader-project-section .evidence-list {
   display: grid;
     gap: 8px;
@@ -1989,19 +1968,13 @@
     letter-spacing: 0.06em;
 }
 
-.vision-reports .reader-chat-model-control select {
+.vision-reports .reader-chat-model-control .workspace-select-trigger {
   width: 100%;
     min-width: 0;
-    height: 22px;
-    appearance: none;
-    padding: 0 24px 0 0;
-    overflow: hidden;
-    border: 0;
-    color: var(--vision-muted-strong);
-    background: transparent;
+    min-height: 32px;
+    border-radius: 10px;
     box-shadow: none;
     font-size: 11px;
-    text-overflow: ellipsis;
 }
 
 .vision-reports .reader-project-context-control {

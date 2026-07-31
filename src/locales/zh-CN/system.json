@@ -1,0 +1,136 @@
+{
+  "dailySteps": {
+    "preparing": "准备中",
+    "sync_context_sources": "同步上下文来源",
+    "refresh_project_chat_profiles": "更新项目 Chat 摘要",
+    "fetch_arxiv": "抓取 arXiv",
+    "snapshot": "生成论文快照",
+    "cache_text": "缓存 PDF/TXT",
+    "rank_global": "全局论文匹配",
+    "rank_project": "项目论文匹配",
+    "judge_project_papers": "项目级判定",
+    "paper_recommendations": "生成论文推荐",
+    "paper_reports": "全文报告入队",
+    "archive_zero_match": "归档未通过论文",
+    "generate_daily_report_artifact": "生成日报产物"
+  },
+  "notifications": {
+    "unknown": {
+      "title": "系统通知"
+    },
+    "empty": {
+      "title": "暂无通知",
+      "detail": "没有新的任务完成、论文到达或实验同步事件。"
+    },
+    "daily_run_progress": {
+      "title": "每日流程运行中"
+    },
+    "daily_run_recoverable": {
+      "title": "每日流程可继续",
+      "detail": "上次流程失败在：{{failedStep}}，已完成 {{completed}}/{{total}}，建议继续上次流程。"
+    },
+    "arxiv_rate_limited": {
+      "title": "arXiv 暂时限流",
+      "detail": "{{failedStep}} 时触发 arXiv 限流，系统已重试但仍失败。建议稍后再试，也可以在设置中调大 arXiv 请求间隔秒数。",
+      "detailWithRetry": "{{failedStep}} 时触发 arXiv 限流，系统已重试但仍失败。arXiv 建议等待 {{retryAfter}} 秒后再试，也可以在设置中调大 arXiv 请求间隔秒数。"
+    },
+    "job_running": {
+      "title": "任务运行中"
+    },
+    "job_failed": {
+      "title": "任务失败",
+      "detail": "{{job}} · {{message}}",
+      "noMessage": "{{job}} · 未记录错误信息"
+    },
+    "daily_run_completed": {
+      "title": "每日流程已完成",
+      "fallback": "流程已完成",
+      "parts": {
+        "newPapers": "{{count}} 篇新论文",
+        "newPapers_other": "{{count}} 篇新论文",
+        "projectMatches": "{{count}} 条项目候选",
+        "projectMatches_other": "{{count}} 条项目候选",
+        "paperReports": "{{count}} 篇全文报告",
+        "paperReports_other": "{{count}} 篇全文报告",
+        "archived": "{{count}} 篇 0 命中归档",
+        "archived_other": "{{count}} 篇 0 命中归档",
+        "filtered": "{{count}} 条项目判定筛掉",
+        "filtered_other": "{{count}} 条项目判定筛掉",
+        "dailyReport": "日报 {{path}}"
+      }
+    },
+    "arxiv_papers_arrived": {
+      "title": "新论文到了",
+      "detail": "{{count}} 篇新 arXiv 论文已入库",
+      "detail_other": "{{count}} 篇新 arXiv 论文已入库"
+    },
+    "obsidian_sync_completed": {
+      "title": "Obsidian 已同步",
+      "detail": "{{count}} 篇笔记更新，{{chunks}} 个 chunk 入库",
+      "detail_other": "{{count}} 篇笔记更新，{{chunks}} 个 chunk 入库",
+      "fallback": "Obsidian 同步完成"
+    },
+    "paper_text_cached": {
+      "title": "论文正文已缓存",
+      "pdf": "{{count}} 个 PDF 已缓存",
+      "pdf_other": "{{count}} 个 PDF 已缓存",
+      "text": "{{count}} 篇已转 TXT",
+      "text_other": "{{count}} 篇已转 TXT",
+      "failed": "{{count}} 篇失败",
+      "failed_other": "{{count}} 篇失败"
+    },
+    "paper_matching_completed": {
+      "title": "论文匹配完成",
+      "detail": "{{count}} 条匹配结果",
+      "detail_other": "{{count}} 条匹配结果"
+    },
+    "paper_report_queue_processing": {
+      "title": "全文报告生成中",
+      "detail": "{{processing}} 篇处理中，{{queued}} 篇排队中"
+    },
+    "paper_report_queue_failed": {
+      "title": "全文报告生成失败",
+      "detail": "{{count}} 篇报告失败，需要在报告队列中重试或检查 LLM/PDF/TXT 配置。",
+      "detail_other": "{{count}} 篇报告失败，需要在报告队列中重试或检查 LLM/PDF/TXT 配置。"
+    },
+    "paper_report_queue_backlog": {
+      "title": "全文报告等待生成",
+      "detail": "{{count}} 篇论文正在排队，服务器会按配置并发自动生成。",
+      "detail_other": "{{count}} 篇论文正在排队，服务器会按配置并发自动生成。"
+    },
+    "paper_report_completed": {
+      "title": "全文报告已生成",
+      "detail": "{{count}} 篇全文报告完成",
+      "detail_other": "{{count}} 篇全文报告完成"
+    },
+    "experiment_report_arrived": {
+      "title": "收到实验报告",
+      "project": "项目 {{id}}",
+      "source": "来源 {{source}}",
+      "updated": "更新于 {{value}}"
+    },
+    "app_update_available": {
+      "title": "有新版本可用",
+      "detail": "当前 {{current}}，最新 {{latest}}。可以查看更新说明，或复制适合当前部署方式的更新命令。"
+    }
+  },
+  "errors": {
+    "unknown": "操作失败，请稍后重试。",
+    "auth_required": "请先登录。",
+    "invalid_password": "密码验证失败。",
+    "invalid_json": "请求数据格式无效。",
+    "daily_run_recoverable": "今天已有失败但可恢复的每日流程。请继续上次流程，或确认后重新执行。",
+    "obsidian_not_configured": "Obsidian 是可选集成；如需使用相关功能，请先在设置页完成配置。",
+    "stream_required": "论文对话需要使用流式连接。"
+  },
+  "obsidian": {
+    "remote": "远端",
+    "configured": "已配置",
+    "optionalSetup": "Obsidian 是可选集成；如需导出或选择 vault 内路径，请先在设置页填写可用的 vault 路径。",
+    "optionalNotConfigured": "可选：未配置",
+    "pathMissing": "当前 Obsidian vault 路径不可用，请在设置页检查路径。",
+    "pathDoesNotExist": "路径不存在",
+    "unavailable": "不可用",
+    "operationFailed": "Obsidian 操作失败。"
+  }
+}

@@ -132,6 +132,35 @@ class WorkerServiceDispatchTests(unittest.TestCase):
 
         run.assert_called_once_with(conn, settings, {"files": []})
 
+    def test_dispatch_reader_import_url_uses_payload_body(self) -> None:
+        conn = object()
+        settings = object()
+        worker_job = {
+            "id": 16,
+            "job_run_id": 51,
+            "job_type": "reader-import-url",
+            "payload": {"command": "reader-import-url", "body": {"urls": ["https://example.test/paper.pdf"]}},
+        }
+        expected = {"ok": True, "imported": [{"paper_id": 27}], "errors": []}
+        with patch("worker.service.import_reader_urls", return_value=expected) as run:
+            self.assertEqual(service.dispatch_worker_job(conn, settings, worker_job), expected)
+
+        run.assert_called_once_with(conn, settings, {"urls": ["https://example.test/paper.pdf"]})
+
+    def test_dispatch_reader_import_url_fails_when_no_paper_was_imported(self) -> None:
+        worker_job = {
+            "id": 16,
+            "job_run_id": 51,
+            "job_type": "reader-import-url",
+            "payload": {"body": {"urls": ["https://example.test/paper.pdf"]}},
+        }
+        with patch(
+            "worker.service.import_reader_urls",
+            return_value={"ok": False, "imported": [], "errors": [{"error": "HTTP Error 403: Forbidden"}]},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "HTTP Error 403: Forbidden"):
+                service.dispatch_worker_job(object(), object(), worker_job)
+
     def test_dispatch_reader_import_web_uses_payload_body(self) -> None:
         conn = object()
         settings = object()
@@ -207,6 +236,41 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         self.assertEqual(finished_payload["task"]["id"], 44)
         self.assertEqual(finished_payload["task"]["worker_job_id"], 9)
         self.assertEqual(finished_payload["task"]["result"], {"message": "done"})
+        conn.close.assert_called_once_with()
+
+    def test_run_once_toasts_when_reader_import_fails(self) -> None:
+        conn = Mock()
+        worker_job = {
+            "id": 48,
+            "job_run_id": 115,
+            "job_type": "reader-import-url",
+            "payload": {"command": "reader-import-url", "source": "reader-url", "args": []},
+            "started_at": "2026-07-23T03:38:18+00:00",
+            "finished_at": None,
+        }
+        failed_job = {
+            **worker_job,
+            "status": "failed",
+            "error_message": "HTTP Error 403: Forbidden",
+            "finished_at": "2026-07-23T03:38:19+00:00",
+        }
+        with patch("worker.service.connect", return_value=conn), \
+            patch("worker.service.claim_next_worker_job", return_value={"worker_job": worker_job, "job_run": {}}), \
+            patch("worker.service.insert_app_event") as insert_event, \
+            patch("worker.service.load_settings", return_value=object()), \
+            patch("worker.service.apply_stored_settings", return_value=object()), \
+            patch("worker.service.dispatch_worker_job", side_effect=RuntimeError("HTTP Error 403: Forbidden")), \
+            patch("worker.service.fail_worker_job", return_value={"worker_job": failed_job, "job_run": {}}):
+            with self.assertRaisesRegex(RuntimeError, "HTTP Error 403: Forbidden"):
+                service.run_once("worker-test")
+
+        failed_event = next(call for call in insert_event.call_args_list if call.args[1] == "task.failed")
+        payload = failed_event.args[2]
+        self.assertEqual(payload["task"]["status"], "failed")
+        self.assertEqual(payload["notification"]["channels"], ["toast"])
+        self.assertEqual(payload["notification"]["severity"], "bad")
+        self.assertEqual(payload["notification"]["title"], "URL 导入失败")
+        self.assertEqual(payload["notification"]["detail"], "HTTP Error 403: Forbidden")
         conn.close.assert_called_once_with()
 
     def test_run_once_loads_dotenv_before_connecting(self) -> None:
@@ -414,6 +478,34 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         self.assertEqual(payload["notification"]["detail"], "A Manually Imported Paper")
         automatic_payload = next(call.args[2] for call in report_events if call.args[2]["paper_id"] == 28)
         self.assertNotIn("notification", automatic_payload)
+
+    def test_reader_import_domain_event_toasts_success_and_partial_failure(self) -> None:
+        worker_job = {
+            "id": 49,
+            "job_run_id": 116,
+            "job_type": "reader-import-url",
+            "payload": {"command": "reader-import-url", "source": "reader-url"},
+        }
+        with patch("worker.service.insert_app_event") as insert_event:
+            service._publish_reader_domain_events(
+                object(),
+                worker_job,
+                {
+                    "ok": True,
+                    "imported": [{"paper_id": 27, "title": "Imported paper"}],
+                    "errors": [{"url": "https://example.test/missing.pdf", "error": "HTTP 404"}],
+                },
+            )
+
+        insert_event.assert_called_once()
+        self.assertEqual(insert_event.call_args.args[1], "reader.papers.imported")
+        payload = insert_event.call_args.args[2]
+        self.assertEqual(payload["imported_count"], 1)
+        self.assertEqual(payload["error_count"], 1)
+        self.assertEqual(payload["notification"]["channels"], ["toast"])
+        self.assertEqual(payload["notification"]["severity"], "warn")
+        self.assertEqual(payload["notification"]["title"], "URL 导入完成")
+        self.assertEqual(payload["notification"]["detail"], "成功 1 篇，失败 1 篇")
 
     def test_run_once_publishes_daily_result_domain_events(self) -> None:
         conn = Mock()

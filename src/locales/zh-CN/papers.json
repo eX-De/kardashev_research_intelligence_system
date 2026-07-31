@@ -1,0 +1,60 @@
+{
+  "common": { "workspace": "论文工作区", "status": "状态", "source": "来源", "fullReport": "全文报告", "importance": "重要性", "sort": "排序", "search": "搜索", "perPage": "每页", "clearFilters": "清除筛选", "collapseFilters": "收起筛选", "filters": "筛选 {{count}}", "clear": "清除", "close": "关闭", "cancel": "取消", "save": "保存", "saving": "保存中…", "delete": "删除", "deleting": "删除中", "send": "发送", "sending": "发送中", "generating": "生成中", "match": "匹配 {{score}}", "noAuthors": "作者信息暂无", "uncategorized": "未分类", "notRecorded": "未记录", "unlimited": "不限", "updatedAt": "更新于 {{date}}", "expand": "展开", "collapse": "收起", "listSeparator": "、" },
+  "importance": { "all": "全部重要性", "high": "高", "medium": "中", "low": "低", "unlabeled": "未标注", "hint": { "high": "重点跟进", "medium": "常规阅读", "low": "留作参考" } },
+  "sourceFilter": { "all": "全部来源", "daily": "每日任务", "manual": "手动导入" },
+  "reportStatus": { "all": "全部", "queued": "排队", "processing": "生成中", "done": "已完成", "failed": "失败", "cancelled": "已取消", "missing": "未生成报告" },
+  "relation": { "direct": "直接相关", "indirect": "间接相关", "possible": "可能相关" },
+  "workflowState": { "pending": "待处理", "accepted": "已接受", "discarded": "已丢弃", "rejected": "已拒绝", "saved": "已保存", "unknown": "未知" },
+  "inbox": {
+    "noJudgmentReason": "暂无判断理由。",
+    "title": "待判断", "live": { "loading": "读取队列", "pending": "{{count}} 篇待处理", "empty": "队列已清空" },
+    "empty": { "title": "待判断队列已清空", "description": "新的候选论文会在每日流程完成后出现在这里。" }, "aria": { "list": "论文 inbox", "detail": "论文详情" },
+    "summary": { "aria": "待判断概览", "candidates": "候选论文", "awaiting": "等待人工判断", "ready": "报告就绪", "deepRead": "可直接深度阅读", "projects": "关联项目", "coverage": "本轮覆盖范围" },
+    "list": { "eyebrow": "决策队列", "title": "候选论文", "loading": "正在读取待判断论文", "description": "按匹配情况逐篇完成取舍", "loader": "读取待判断论文" },
+    "detail": { "selectTitle": "选择一篇论文", "selectDescription": "论文摘要、项目关联和决策操作会显示在这里。", "candidate": "候选论文 · {{id}}", "openArxiv": "打开 arXiv", "fullTextStatus": "全文 {{status}}", "loadingSelected": "正在读取所选论文的摘要、项目判定和全文报告。", "loadingFirst": "正在读取待判断论文列表和首篇论文详情。", "opening": "打开论文详情", "loading": "读取论文详情" },
+    "decision": { "eyebrow": "人工决策", "title": "保存到哪些研究项目？", "suggestionCount": "{{count}} 个建议关联", "hint": "先选择重要性，再确认要保存到的项目。" },
+    "actions": { "save": "保存到论文仓库", "openReport": "打开报告队列", "openReportTitle": "打开报告队列：{{status}}", "discard": "遗弃", "generateReport": "生成全文报告", "regenerate": "重新生成" },
+    "sections": { "recommendationEvidence": "推荐依据", "projectLinks": "项目关联", "deepReading": "深度阅读", "fullReport": "全文报告", "modelJudgment": "模型判断", "projectJudgment": "项目判定", "paperContent": "论文内容", "abstract": "摘要", "retrievalClues": "检索线索", "matchEvidence": "匹配证据" },
+    "noRecommendationReason": "暂无推荐理由。", "noProjectRecommendations": "暂无项目级推荐。", "evidence": { "paperChunk": "论文片段 {{index}} · 页码 {{pages}}", "matchedNoteChunk": "匹配的笔记片段", "empty": "未找到证据片段。" },
+    "status": { "discarded": "已遗弃推荐", "saved": "已保存到论文仓库", "reportQueued": "全文报告已加入生成队列" }
+  },
+  "library": {
+    "title": "论文仓库", "live": { "loading": "读取仓库", "count": "{{count}} 篇论文" },
+    "status": { "all": "全部", "allStates": "全部状态", "candidate": "候选", "saved": "已保存", "reading": "阅读中", "read": "已读", "archived": "归档", "discarded": "已丢弃", "discardedAction": "丢弃", "unknown": "未知" },
+    "reportPresence": { "all": "全部报告", "with": "有报告", "without": "无报告" }, "sort": { "updated": "工作流状态与更新", "importance": "重要性优先" },
+    "sourceType": { "arxiv": "arXiv", "url": "URL", "upload": "上传", "web": "网页正文", "manual": "手动", "unknown": "来源" },
+    "assetStatus": { "cached": "已缓存", "done": "完成", "error": "失败", "failed": "失败", "missing": "缺失", "pending": "等待", "ready": "就绪", "unknown": "状态未知" },
+    "messages": { "statusUpdated": "论文状态已更新为 {{status}}" }, "list": { "eyebrow": "馆藏目录", "title": "论文列表", "loader": "读取论文列表" },
+    "filters": { "allPapers": "全部论文", "aria": "论文筛选", "statusAria": "筛选论文状态", "sourceAria": "筛选论文来源", "reportAria": "筛选全文报告", "importanceAria": "筛选论文重要性", "sortAria": "选择论文排序", "searchPlaceholder": "标题、摘要或 arXiv", "dateFrom": "发布日期起", "dateTo": "发布日期止", "perPageAria": "每页论文数量", "searchValue": "搜索：{{query}}", "notSearched": "未搜索", "dateRange": "{{from}} 至 {{to}}", "allDates": "全部日期", "importanceValue": "重要性：{{value}}", "sortValue": "排序：{{value}}" },
+    "importanceBadge": "重要性 {{value}}", "chunkCount": "{{count}} 正文块", "chunkLabel": "正文块 {{index}}", "pageLabel": "第 {{page}} 页", "collectionInfo": "馆藏信息", "assetCount": "{{count}} 项资产", "artifactCount": "{{count}} 项产物", "noPublishedDate": "未记录发布日期", "noIdentity": "未记录标识", "noVenue": "未记录发表场所", "noAbstract": "暂无摘要。", "noProjectLinks": "暂无项目关联。", "noArtifacts": "暂无论文产物。", "noAssetsSources": "暂无资产或来源记录。", "noChunks": "暂无正文块。", "noPath": "未记录路径", "linked": "已关联",
+    "empty": { "title": "暂无论文", "filtered": "当前筛选没有匹配项。", "description": "导入或保存的论文会显示在这里。" }, "reportBadge": "报告：{{status}}", "statusDescription": "更新当前论文在研究工作流中的位置。",
+    "detail": { "loadingDescription": "正在打开首篇论文的摘要、资产和正文片段。", "loadingTitle": "读取论文详情", "eyebrow": "馆藏论文 · {{id}}", "statsAria": "论文关键数据", "linkedProjects": "关联项目", "researchProjects": "研究项目", "localAssets": "本地资产", "filesCache": "文件与缓存", "textIndex": "正文索引", "searchableChunks": "可检索块", "researchArtifacts": "研究产物", "reportsNotes": "报告与笔记", "selectTitle": "选择一篇论文", "selectDescription": "论文状态、来源、资产和关联项目会显示在这里。" },
+    "sections": { "overview": "论文概览", "abstract": "摘要", "readingManagement": "阅读管理", "paperStatus": "论文状态", "researchContext": "研究脉络", "projectLinks": "项目关联", "researchOutput": "研究输出", "paperArtifacts": "论文产物", "dataCompleteness": "数据完整度", "assetsSources": "资产和来源", "fullTextIndex": "全文索引", "textChunks": "正文片段" }
+  },
+  "reader": {
+    "chatAssistant": "助手", "importUrlLabel": "arXiv / PDF 网址",
+    "referenceEyebrow": "阅读器上下文", "importEyebrow": "论文导入", "chatRequestFailed": "阅读器对话请求失败。",
+    "title": "报告队列", "localPaper": "本地论文", "recentImport": "刚刚导入", "recentImportTitle": "最近 30 分钟手动导入", "linkedProjects": "已关联项目", "recommendedProjects": "推荐项目", "fullTextStatus": "全文 {{status}}", "projectCount": "{{count}} 个项目", "paperCount": "{{count}} 篇", "untitledPaper": "未命名论文", "paperFallback": "论文 {{id}}", "reportNotGenerated": "报告尚未生成。",
+    "actions": { "deleteQueue": "从报告队列删除", "cannotDeleteProcessing": "生成中的报告不能删除", "openPdf": "打开 PDF", "cancelQueue": "取消排队", "requeue": "重新入队" }, "live": { "auto": "自动生成 · {{active}}/{{concurrency}}", "disabled": "自动生成未启用" },
+    "summary": { "aria": "报告队列概览", "tasks": "队列任务", "allReports": "全部全文报告", "processing": "正在处理", "queuedProcessing": "排队与生成中", "ready": "报告就绪" }, "list": { "aria": "全文报告队列", "eyebrow": "报告任务", "title": "队列列表", "description": "选择论文后在右侧阅读报告或继续对话", "loader": "读取队列列表" },
+    "filters": { "allProjects": "全部项目", "allReports": "全部报告", "project": "所属项目", "aria": "报告队列筛选", "statusAria": "筛选报告状态", "projectAria": "筛选所属项目", "searchPlaceholder": "标题、arXiv、正文或状态", "projectValue": "项目：{{project}}" },
+    "empty": { "title": "选择一篇论文", "description": "解读报告和逐篇对话会显示在这里。", "filteredTitle": "没有匹配的报告", "queueTitle": "暂无全文报告任务", "filteredDescription": "调整关键词、状态、所属项目或来源后重试。", "queueDescription": "项目级推荐通过后会自动进入这里，也可以导入 URL 或 PDF。" },
+    "detail": { "aria": "报告队列详情", "eyebrow": "全文报告 · {{id}}", "tabsAria": "论文详情视图", "loadingSelected": "正在读取所选论文的报告、Chat 记录和项目关联。", "loadingDescription": "正在读取报告详情、阅读设置和项目关联。", "opening": "打开报告详情", "loading": "读取报告详情" },
+    "tabs": { "report": "解读报告", "reportBadge": "报告", "chat": "对话", "chatBadge": "讨论", "metadata": "元信息", "metadataBadge": "元数据" }, "sections": { "context": "阅读上下文", "projectLinks": "项目关联" },
+    "projectLink": { "noProjects": "暂无项目", "linking": "关联中…", "action": "手动关联到项目", "linkedName": "已关联 {{name}}", "label": "手动关联", "aria": "手动关联项目", "linked": "已关联", "manualNote": "手动关联到项目。", "unlink": "取消关联" },
+    "chat": { "you": "你", "sourcePrompt": "报告用 Prompt", "emptyQuestion": "空白问题", "paperReport": "论文报告", "navigatorAria": "论文报告与用户问题快速导航", "jumpTo": "跳转到：{{label}}", "referenceCount": "参考论文 {{count}}", "eyebrow": "论文对话", "title": "全文问答", "messageCount": "{{count}} 条", "empty": "还没有对话。发送问题后会基于论文全文回答。", "scrollAria": "滚动 Chat 对话记录", "jumpBottom": "跳转到对话底部", "jumpLatest": "跳转到最新消息", "followups": "追问建议", "generateFollowups": "生成追问", "model": "Chat 模型", "selectModel": "选择 Chat 模型", "noModel": "未配置模型", "projectContextTitle": "注入正式关联以及 pending/accepted 推荐项目：{{projects}}", "noProjectContextTitle": "当前论文没有正式关联或 pending/accepted 推荐项目", "useProjectContext": "使用项目上下文", "noProjects": "没有项目", "addReferences": "添加参考论文", "references": "参考论文", "removeReference": "移除参考论文", "placeholder": "针对这篇论文提问…" },
+    "reference": { "description": "选择最多 3 篇全文可用论文；发送问题时会注入完整文本作为对照上下文。", "selected": "已选择 {{count}} / {{max}}", "apply": "应用参考论文", "searchPlaceholder": "搜索标题或 arXiv ID", "available": "全文可用", "unavailable": "尚未提取全文", "empty": "没有匹配的论文。" },
+    "meta": { "eyebrow": "数据档案", "title": "论文元信息", "itemCount": "{{count}} 项", "paperTitle": "标题", "editTitleAria": "编辑论文标题", "editTitle": "编辑标题", "categories": "分类", "txtStatus": "TXT 状态", "cached": "已缓存", "notCached": "未缓存", "authors": "作者", "txtPath": "TXT 路径", "pdfPath": "PDF 路径", "notGenerated": "未生成" },
+    "obsidian": { "configureHint": "请先配置可选 Obsidian 集成。", "smartSaveAria": "智能保存到 Obsidian", "smartSaveTitle": "用全文报告和 Chat 对话整理成 Obsidian 笔记", "smartSave": "智能保存" },
+    "messages": { "openedReport": "已打开对应全文报告", "reportQueued": "全文报告已加入生成队列", "queueCancelled": "报告排队已取消", "requeued": "报告已重新加入队列", "deletedQueue": "已从报告队列删除", "projectLinked": "已关联到项目：{{project}}", "replyGenerated": "阅读器回复已生成", "modelChanged": "Chat 模型已切换：{{model}}", "referencesUpdated": "参考论文上下文已更新，将从下一条消息开始生效", "projectUnlinked": "已取消项目关联：{{project}}", "titleUpdated": "论文标题已更新", "messageDeleted": "消息已删除", "saveQueued": "保存任务已加入队列", "savedObsidian": "已保存到 Obsidian：{{path}}", "urlQueued": "URL 导入已加入队列", "urlComplete": "URL 导入完成：{{imported}} 篇，失败 {{failed}} 篇", "webQueued": "网页正文提取已加入队列", "webComplete": "网页正文导入完成：{{imported}} 篇，失败 {{failed}} 篇", "pdfQueued": "PDF 导入已加入队列", "pdfComplete": "PDF 导入完成：{{imported}} 篇，失败 {{failed}} 篇" },
+    "import": { "action": "导入论文", "shortcutTitle": "导入论文 (Ctrl/⌘ I)", "title": "导入论文", "pdfLinks": "PDF 链接", "fromLinks": "从链接获取论文 PDF", "importing": "导入中", "findPdf": "查找并导入 PDF", "localFiles": "本地文件", "uploadPdf": "上传论文 PDF", "selectedPdf": "已选择 {{count}} 个 PDF", "selectPdf": "选择本地 PDF", "pdfHint": "支持多选，仅接受 PDF 文件", "importPdf": "导入 PDF ({{count}})", "webText": "网页正文", "extractWeb": "提取并导入网页内容", "webUrls": "网页 URL（每行一个）", "extracting": "提取中", "extractAction": "提取网页正文" }
+  },
+  "search": {
+    "eyebrow": "研究搜索", "title": "搜索研究空间", "placeholder": "搜索论文、产物与项目…", "submit": "搜索", "searching": "搜索中", "close": "关闭", "enableModel": "启用搜索模型", "disableModel": "关闭搜索模型", "useDeep": "使用深度搜索", "openDetail": "打开详情", "relevance": "相关度 {{percent}}%", "partialFailure": "部分来源不可用，已保留其他结果：{{sources}}",
+    "aria": { "dialog": "全局搜索", "close": "关闭搜索", "input": "搜索论文、产物与项目", "resultTypes": "结果类型" }, "entity": { "all": "全部", "paper": "论文", "artifact": "产物", "project": "项目" },
+    "source": { "paper": "论文文本", "paper_abstract": "标题与摘要", "paper_chunk": "论文全文", "daily_report": "日报", "experiment_report": "实验报告", "project_chat_profile": "项目 Chat 摘要", "project": "项目字段" },
+    "mode": { "deep": "搜索模型已启用", "quick": "数据库快速搜索" }, "errors": { "empty": "请输入搜索内容" }, "status": { "deepComplete": "深度搜索完成", "deepFailed": "深度搜索失败", "quickComplete": "快速搜索完成", "deepQueued": "深度搜索已进入队列" },
+    "progress": { "deepTitle": "正在跨索引检索", "quickTitle": "正在查询数据库", "queued": "排队中", "deepDetail": "任务 {{job}} · 由搜索模型理解语义", "quickDetail": "快速搜索不会调用模型" }, "results": { "semantic": "语义搜索结果", "database": "数据库结果", "count": "{{count}} 条结果", "model": "模型 {{model}} · " },
+    "empty": { "title": "没有找到匹配结果", "deep": "请确认索引任务已完成，或换一个更具体的研究描述。", "type": "当前结果中没有这一类型，可切换到“全部”查看。", "quick": "快速搜索没有找到“{{query}}”，是否使用深度搜索继续查找？" }, "intro": { "title": "从整个研究空间开始查找", "description": "输入标题、作者、方法或研究问题；需要语义理解时，点击输入框右侧的 Brain 图标。" }
+  }
+}

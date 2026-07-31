@@ -759,7 +759,7 @@
   padding: 28px;
 }
 
-.vision-settings .task-control-panel .panel-title::before { content: "Automation"; }
+.vision-settings .task-control-panel .panel-title::before { content: none; }
 .vision-settings .task-control-panel .panel-title { margin: 0 0 20px; padding: 0; border: 0; background: transparent; }
 
 .settings-config-shell {

@@ -1,0 +1,271 @@
+{
+  "pages": {
+    "overview": { "eyebrow": "System workspace", "title": "Settings" },
+    "daily": { "eyebrow": "Automation workspace", "title": "Daily tasks" },
+    "data": { "eyebrow": "Data workspace", "title": "Data & storage" },
+    "models": { "eyebrow": "Model workspace", "title": "Models & routing" }
+  },
+  "entries": {
+    "ariaLabel": "Settings sections",
+    "open": "Open settings",
+    "daily": { "label": "Daily tasks", "description": "Configure scheduling, paper ingestion, retrieval, recommendations, and recovery." },
+    "data": { "label": "Data & storage", "description": "Manage Obsidian, knowledge scope, and paper storage directories." },
+    "models": { "label": "Models & routing", "description": "Maintain providers and assign models to research tasks." }
+  },
+  "about": {
+    "eyebrow": "Resources",
+    "badge": "OPEN SOURCE",
+    "title": "Project resources",
+    "description": "KRIS source code, container images, and companion agent.",
+    "links": {
+      "krisGithub": "View the main project source, issues, and releases",
+      "dockerHub": "Get the latest container image and previous version tags",
+      "agentGithub": "View installation and usage instructions for the companion agent"
+    }
+  },
+  "health": {
+    "checking": "Checking {{label}}",
+    "providers_one": "{{count}} provider",
+    "providers_other": "{{count}} providers",
+    "notConfigured": "Not configured",
+    "ready": "Services ready",
+    "needsConfiguration": "Configuration needed",
+    "syncing": "Syncing status"
+  },
+  "overview": {
+    "foundation": "Runtime foundation",
+    "title": "Connections & services",
+    "description": "Live status for the database, knowledge integrations, and model services.",
+    "allReady": "ALL SYSTEMS READY",
+    "actionNeeded": "ACTION NEEDED",
+    "syncing": "SYNCING"
+  },
+  "actions": {
+    "refreshStatus": "Refresh status",
+    "backToOverview": "Back to settings overview",
+    "saving": "Saving",
+    "saveNow": "Save now"
+  },
+  "saveStatus": {
+    "idle": "No changes",
+    "dirty": "Saving",
+    "saving": "Saving",
+    "saved": "Saved",
+    "error": "Save failed"
+  },
+  "save": {
+    "savedToast": "Settings saved",
+    "saving": "Saving settings…",
+    "saved": "Settings saved"
+  },
+  "status": {
+    "idle": "Idle",
+    "running": "Running {{job}}…",
+    "finished": "{{job}} finished",
+    "updatingScheduler": "Updating scheduler…"
+  },
+  "confirm": {
+    "forceDailyRun": "A failed daily run can be resumed. Starting over creates a new run and may repeat ingestion, matching, and LLM usage. Start over anyway?",
+    "rerunDaily": "Run today's pipeline again?"
+  },
+  "path": {
+    "opening": "Opening the local path picker…",
+    "cancelled": "Path selection cancelled",
+    "selected": "Path selected",
+    "saving": "Path selected; saving"
+  },
+  "daily": {
+    "eyebrow": "DAILY PIPELINE",
+    "title": "Daily tasks",
+    "description": "Manage how the daily research pipeline starts, recalls papers, filters candidates, and uses capacity.",
+    "sections": {
+      "schedule": {
+        "eyebrow": "Schedule & ingestion",
+        "title": "Scheduling & paper ingestion",
+        "description": "Define when the daily pipeline runs and which candidate papers to fetch from arXiv."
+      },
+      "retrieval": {
+        "eyebrow": "Retrieval & ranking",
+        "title": "Retrieval & recommendations",
+        "description": "Control recall, abstract prefiltering, and evidence volume before papers enter the inbox."
+      },
+      "capacity": {
+        "eyebrow": "Capacity & recovery",
+        "title": "Concurrency, cache & recovery",
+        "description": "Limit downstream request capacity, retain full-text caches, and control historical retries."
+      }
+    },
+    "fields": {
+      "schedulerRunTime": "Daily run time",
+      "schedulerInterval": "Interval in hours",
+      "arxivCategories": "arXiv categories",
+      "lookbackDays": "Lookback days",
+      "maxResults": "Maximum results",
+      "requestInterval": "Request interval in seconds",
+      "ragThreshold": "RAG threshold",
+      "ragTopK": "Evidence Top K",
+      "ragSearchers": "RAG searchers",
+      "prefilterEnabled": "Enable abstract embedding prefilter",
+      "prefilterThreshold": "Prefilter threshold",
+      "prefilterTopK": "Prefilter Top K",
+      "prefilterMin": "Minimum papers for daily reranking",
+      "prefilterMax": "Maximum papers for daily reranking",
+      "cacheFullText": "Cache PDFs and extract TXT",
+      "pdfDirectory": "PDF cache directory",
+      "txtDirectory": "TXT output directory",
+      "embeddingConcurrency": "Embedding request concurrency",
+      "judgmentConcurrency": "Project evaluation concurrency",
+      "reportConcurrency": "Report queue concurrency",
+      "retryLimit": "Historical retry limit"
+    }
+  },
+  "taskControl": {
+    "title": "Task control",
+    "scheduler": {
+      "nextRun": "Scheduled · next run {{value}}",
+      "completedToday": "First visit · completed today",
+      "firstVisit": "First visit · runs when the page is first opened each day",
+      "disabled": "Disabled"
+    },
+    "modes": {
+      "startup": { "label": "First visit", "title": "Run on the first daily visit", "description": "Run the full pipeline once when the dashboard is first opened each day." },
+      "scheduler": { "label": "Scheduled", "title": "Run at a scheduled time", "description": "Keep the dashboard process running and execute the pipeline at the configured time." },
+      "off": { "label": "Off", "title": "Disable automatic runs", "description": "Do not run automatically; keep only the manual action." }
+    },
+    "recovery": {
+      "title": "The previous daily run can be resumed",
+      "detail": "Failed at {{failedStep}} after completing {{count}}.",
+      "steps_one": "{{count}} step",
+      "steps_other": "{{count}} steps"
+    },
+    "actions": {
+      "resume": "Resume previous daily run",
+      "runNow": "Run daily pipeline now",
+      "rerun": "Run today's pipeline again",
+      "resumePrevious": "Resume previous daily run",
+      "retryHistory": "Retry historical papers"
+    },
+    "shortcuts": {
+      "syncObsidian": "Sync Obsidian",
+      "fetchArxiv": "Fetch arXiv",
+      "cacheText": "Cache PDF/TXT",
+      "paperReports": "Generate full-paper reports",
+      "dailyReport": "Generate daily report"
+    }
+  },
+  "taskHistory": {
+    "title": "Task history",
+    "subtitle": "Recent task runs.",
+    "loading": "Loading task history",
+    "refreshing": "Updating task history…",
+    "empty": "No task runs yet.",
+    "columns": { "task": "Task", "status": "Status", "started": "Started", "result": "Result" }
+  },
+  "data": {
+    "title": "Data & storage",
+    "description": "Manage Obsidian connections, knowledge scope, and where papers and attachments are stored.",
+    "choose": "Choose",
+    "pickPathTitle": "Choose {{label}}",
+    "secretSaved": "Secret saved; leave blank to keep it unchanged.",
+    "accessSecret": "Access secret",
+    "sections": {
+      "connection": {
+        "eyebrow": "Storage connection",
+        "title": "Obsidian storage connection",
+        "description": "Choose a local vault or object storage. The built-in knowledge base does not depend on Obsidian; import and export features are enabled only after a connection is configured."
+      },
+      "layout": {
+        "eyebrow": "Vault layout",
+        "title": "Knowledge scope & directories",
+        "description": "Define what to scan and where papers, attachments, and project indexes are stored in Obsidian."
+      }
+    },
+    "backends": { "local": "Local vault", "oss": "Alibaba Cloud OSS", "s3": "S3 compatible" },
+    "fields": {
+      "storageMode": "Obsidian storage mode",
+      "outputPrefix": "System output prefix",
+      "localMirror": "Local mirror directory",
+      "endpointUrl": "Endpoint URL",
+      "region": "Region",
+      "bucket": "Bucket",
+      "vaultPrefix": "Vault prefix",
+      "accessKeyId": "Access key ID",
+      "accessSecret": "Access secret",
+      "optionalVault": "Optional Obsidian vault path",
+      "includeDirectories": "Obsidian scan directories",
+      "includeTags": "Included Obsidian tags",
+      "projectCenterTags": "Obsidian project center tags",
+      "cliCommand": "Obsidian CLI command (optional)",
+      "paperRepository": "Obsidian paper repository",
+      "paperAttachments": "Obsidian paper attachments",
+      "projectPaperList": "Obsidian project paper-list filename"
+    },
+    "placeholders": {
+      "paperRepository": "Research/Paper Repository",
+      "paperAttachments": "Research/Paper Repository/Attachments",
+      "projectPaperList": "Paper List.md"
+    },
+    "remoteNote": "In remote mode, the paper repository and attachments use the object-storage prefix; no local vault-relative directory is needed."
+  },
+  "models": {
+    "eyebrow": "MODEL ROUTING",
+    "title": "Models & routing",
+    "description": "Manage model services, default routing, and task-specific model assignments.",
+    "notConfigured": "Not configured",
+    "section": { "eyebrow": "Models", "title": "Providers & task models", "description": "Maintain providers and route research tasks to the appropriate models." },
+    "providers": {
+      "eyebrow": "Service registry",
+      "active": "Active provider",
+      "modelCounts": "{{chat}} Chat · {{embedding}} Embedding",
+      "title": "Service endpoints",
+      "count_one": "{{count}} provider",
+      "count_other": "{{count}} providers",
+      "addAria": "Add model service",
+      "add": "Add",
+      "unnamed": "Unnamed provider",
+      "missingId": "Missing ID",
+      "ready": "Ready",
+      "pending": "Pending",
+      "configuration": "Provider configuration",
+      "baseUrlMissing": "Base URL not configured",
+      "credentialsSaved": "Credentials saved",
+      "awaitingCredentials": "Awaiting credentials",
+      "remove": "Remove"
+    },
+    "apiKey": {
+      "savedHint": "API key saved; leave blank to keep it unchanged.",
+      "missingHint": "No API key has been saved.",
+      "saved": "API key saved",
+      "missing": "API key not configured"
+    },
+    "connection": {
+      "title": "Connection",
+      "description": "OpenAI-compatible endpoint and access credentials",
+      "displayName": "Display name",
+      "providerId": "Provider ID",
+      "baseUrl": "Base URL",
+      "apiKey": "API Key",
+      "clearApiKey": "Clear this provider's API key when saving"
+    },
+    "catalog": { "title": "Model catalog", "description": "Separate multiple model identifiers with commas", "chatModels": "Chat models", "embeddingModels": "Embedding models" },
+    "defaultRoute": { "eyebrow": "Default route", "title": "Global default models", "description": "Used when a task does not have its own model assignment.", "badge": "Base route", "chatProvider": "Chat provider", "chatModel": "Chat model", "embeddingProvider": "Embedding provider", "embeddingModel": "Embedding model" },
+    "taskRoutes": {
+      "eyebrow": "Task routes",
+      "title": "Task model assignments",
+      "description": "Choose a separate provider and model for each research stage.",
+      "provider": "Provider",
+      "model": "Model",
+      "count_one": "{{count}} route",
+      "count_other": "{{count}} routes",
+      "routes": {
+        "paperReport": { "title": "Reading report", "description": "Generate a structured full-paper analysis" },
+        "projectProfile": { "title": "Project profile", "description": "Summarize project conversations and daily research progress" },
+        "readerChat": { "title": "Reader chat", "description": "Handle ongoing questions about the paper text" },
+        "smartSave": { "title": "Smart Save", "description": "Choose the archive location and project relationships" },
+        "questions": { "title": "Follow-up questions", "description": "Generate subsequent research questions from the report" }
+      }
+    },
+    "concurrency": { "title": "Project profile concurrency", "description": "Limit concurrent project-profile requests", "field": "Concurrent requests" },
+    "prompt": { "eyebrow": "Default instruction", "title": "Paper reading prompt", "description": "Default structured instruction for new full-text reading tasks.", "field": "Prompt content" }
+  }
+}

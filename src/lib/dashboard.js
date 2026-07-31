@@ -1,32 +1,30 @@
 export const PROJECT_STATUSES = [
-  ["active", "进行中"],
-  ["planned", "计划中"],
-  ["completed", "已完成"],
-  ["paused", "搁置"],
-  ["exploring", "探索中"],
-  ["writing", "写作中"],
-  ["archived", "归档"]
+  "active",
+  "planned",
+  "completed",
+  "paused",
+  "exploring",
+  "writing",
+  "archived"
 ];
 
 export const PROJECT_PAPER_RELATIONS = [
-  ["candidate", "候选"],
-  ["reading", "阅读中"],
-  ["core", "核心文献"],
-  ["background", "背景资料"],
-  ["rejected", "已排除"]
+  "candidate",
+  "reading",
+  "core",
+  "background",
+  "rejected"
 ];
 
 export const PROJECT_NOTE_RELATIONS = [
-  ["source", "资料"],
-  ["idea", "想法"],
-  ["method", "方法"],
-  ["result", "结果"],
-  ["todo", "待办"],
-  ["center_page", "中心页"],
-  ["folder_member", "项目文件夹"]
+  "source",
+  "idea",
+  "method",
+  "result",
+  "todo",
+  "center_page",
+  "folder_member"
 ];
-
-const PROJECT_STATUS_LABELS = Object.fromEntries(PROJECT_STATUSES);
 const AUTH_REQUIRED_CODE = "auth_required";
 const NON_JSON_RESPONSE = "__nonJsonResponse";
 
@@ -95,8 +93,8 @@ function responseErrorMessage(response, data, fallback = "Request failed") {
 
 export function createApiError(response, data, fallback = "Request failed") {
   const authRequired = isAuthRequiredResponse(response, data);
-  let message = authRequired ? responseErrorMessage(response, data, "请先登录。") : responseErrorMessage(response, data, fallback);
-  if (authRequired && message === AUTH_REQUIRED_CODE) message = "请先登录。";
+  let message = authRequired ? responseErrorMessage(response, data, "Authentication required") : responseErrorMessage(response, data, fallback);
+  if (authRequired && message === AUTH_REQUIRED_CODE) message = "Authentication required";
   const error = new Error(message);
   error.name = authRequired ? "AuthRequiredError" : "ApiError";
   error.status = response?.status;
@@ -142,9 +140,9 @@ export function fmtScore(value) {
   return Number(value).toFixed(2);
 }
 
-export function fmtDate(value) {
+export function fmtDate(value, locale = "zh-CN") {
   if (!value) return "—";
-  return new Intl.DateTimeFormat("zh-CN", {
+  return new Intl.DateTimeFormat(locale || "zh-CN", {
     dateStyle: "short",
     timeStyle: "medium"
   }).format(new Date(value));
@@ -170,8 +168,21 @@ export function snippet(value, size = 180) {
   return compactLabel(value, size);
 }
 
-export function statusLabel(status) {
-  return PROJECT_STATUS_LABELS[status] || status || "未知";
+export function projectStatusOptions(t) {
+  return PROJECT_STATUSES.map((status) => [status, t(`common:projectStatus.${status}`)]);
+}
+
+export function projectPaperRelationOptions(t) {
+  return PROJECT_PAPER_RELATIONS.map((relation) => [relation, t(`common:projectPaperRelation.${relation}`)]);
+}
+
+export function projectNoteRelationOptions(t) {
+  return PROJECT_NOTE_RELATIONS.map((relation) => [relation, t(`common:projectNoteRelation.${relation}`)]);
+}
+
+export function statusLabel(status, t = null) {
+  if (status && typeof t === "function") return t(`common:projectStatus.${status}`, { defaultValue: status });
+  return status || "unknown";
 }
 
 export function metaNumber(meta = {}, keys = []) {
@@ -182,19 +193,9 @@ export function metaNumber(meta = {}, keys = []) {
   return 0;
 }
 
-export function jobTitle(jobType) {
-  const labels = {
-    "run-daily": "每日流程",
-    "resume-daily": "恢复每日流程",
-    "retry-daily": "历史论文补跑",
-    "fetch-arxiv": "arXiv 抓取",
-    "cache-arxiv-text": "论文正文缓存",
-    "generate-paper-reports": "全文报告生成",
-    "generate-reports": "每日总报告生成",
-    "sync-obsidian": "Obsidian 同步",
-    "rank-papers": "论文匹配"
-  };
-  return labels[jobType] || jobType;
+export function jobTitle(jobType, t = null) {
+  if (jobType && typeof t === "function") return t(`common:jobType.${jobType}`, { defaultValue: jobType });
+  return jobType || "";
 }
 
 export function summarizeMeta(meta = {}) {
@@ -204,7 +205,7 @@ export function summarizeMeta(meta = {}) {
     .join(" · ");
 }
 
-export async function chooseLocalPath({ mode = "directory", title = "选择路径", relativeTo, basePath } = {}) {
+export async function chooseLocalPath({ mode = "directory", title = "Select path", relativeTo, basePath } = {}) {
   return postJson("/api/local-path/select", {
     mode,
     title,

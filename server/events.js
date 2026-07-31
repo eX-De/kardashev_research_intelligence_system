@@ -179,6 +179,12 @@ export function compactExperimentReportPayload(data) {
       severity: "info",
       title: "收到实验报告",
       detail,
+      data: {
+        project_id: projectId,
+        source_agent: sourceAgent,
+        title: String(artifact.title || ""),
+        updated_at: updatedAt
+      },
       created_at: updatedAt,
       source: {
         artifact_id: artifactId,

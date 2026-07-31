@@ -1,4 +1,5 @@
 import { useEffect, useMemo } from "react";
+import { useTranslation } from "react-i18next";
 
 import { useCachedApi } from "./apiCache.jsx";
 import {
@@ -10,14 +11,20 @@ import {
   readResponseJson
 } from "./dashboard.js";
 
-export const OBSIDIAN_OPTIONAL_SETUP_MESSAGE = "Obsidian 是可选集成；如需导出或选择 vault 内路径，请先在设置页填写可用的 vault 路径。";
-export const OBSIDIAN_PATH_MISSING_MESSAGE = "当前 Obsidian vault 路径不可用，请在设置页检查路径。";
+export const OBSIDIAN_OPTIONAL_SETUP_MESSAGE = "Obsidian is optional. Configure a usable vault path in Settings to export or select paths inside the vault.";
+export const OBSIDIAN_PATH_MISSING_MESSAGE = "The configured Obsidian vault path is unavailable. Check it in Settings.";
+
+function localized(t, key, fallback, values = {}) {
+  return typeof t === "function"
+    ? t(`system:obsidian.${key}`, { ...values, defaultValue: fallback })
+    : fallback;
+}
 
 function text(value) {
   return String(value ?? "").trim();
 }
 
-export function obsidianCapabilityFrom({ health, settings } = {}) {
+export function obsidianCapabilityFrom({ health, settings, t } = {}) {
   const obsidian = health?.obsidian || {};
   const status = text(obsidian.status);
   const remote = obsidian.remote || {};
@@ -31,7 +38,7 @@ export function obsidianCapabilityFrom({ health, settings } = {}) {
       available: true,
       configured: true,
       disabledReason: "",
-      label: status === "remote_configured" ? "远端" : status === "ok" ? "OK" : "已配置",
+      label: status === "remote_configured" ? localized(t, "remote", "Remote") : status === "ok" ? "OK" : localized(t, "configured", "Configured"),
       path: vaultPath || remotePath,
       state: status === "remote_configured" || status === "ok" ? "ok" : "neutral",
       status: status || "configured"
@@ -42,8 +49,8 @@ export function obsidianCapabilityFrom({ health, settings } = {}) {
     return {
       available: false,
       configured: false,
-      disabledReason: OBSIDIAN_OPTIONAL_SETUP_MESSAGE,
-      label: "可选：未配置",
+      disabledReason: localized(t, "optionalSetup", OBSIDIAN_OPTIONAL_SETUP_MESSAGE),
+      label: localized(t, "optionalNotConfigured", "Optional: not configured"),
       path: vaultPath,
       state: "neutral",
       status: status || "not_configured"
@@ -54,8 +61,8 @@ export function obsidianCapabilityFrom({ health, settings } = {}) {
     return {
       available: false,
       configured: true,
-      disabledReason: OBSIDIAN_PATH_MISSING_MESSAGE,
-      label: "路径不存在",
+      disabledReason: localized(t, "pathMissing", OBSIDIAN_PATH_MISSING_MESSAGE),
+      label: localized(t, "pathDoesNotExist", "Path does not exist"),
       path: vaultPath,
       state: "warn",
       status
@@ -65,8 +72,8 @@ export function obsidianCapabilityFrom({ health, settings } = {}) {
   return {
     available: false,
     configured: true,
-    disabledReason: OBSIDIAN_PATH_MISSING_MESSAGE,
-    label: status || "不可用",
+    disabledReason: localized(t, "pathMissing", OBSIDIAN_PATH_MISSING_MESSAGE),
+    label: status || localized(t, "unavailable", "Unavailable"),
     path: vaultPath || remotePath,
     state: "warn",
     status: status || "unavailable"
@@ -74,6 +81,7 @@ export function obsidianCapabilityFrom({ health, settings } = {}) {
 }
 
 export function useObsidianCapability({ health: providedHealth, settings, onError } = {}) {
+  const { t } = useTranslation("system");
   const healthQuery = useCachedApi(
     ["health", "summary"],
     () => api("/api/health/summary"),
@@ -87,8 +95,8 @@ export function useObsidianCapability({ health: providedHealth, settings, onErro
   const health = providedHealth || healthQuery.data || null;
 
   return useMemo(
-    () => obsidianCapabilityFrom({ health, settings }),
-    [health, settings]
+    () => obsidianCapabilityFrom({ health, settings, t }),
+    [health, settings, t]
   );
 }
 
@@ -108,11 +116,11 @@ export function isObsidianNotConfiguredError(error) {
   return /obsidian_not_configured|obsidian vault path is not configured|请先选择或填写 Obsidian vault 路径/i.test(errorText(error));
 }
 
-export function friendlyObsidianMessage(error) {
+export function friendlyObsidianMessage(error, t = null) {
   const message = errorText(error);
-  if (isObsidianNotConfiguredError(error)) return OBSIDIAN_OPTIONAL_SETUP_MESSAGE;
-  if (/obsidian vault path does not exist/i.test(message)) return OBSIDIAN_PATH_MISSING_MESSAGE;
-  return text(error?.message) || "Obsidian 操作失败。";
+  if (isObsidianNotConfiguredError(error)) return localized(t, "optionalSetup", OBSIDIAN_OPTIONAL_SETUP_MESSAGE);
+  if (/obsidian vault path does not exist/i.test(message)) return localized(t, "pathMissing", OBSIDIAN_PATH_MISSING_MESSAGE);
+  return text(error?.message) || localized(t, "operationFailed", "Obsidian operation failed.");
 }
 
 export async function postObsidianJson(path, body = {}) {
@@ -125,7 +133,7 @@ export async function postObsidianJson(path, body = {}) {
   const data = await readResponseJson(response);
   const failureReason = data?.reason || data?.code;
   if (!response.ok || isNonJsonResponse(data) || failureReason === "obsidian_not_configured") {
-    const error = createApiError(response, data, failureReason || "Obsidian 操作失败。");
+    const error = createApiError(response, data, failureReason || "Obsidian operation failed.");
     if (isAuthRequiredError(error)) emitAuthRequired({ path, status: response.status, data });
     throw error;
   }

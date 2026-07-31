@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 
 import {
   api,
@@ -9,24 +10,19 @@ import {
   fmtDate,
   fmtScore,
   postJson,
-  PROJECT_NOTE_RELATIONS,
-  PROJECT_PAPER_RELATIONS,
-  PROJECT_STATUSES,
+  projectNoteRelationOptions,
+  projectStatusOptions,
+  statusLabel,
   snippet
 } from "../lib/dashboard.js";
 import { useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { friendlyObsidianMessage, postObsidianJson, useObsidianCapability } from "../lib/obsidianCapability.js";
-import { paperImportanceLabel } from "../lib/paperImportance.js";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
 import { LoadingPanel } from "./Loading.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
 import { VisionMetric } from "./VisionMetric.jsx";
 import { WorkspaceSelect } from "./WorkspaceSelect.jsx";
 import "../styles/ProjectPage.css";
-
-const PROJECT_STATUS_LABELS = Object.fromEntries(PROJECT_STATUSES);
-const PROJECT_PAPER_RELATION_LABELS = Object.fromEntries(PROJECT_PAPER_RELATIONS);
-const PROJECT_NOTE_RELATION_LABELS = Object.fromEntries(PROJECT_NOTE_RELATIONS);
 
 function projectToForm(project = {}) {
   return {
@@ -74,56 +70,57 @@ function upsertProjectRow(projects, project) {
 }
 
 function ProjectForm({ project, form, setForm, obsidianCapability, onPickPath, onSubmit }) {
+  const { t, i18n } = useTranslation("projects");
   const update = (name, value) => setForm((current) => ({ ...current, [name]: value }));
   const obsidianDisabled = !obsidianCapability?.available;
-  const obsidianHint = obsidianCapability?.disabledReason || "请先配置可选 Obsidian 集成。";
+  const obsidianHint = obsidianCapability?.disabledReason || t("detail.obsidianHint");
   return (
     <section className="project-detail-section project-detail-settings">
       <header className="project-detail-section-header">
-        <div><span>Project configuration</span><h2>{project?.id ? "项目设置" : "创建研究项目"}</h2></div>
-        <p>{project?.id ? `最后更新 ${fmtDate(project.updated_at)}` : "保存后进入完整项目工作区"}</p>
+        <div><span>{t("common.projectConfiguration")}</span><h2>{t(project?.id ? "detail.settings" : "detail.create")}</h2></div>
+        <p>{project?.id ? t("detail.lastUpdated", { date: fmtDate(project.updated_at, i18n.resolvedLanguage) }) : t("detail.afterSave")}</p>
       </header>
       <form className="project-detail-form" onSubmit={onSubmit}>
         <label className="project-detail-field">
-          <span>项目名称</span>
+          <span>{t("detail.name")}</span>
           <input value={form.name} required onChange={(event) => update("name", event.target.value)} />
         </label>
         <div className="project-detail-field">
-          <span>状态</span>
-          <WorkspaceSelect ariaLabel="选择项目状态" onChange={(value) => update("status", value)} options={PROJECT_STATUSES} value={form.status} />
+          <span>{t("detail.status")}</span>
+          <WorkspaceSelect ariaLabel={t("detail.statusAria")} onChange={(value) => update("status", value)} options={projectStatusOptions(t)} value={form.status} />
         </div>
         <label className="project-detail-field project-detail-field-wide">
-          <span>关键词</span>
+          <span>{t("detail.keywords")}</span>
           <input value={form.keywords} placeholder="RAG,agent,scientific discovery" onChange={(event) => update("keywords", event.target.value)} />
         </label>
         <label className="project-detail-field project-detail-field-wide">
-          <span>原始项目上下文</span>
+          <span>{t("detail.rawContext")}</span>
           <textarea
             value={form.raw_context}
-            placeholder="粘贴项目 README、研究问题、实验计划或任意自由文本。保存后会进入系统内知识文档。"
+            placeholder={t("detail.rawContextPlaceholder")}
             onChange={(event) => update("raw_context", event.target.value)}
             rows={7}
           />
         </label>
         <label className={`project-detail-field project-detail-field-wide ${obsidianDisabled ? "capability-disabled" : ""}`}>
-          <span>Obsidian 项目主页</span>
+          <span>{t("detail.obsidianHome")}</span>
           <div className="path-input-row">
             <input disabled={obsidianDisabled} value={form.obsidian_project_path} placeholder="Projects/Agentic RAG/Home.md" onChange={(event) => update("obsidian_project_path", event.target.value)} />
-            <button disabled={obsidianDisabled} title={obsidianDisabled ? obsidianHint : undefined} type="button" onClick={() => onPickPath("obsidian_project_path", "file", "选择 Obsidian 项目主页 Markdown")}>选择</button>
+            <button disabled={obsidianDisabled} title={obsidianDisabled ? obsidianHint : undefined} type="button" onClick={() => onPickPath("obsidian_project_path", "file", t("detail.chooseHome"))}>{t("common.select")}</button>
           </div>
           {obsidianDisabled ? <small className="capability-hint">{obsidianHint}</small> : null}
         </label>
         <label className={`project-detail-field project-detail-field-wide ${obsidianDisabled ? "capability-disabled" : ""}`}>
-          <span>Obsidian 输出目录</span>
+          <span>{t("detail.obsidianOutput")}</span>
           <div className="path-input-row">
             <input disabled={obsidianDisabled} value={form.obsidian_output_dir} placeholder="Projects/Agentic RAG" onChange={(event) => update("obsidian_output_dir", event.target.value)} />
-            <button disabled={obsidianDisabled} title={obsidianDisabled ? obsidianHint : undefined} type="button" onClick={() => onPickPath("obsidian_output_dir", "directory", "选择 Obsidian 输出目录")}>选择</button>
+            <button disabled={obsidianDisabled} title={obsidianDisabled ? obsidianHint : undefined} type="button" onClick={() => onPickPath("obsidian_output_dir", "directory", t("detail.chooseOutput"))}>{t("common.select")}</button>
           </div>
           {obsidianDisabled ? <small className="capability-hint">{obsidianHint}</small> : null}
         </label>
         <div className="project-detail-form-actions project-detail-field-wide">
-          <p>保存会同步更新项目检索上下文。</p>
-          <button type="submit">保存项目 <i aria-hidden="true">→</i></button>
+          <p>{t("detail.saveHint")}</p>
+          <button type="submit">{t("detail.save")} <i aria-hidden="true">→</i></button>
         </div>
       </form>
     </section>
@@ -131,29 +128,30 @@ function ProjectForm({ project, form, setForm, obsidianCapability, onPickPath, o
 }
 
 function ProjectDailyBrief({ artifact }) {
+  const { t, i18n } = useTranslation("projects");
   const profile = artifact?.content_json || {};
   const findings = Array.isArray(profile.current_findings) ? profile.current_findings.slice(0, 3) : [];
   const questions = Array.isArray(profile.open_questions) ? profile.open_questions.slice(0, 3) : [];
-  const model = artifact?.source?.model?.model || "每日任务";
+  const model = artifact?.source?.model?.model || t("detail.dailyTask");
   return (
     <article className={`project-daily-brief ${artifact ? "has-summary" : "is-empty"}`}>
       <header>
-        <div><span><i aria-hidden="true" />每日项目摘要</span><h2>{artifact ? "今天从这里继续" : "等待首次项目摘要"}</h2></div>
-        {artifact ? <time>{fmtDate(artifact.updated_at)}</time> : <em>每日任务</em>}
+        <div><span><i aria-hidden="true" />{t("detail.dailyBrief")}</span><h2>{t(artifact ? "detail.continueToday" : "detail.waitingBrief")}</h2></div>
+        {artifact ? <time>{fmtDate(artifact.updated_at, i18n.resolvedLanguage)}</time> : <em>{t("detail.dailyTask")}</em>}
       </header>
       {artifact ? (
         <>
           <p className="project-daily-brief-summary">{profile.summary || snippet(artifact.content_markdown || "", 520)}</p>
           <div className="project-daily-brief-columns">
-            <section><span>已记录发现</span>{findings.length ? <ul>{findings.map((item) => <li key={item}>{item}</li>)}</ul> : <p>暂无可靠发现记录。</p>}</section>
-            <section><span>待解决问题</span>{questions.length ? <ul>{questions.map((item) => <li key={item}>{item}</li>)}</ul> : <p>暂无待解决问题。</p>}</section>
+            <section><span>{t("detail.findings")}</span>{findings.length ? <ul>{findings.map((item) => <li key={item}>{item}</li>)}</ul> : <p>{t("detail.noFindings")}</p>}</section>
+            <section><span>{t("detail.questions")}</span>{questions.length ? <ul>{questions.map((item) => <li key={item}>{item}</li>)}</ul> : <p>{t("detail.noQuestions")}</p>}</section>
           </div>
-          <footer><span>{model} · 自动更新</span><a href={`/artifacts/${artifact.id}`}>查看完整摘要 <i aria-hidden="true">→</i></a></footer>
+          <footer><span>{t("detail.autoUpdated", { model })}</span><a href={`/artifacts/${artifact.id}`}>{t("detail.viewSummary")} <i aria-hidden="true">→</i></a></footer>
         </>
       ) : (
         <div className="project-daily-brief-empty">
           <span aria-hidden="true">◎</span>
-          <div><strong>每日任务尚未生成项目 Chat 摘要</strong><p>运行每日任务后，这里会汇总项目目标、当前方法、已记录发现与下一步问题。</p></div>
+          <div><strong>{t("detail.noChatSummary")}</strong><p>{t("detail.chatSummaryHint")}</p></div>
         </div>
       )}
     </article>
@@ -161,13 +159,14 @@ function ProjectDailyBrief({ artifact }) {
 }
 
 function PendingPaperQueuePanel({ papers, evidenceByPaperId, onAcceptRecommendation }) {
+  const { t } = useTranslation("projects");
   return (
     <section className="project-detail-section project-pending-section">
       <header className="project-detail-section-header">
         <div>
-          <span>Decision queue</span><h2>待判断论文</h2>
+          <span>{t("common.decisionQueue")}</span><h2>{t("detail.pendingPapers")}</h2>
         </div>
-        <p>{papers.length} 篇等待决策</p>
+        <p>{t("detail.waitingDecision", { count: papers.length })}</p>
       </header>
       <div className="project-detail-paper-list">
         {papers.length ? papers.map((paper) => {
@@ -179,41 +178,42 @@ function PendingPaperQueuePanel({ papers, evidenceByPaperId, onAcceptRecommendat
               <div className="project-detail-paper-head">
                 <div>
                   <strong>{paper.title}</strong>
-                  <p>{paper.arxiv_id} · {relationType} · 匹配 {fmtScore(paper.score)}{paper.confidence ? ` · 置信度 ${fmtScore(paper.confidence)}` : ""}</p>
+                  <p>{paper.arxiv_id} · {relationType} · {t("detail.match", { score: fmtScore(paper.score) })}{paper.confidence ? ` · ${t("detail.confidence", { score: fmtScore(paper.confidence) })}` : ""}</p>
                 </div>
                 <div className="project-detail-paper-actions">
                   {paper.link ? <a href={paper.link} target="_blank" rel="noreferrer">arXiv</a> : null}
-                  <a href={`/papers/inbox/${paper.id}`}>打开待判断</a>
-                  <div className="project-detail-importance" aria-label="保存重要性">
-                    <span>保存</span>
-                    <button type="button" onClick={() => onAcceptRecommendation(paper.id, "high")}>高</button>
-                    <button type="button" onClick={() => onAcceptRecommendation(paper.id, "medium")}>中</button>
-                    <button type="button" onClick={() => onAcceptRecommendation(paper.id, "low")}>低</button>
+                  <a href={`/papers/inbox/${paper.id}`}>{t("detail.openPending")}</a>
+                  <div className="project-detail-importance" aria-label={t("detail.saveImportanceAria")}>
+                    <span>{t("detail.save")}</span>
+                    <button type="button" onClick={() => onAcceptRecommendation(paper.id, "high")}>{t("importance.high")}</button>
+                    <button type="button" onClick={() => onAcceptRecommendation(paper.id, "medium")}>{t("importance.medium")}</button>
+                    <button type="button" onClick={() => onAcceptRecommendation(paper.id, "low")}>{t("importance.low")}</button>
                   </div>
                 </div>
               </div>
-              <p className="project-detail-paper-reason"><span>推荐理由</span>{paper.reason || "暂无推荐理由。"}</p>
+              <p className="project-detail-paper-reason"><span>{t("detail.reason")}</span>{paper.reason || t("detail.noReason")}</p>
               {primaryEvidence ? (
                 <div className="project-detail-evidence">
-                  <p><span>论文匹配片段</span>{snippet(primaryEvidence.arxiv_text || primaryEvidence.evidence?.arxiv_text)}</p>
-                  <p><span>项目上下文片段</span>{snippet(`${primaryEvidence.note_title || ""} ${primaryEvidence.obsidian_heading || ""} ${primaryEvidence.obsidian_text || ""}`)}</p>
-                  <p>{primaryEvidence.note_path || "项目上下文"} · chunk {primaryEvidence.best_obsidian_chunk_id || ""}</p>
+                  <p><span>{t("detail.paperEvidence")}</span>{snippet(primaryEvidence.arxiv_text || primaryEvidence.evidence?.arxiv_text)}</p>
+                  <p><span>{t("detail.contextEvidence")}</span>{snippet(`${primaryEvidence.note_title || ""} ${primaryEvidence.obsidian_heading || ""} ${primaryEvidence.obsidian_text || ""}`)}</p>
+                  <p>{primaryEvidence.note_path || t("detail.projectContextFallback")} · {t("detail.chunkCount", { count: primaryEvidence.best_obsidian_chunk_id || 0 })}</p>
                 </div>
               ) : null}
             </article>
           );
-        }) : <div className="project-detail-empty"><strong>当前队列为空</strong><p>运行每日任务或同步上下文后，新的项目候选论文会出现在这里。</p></div>}
+        }) : <div className="project-detail-empty"><strong>{t("detail.emptyQueue")}</strong><p>{t("detail.emptyQueueHint")}</p></div>}
       </div>
     </section>
   );
 }
 
 function ExperimentProgressPanel({ reports, obsidianCapability, onExport }) {
+  const { t, i18n } = useTranslation("projects");
   const exportDisabled = !obsidianCapability?.available;
-  const obsidianHint = obsidianCapability?.disabledReason || "请先配置可选 Obsidian 集成。";
+  const obsidianHint = obsidianCapability?.disabledReason || t("detail.obsidianHint");
   return (
     <section className="project-detail-section project-experiment-section">
-      <header className="project-detail-section-header"><div><span>Research outputs</span><h2>实验进展</h2></div><p>{reports.length} 份报告</p></header>
+      <header className="project-detail-section-header"><div><span>{t("common.researchOutputs")}</span><h2>{t("detail.experimentProgress")}</h2></div><p>{t("detail.reportCount", { count: reports.length })}</p></header>
       <div className="project-detail-report-list">
         {reports.length ? reports.map((report) => {
           const content = report.content_json || {};
@@ -225,11 +225,11 @@ function ExperimentProgressPanel({ reports, obsidianCapability, onExport }) {
               <div className="project-detail-report-head">
                 <div>
                   <strong>{report.title}</strong>
-                  <p>{sourceAgent} · {fmtDate(report.updated_at)}{report.obsidian_path ? ` · ${report.obsidian_path}` : ""}</p>
+                  <p>{sourceAgent} · {fmtDate(report.updated_at, i18n.resolvedLanguage)}{report.obsidian_path ? ` · ${report.obsidian_path}` : ""}</p>
                 </div>
                 <div className="project-detail-report-actions">
-                  <a href={`/artifacts/${report.id}`}>打开产物</a>
-                  <button disabled={exportDisabled} title={exportDisabled ? obsidianHint : undefined} type="button" onClick={() => onExport(report.id)}>导出</button>
+                  <a href={`/artifacts/${report.id}`}>{t("detail.openArtifact")}</a>
+                  <button disabled={exportDisabled} title={exportDisabled ? obsidianHint : undefined} type="button" onClick={() => onExport(report.id)}>{t("detail.export")}</button>
                 </div>
               </div>
               {summary ? <p className="project-detail-report-summary">{summary}</p> : null}
@@ -240,44 +240,46 @@ function ExperimentProgressPanel({ reports, obsidianCapability, onExport }) {
               ) : null}
             </article>
           );
-        }) : <div className="project-detail-empty"><strong>暂无实验进展</strong><p>Agent 回传的实验报告会显示在这里。</p></div>}
+        }) : <div className="project-detail-empty"><strong>{t("detail.noProgress")}</strong><p>{t("detail.noProgressHint")}</p></div>}
       </div>
     </section>
   );
 }
 
 function LinkedPapersPanel({ linkedPapers, onUnlinkPaper }) {
+  const { t } = useTranslation("projects");
   return (
     <section className="project-detail-section project-linked-section">
       <header className="project-detail-section-header">
         <div>
-          <span>Paper collection</span><h2>已关联论文</h2>
+          <span>{t("common.paperCollection")}</span><h2>{t("detail.linkedPapers")}</h2>
         </div>
-        <p>{linkedPapers.length} 篇论文</p>
+        <p>{t("detail.paperCount", { count: linkedPapers.length })}</p>
       </header>
       <div className="project-detail-resource-list">
         {linkedPapers.length ? linkedPapers.map((paper) => (
           <article className="project-detail-resource-item" key={paper.id}>
             <div>
               <Link
-                aria-label={`打开论文报告：${paper.title}`}
+                aria-label={t("detail.openPaperReport", { title: paper.title })}
                 className="project-detail-resource-link"
                 to={`/papers/reports/${encodeURIComponent(String(paper.id))}`}
               >
                 <strong>{paper.title}</strong>
-                <p>{PROJECT_PAPER_RELATION_LABELS[paper.relation] || paper.relation} · {paper.arxiv_id}{paper.importance ? ` · 重要性 ${paperImportanceLabel(paper.importance)}` : ""}{paper.project_score ? ` · 匹配 ${fmtScore(paper.project_score)}` : ""}</p>
+                <p>{t(`paperRelation.${paper.relation}`, { defaultValue: paper.relation })} · {paper.arxiv_id}{paper.importance ? ` · ${t("detail.importance", { value: t(`importance.${paper.importance}`, { defaultValue: paper.importance }) })}` : ""}{paper.project_score ? ` · ${t("detail.match", { score: fmtScore(paper.project_score) })}` : ""}</p>
                 {paper.note ? <small>{paper.note}</small> : null}
               </Link>
             </div>
-            <button type="button" onClick={() => onUnlinkPaper(paper.id)}>移除</button>
+            <button type="button" onClick={() => onUnlinkPaper(paper.id)}>{t("common.remove")}</button>
           </article>
-        )) : <div className="project-detail-empty"><strong>暂无关联论文</strong><p>从待判断队列保存论文后会进入这里。</p></div>}
+        )) : <div className="project-detail-empty"><strong>{t("detail.noLinkedPapers")}</strong><p>{t("detail.noLinkedPapersHint")}</p></div>}
       </div>
     </section>
   );
 }
 
 function ProjectContextPanel({ contextDocuments, linkedNotes, candidateNotes, onLinkNote, onUnlinkNote }) {
+  const { t } = useTranslation("projects");
   const [noteId, setNoteId] = useState("");
   const [relation, setRelation] = useState("source");
   useEffect(() => {
@@ -288,48 +290,48 @@ function ProjectContextPanel({ contextDocuments, linkedNotes, candidateNotes, on
     <section className="project-detail-section project-context-section-card">
       <header className="project-detail-section-header">
         <div>
-          <span>Knowledge context</span><h2>项目上下文</h2>
+          <span>{t("common.knowledgeContext")}</span><h2>{t("detail.projectContext")}</h2>
         </div>
-        <p>{contextDocuments.length} 文档 · {linkedNotes.length} 笔记</p>
+        <p>{t("detail.documentNoteCount", { documents: contextDocuments.length, notes: linkedNotes.length })}</p>
       </header>
       <div className="project-detail-context-group">
-        <h3>系统内上下文</h3>
+        <h3>{t("detail.systemContext")}</h3>
         <div className="project-detail-resource-list">
           {contextDocuments.length ? contextDocuments.map((document) => (
             <article className="project-detail-resource-item" key={`${document.document_id}-${document.relation}`}>
               <div>
                 <strong>{document.title}</strong>
-                <p>{document.source_type} · {document.relation} · {document.chunk_count} 个片段</p>
+                <p>{t(`sourceType.${document.source_type}`, { defaultValue: document.source_type })} · {t(`noteRelation.${document.relation}`, { defaultValue: document.relation })} · {t("detail.chunkCount", { count: document.chunk_count })}</p>
                 {document.excerpt ? <small>{snippet(document.excerpt, 160)}</small> : null}
               </div>
             </article>
-          )) : <div className="project-detail-empty compact"><p>暂无系统内上下文文档。</p></div>}
+          )) : <div className="project-detail-empty compact"><p>{t("detail.noSystemContext")}</p></div>}
         </div>
       </div>
       <div className="project-detail-context-group">
-        <h3>项目笔记</h3>
+        <h3>{t("detail.projectNotes")}</h3>
         <form className="project-detail-note-form" onSubmit={(event) => { event.preventDefault(); if (noteId) onLinkNote(noteId, relation); }}>
           <div className="project-detail-field">
-            <span>加入笔记</span>
-            <WorkspaceSelect ariaLabel="选择项目笔记" disabled={!candidateNotes.length} onChange={setNoteId} options={candidateNotes.length ? candidateNotes.map((note) => [String(note.id), compactLabel(`${note.title} · ${note.path}`)]) : [["", "无可选笔记"]]} value={noteId} />
+            <span>{t("detail.addNote")}</span>
+            <WorkspaceSelect ariaLabel={t("detail.noteAria")} disabled={!candidateNotes.length} onChange={setNoteId} options={candidateNotes.length ? candidateNotes.map((note) => [String(note.id), compactLabel(`${note.title} · ${note.path}`)]) : [["", t("detail.noNotes")]]} value={noteId} />
           </div>
           <div className="project-detail-field">
-            <span>关系</span>
-            <WorkspaceSelect ariaLabel="选择笔记关系" onChange={setRelation} options={PROJECT_NOTE_RELATIONS} value={relation} />
+            <span>{t("detail.relation")}</span>
+            <WorkspaceSelect ariaLabel={t("detail.relationAria")} onChange={setRelation} options={projectNoteRelationOptions(t)} value={relation} />
           </div>
-          <button type="submit" disabled={!candidateNotes.length}>加入</button>
+          <button type="submit" disabled={!candidateNotes.length}>{t("detail.add")}</button>
         </form>
         <div className="project-detail-resource-list">
           {linkedNotes.length ? linkedNotes.map((note) => (
             <article className="project-detail-resource-item" key={note.id}>
               <div>
                 <strong>{note.title}</strong>
-                <p>{PROJECT_NOTE_RELATION_LABELS[note.relation] || note.relation} · {note.path}</p>
+                <p>{t(`noteRelation.${note.relation}`, { defaultValue: note.relation })} · {note.path}</p>
                 {note.note ? <small>{note.note}</small> : null}
               </div>
-              <button type="button" onClick={() => onUnlinkNote(note.id)}>移除</button>
+              <button type="button" onClick={() => onUnlinkNote(note.id)}>{t("common.remove")}</button>
             </article>
-          )) : <div className="project-detail-empty compact"><p>暂无关联笔记。</p></div>}
+          )) : <div className="project-detail-empty compact"><p>{t("detail.noLinkedNotes")}</p></div>}
         </div>
       </div>
     </section>
@@ -337,6 +339,7 @@ function ProjectContextPanel({ contextDocuments, linkedNotes, candidateNotes, on
 }
 
 export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessage }) {
+  const { t, i18n } = useTranslation("projects");
   const [detail, setDetail] = useState(null);
   const [form, setForm] = useState(projectToForm());
   const isNew = !projectId;
@@ -403,7 +406,7 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
   const project = detail?.project || {};
   const projectMatchesRoute = Boolean(project.id) && Number(project.id) === Number(projectId);
   const projectLoading = !isNew && !projectMatchesRoute && projectQuery.status !== "error";
-  const title = isNew ? "新建项目" : project.name || "项目";
+  const title = isNew ? t("detail.newTitle") : project.name || t("detail.fallbackTitle");
   const artifacts = detail?.artifacts || [];
   const experimentReports = useMemo(
     () => artifacts.filter((artifact) => artifact.artifact_type === "experiment_report"),
@@ -454,16 +457,16 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
       return;
     }
     try {
-      setStatusMessage("正在打开本地路径选择器...");
+      setStatusMessage(t("detail.openingPicker"));
       const data = await chooseLocalPath({ mode, title: titleText, relativeTo: "obsidian_vault" });
       if (data.cancelled) {
-        setStatusMessage("已取消路径选择");
+        setStatusMessage(t("detail.pickerCancelled"));
         return;
       }
       setForm((current) => ({ ...current, [field]: data.relative_path ?? data.path ?? "" }));
-      setStatusMessage("路径已选择");
+      setStatusMessage(t("detail.pathSelected"));
     } catch (error) {
-      setStatusMessage(friendlyObsidianMessage(error));
+      setStatusMessage(friendlyObsidianMessage(error, t));
     }
   }
 
@@ -482,7 +485,7 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
       };
       const data = await postJson(projectId ? `/api/projects/${projectId}` : "/api/projects", payload);
       applyProjectDetail(data, { updateForm: true });
-      setStatusMessage(data.context_job?.queued ? "Project saved; context queued" : "Project saved");
+      setStatusMessage(t(data.context_job?.queued ? "detail.savedQueued" : "detail.saved"));
       if (!projectId) onSavedProject(data.project.id);
     } catch (error) {
       setStatusMessage(error.message);
@@ -500,15 +503,15 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
       if (data?.queued) {
         cache.markStale(["jobs", "summary"]);
         cache.markStale(["jobs", "history"]);
-        setStatusMessage("Artifact export queued");
+        setStatusMessage(t("detail.exportQueued"));
         return;
       }
       cache.markStale(["artifact", String(artifactId)]);
       cache.markStale(["artifacts"]);
       await refreshProject();
-      setStatusMessage(`Synced ${data.export?.path || "artifact"}`);
+      setStatusMessage(t("detail.synced", { path: data.export?.path || "artifact" }));
     } catch (error) {
-      setStatusMessage(friendlyObsidianMessage(error));
+      setStatusMessage(friendlyObsidianMessage(error, t));
     }
   }
 
@@ -524,7 +527,7 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
       cache.markStale(["library"]);
       cache.markStale(["projects"]);
       await refreshProject();
-      setStatusMessage("已从待判断保存到当前项目");
+      setStatusMessage(t("detail.recommendationAccepted"));
     } catch (error) {
       setStatusMessage(error.message);
     }
@@ -535,7 +538,7 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
     try {
       const data = await postJson(`/api/projects/${projectId}/notes`, { note_id: noteId, relation });
       applyProjectDetail(data);
-      setStatusMessage("Note linked");
+      setStatusMessage(t("detail.noteLinked"));
     } catch (error) {
       setStatusMessage(error.message);
     }
@@ -547,7 +550,7 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
       const data = await api(`/api/projects/${projectId}/${type === "paper" ? "papers" : "notes"}/${id}`, { method: "DELETE" });
       applyProjectDetail(data);
       if (type === "paper") cache.markStale(["library"]);
-      setStatusMessage(type === "paper" ? "Paper removed from project" : "Note removed from project");
+      setStatusMessage(t(type === "paper" ? "detail.paperRemoved" : "detail.noteRemoved"));
     } catch (error) {
       setStatusMessage(error.message);
     }
@@ -557,15 +560,15 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
     <section className="view project-detail-view">
       <header className="vision-topbar project-detail-topbar">
         <div className="project-detail-title-group">
-          <button aria-label="返回项目中心" className="project-detail-back" type="button" onClick={onBack}>←</button>
+          <button aria-label={t("detail.backAria")} className="project-detail-back" type="button" onClick={onBack}>←</button>
           <div className="vision-brand">
-            <span>{isNew ? "创建研究空间" : "项目研究空间"}</span>
+            <span>{t(isNew ? "detail.createSpace" : "detail.projectSpace")}</span>
             <h1>{title}</h1>
           </div>
         </div>
         {!isNew ? (
           <div className="vision-top-actions">
-            <span className={`vision-live-state ${["active", "exploring", "writing"].includes(project.status) ? "running" : "ready"}`}><i aria-hidden="true" />{PROJECT_STATUS_LABELS[project.status] || project.status || "未设置"}</span>
+            <span className={`vision-live-state ${["active", "exploring", "writing"].includes(project.status) ? "running" : "ready"}`}><i aria-hidden="true" />{statusLabel(project.status, t) || t("common.notSet")}</span>
             <RefreshButton busy={projectQuery.loading || projectQuery.refreshing} className="vision-refresh" onClick={() => refreshProject().catch((error) => setStatusMessage(error.message))} />
           </div>
         ) : null}
@@ -574,9 +577,9 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
       {projectLoading ? (
         <LoadingPanel
           className="project-page-loading"
-          description="正在读取项目配置、关联论文、上下文和生成产物。"
+          description={t("detail.loadingDescription")}
           rows={8}
-          title="读取项目详情"
+          title={t("detail.loadingTitle")}
         />
       ) : (
         <main className={`project-detail-layout ${isNew ? "is-new" : ""}`}>
@@ -586,22 +589,22 @@ export function ProjectPage({ projectId, onBack, onSavedProject, setStatusMessag
             <>
               <section className="project-detail-hero">
                 <div className="project-detail-intro">
-                  <span>Research workspace</span>
+                  <span>{t("common.researchWorkspace")}</span>
                   <h2>{project.name}</h2>
-                  <p>{project.summary || project.goals || "这个项目尚未填写人工概述。可以在页面下方的项目设置中补充研究背景和目标。"}</p>
+                  <p>{project.summary || project.goals || t("detail.summaryFallback")}</p>
                   <div className="project-detail-tags">
-                    {(project.keywords || []).length ? project.keywords.slice(0, 8).map((keyword) => <span key={keyword}>{keyword}</span>) : <span>暂无关键词</span>}
+                    {(project.keywords || []).length ? project.keywords.slice(0, 8).map((keyword) => <span key={keyword}>{keyword}</span>) : <span>{t("detail.noKeywords")}</span>}
                   </div>
-                  <footer><span>创建于 {fmtDate(project.created_at)}</span><span>更新于 {fmtDate(project.updated_at)}</span></footer>
+                  <footer><span>{t("detail.createdAt", { date: fmtDate(project.created_at, i18n.resolvedLanguage) })}</span><span>{t("detail.updatedAt", { date: fmtDate(project.updated_at, i18n.resolvedLanguage) })}</span></footer>
                 </div>
                 <ProjectDailyBrief artifact={dailyProjectSummary} />
               </section>
 
-              <section className="vision-stats project-detail-stats" aria-label="项目规模">
-                <VisionMetric hint="等待项目决策" label="待判断" tone="coral" value={pendingPapers.length} />
-                <VisionMetric hint="已进入项目资产" label="关联论文" tone="blue" value={linkedPapers.length} />
-                <VisionMetric hint={`${contextDocuments.length} 文档 · ${linkedNotes.length} 笔记`} label="知识上下文" tone="gold" value={contextDocuments.length + linkedNotes.length} />
-                <VisionMetric hint={`${experimentReports.length} 份实验报告`} label="研究产物" tone="violet" value={artifacts.length} />
+              <section className="vision-stats project-detail-stats" aria-label={t("detail.scaleAria")}>
+                <VisionMetric hint={t("detail.pendingHint")} label={t("detail.pending")} tone="coral" value={pendingPapers.length} />
+                <VisionMetric hint={t("detail.linkedHint")} label={t("detail.linkedPapers")} tone="blue" value={linkedPapers.length} />
+                <VisionMetric hint={t("detail.contextHint", { documents: contextDocuments.length, notes: linkedNotes.length })} label={t("list.knowledgeContext")} tone="gold" value={contextDocuments.length + linkedNotes.length} />
+                <VisionMetric hint={t("detail.artifactHint", { count: experimentReports.length })} label={t("list.artifacts")} tone="violet" value={artifacts.length} />
               </section>
 
               <div className="project-detail-primary-grid">

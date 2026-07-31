@@ -6,6 +6,10 @@
     <link rel="icon" type="image/svg+xml" href="/kris-logo.svg" />
     <script>
       (() => {
+        try {
+          const locale = window.localStorage.getItem("kris.locale");
+          document.documentElement.lang = locale === "en" ? "en" : "zh-CN";
+        } catch {}
         const key = "kris.theme.mode";
         const modes = new Set(["light", "dark", "system"]);
         let mode = "system";
@@ -19,7 +23,7 @@
         document.documentElement.style.colorScheme = theme;
       })();
     </script>
-    <title>科研情报系统</title>
+    <title>KRIS 研究智能系统</title>
   </head>
   <body>
     <div id="root"></div>

@@ -1,0 +1,98 @@
+{
+  "listSeparator": "; ",
+  "messageSeparator": ": ",
+  "language": {
+    "label": "Interface language",
+    "zh-CN": { "short": "中", "full": "Simplified Chinese" },
+    "en": { "short": "EN", "full": "English" }
+  },
+  "actions": {
+    "close": "Close",
+    "closeDialog": "Close dialog",
+    "closeNotification": "Close notification",
+    "inProgress": "{{action}} in progress",
+    "login": "Log in",
+    "loggingOut": "Logging out",
+    "logout": "Log out",
+    "nextPage": "Next page",
+    "previousPage": "Previous page",
+    "refresh": "Refresh",
+    "select": "Select"
+  },
+  "loading": {
+    "default": "Loading",
+    "dataDescription": "Reading data.",
+    "reportDescription": "Loading the report renderer.",
+    "reportTitle": "Rendering report",
+    "workspace": "Reading workspace"
+  },
+  "pagination": {
+    "compact": "{{current}} / {{count}}",
+    "summary": "Page {{current}} of {{count}}",
+    "perPage": "{{count}}/page"
+  },
+  "theme": {
+    "label": "Theme mode",
+    "light": "Light",
+    "dark": "Dark",
+    "system": "System",
+    "systemCurrent": "Follow system, currently {{current}}"
+  },
+  "toast": {
+    "host": "Notifications",
+    "error": "Error",
+    "info": "Notice",
+    "success": "Success",
+    "warning": "Warning"
+  },
+  "projectStatus": {
+    "active": "Active",
+    "planned": "Planned",
+    "completed": "Completed",
+    "paused": "Paused",
+    "exploring": "Exploring",
+    "writing": "Writing",
+    "archived": "Archived"
+  },
+  "projectPaperRelation": {
+    "candidate": "Candidate",
+    "reading": "Reading",
+    "core": "Core",
+    "background": "Background",
+    "rejected": "Rejected"
+  },
+  "projectNoteRelation": {
+    "source": "Source",
+    "idea": "Idea",
+    "method": "Method",
+    "result": "Result",
+    "todo": "To-do",
+    "center_page": "Center page",
+    "folder_member": "Folder member"
+  },
+  "jobType": {
+    "unknown": "Unknown job",
+    "run-daily": "Run daily workflow",
+    "resume-daily": "Resume daily workflow",
+    "retry-daily": "Retry daily workflow",
+    "fetch-arxiv": "Fetch arXiv papers",
+    "cache-arxiv-text": "Cache arXiv full text",
+    "generate-paper-reports": "Generate paper reports",
+    "generate-reports": "Generate research reports",
+    "sync-obsidian": "Sync Obsidian",
+    "rank-papers": "Rank papers",
+    "project-index": "Build project index",
+    "project-export-obsidian": "Export project to Obsidian",
+    "project-context": "Generate project context"
+  },
+  "jobStatus": {
+    "queued": "Queued",
+    "pending": "Pending",
+    "running": "Running",
+    "completed": "Completed",
+    "success": "Successful",
+    "failed": "Failed",
+    "cancelled": "Cancelled",
+    "skipped": "Skipped"
+  }
+}

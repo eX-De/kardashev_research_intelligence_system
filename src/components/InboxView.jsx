@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { cacheNamespace, useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { api, fmtScore, postJson } from "../lib/dashboard.js";
@@ -7,30 +8,26 @@ import { RefreshButton } from "./RefreshButton.jsx";
 import { WorkspacePaneLoader } from "./WorkspacePaneLoader.jsx";
 import "../styles/InboxView.css";
 
-const REPORT_STATUS_LABELS = {
-  queued: "报告排队中",
-  processing: "报告生成中",
-  done: "全文报告已生成",
-  failed: "报告失败"
-};
-
-function reportStatusLabel(status) {
-  return REPORT_STATUS_LABELS[status] || "未生成报告";
+function reportStatusLabel(status, t) {
+  return t(`reportStatus.${status || "missing"}`, { defaultValue: status || t("reportStatus.missing") });
 }
 
-function relationLabel(relation) {
-  if (relation === "direct") return "直接相关";
-  if (relation === "indirect") return "间接相关";
-  return relation || "可能相关";
+function relationLabel(relation, t) {
+  return t(`relation.${relation || "possible"}`, { defaultValue: relation || t("relation.possible") });
+}
+
+function workflowStateLabel(state, t) {
+  return t(`workflowState.${state || "unknown"}`, { defaultValue: state || t("workflowState.unknown") });
 }
 
 function PaperList({ papers, activePaperId, onSelect }) {
+  const { t } = useTranslation("papers");
   if (!papers.length) {
     return (
       <div className="inbox-empty-state">
         <span aria-hidden="true">✓</span>
-        <h2>待判断队列已清空</h2>
-        <p>新的候选论文会在每日流程完成后出现在这里。</p>
+        <h2>{t("inbox.empty.title")}</h2>
+        <p>{t("inbox.empty.description")}</p>
       </div>
     );
   }
@@ -61,20 +58,20 @@ function PaperList({ papers, activePaperId, onSelect }) {
         tabIndex={0}
       >
         <div className="inbox-paper-row-head">
-          <span className="inbox-score">匹配 {fmtScore(paper.score)}</span>
-          <span className={`inbox-report-status ${paper.report_status || "missing"}`}>{reportStatusLabel(paper.report_status)}</span>
+          <span className="inbox-score">{t("common.match", { score: fmtScore(paper.score) })}</span>
+          <span className={`inbox-report-status ${paper.report_status || "missing"}`}>{reportStatusLabel(paper.report_status, t)}</span>
         </div>
         <h2>{paper.title}</h2>
         {projectNames.length ? (
           <div className="inbox-project-match">
-            <strong>可能有关</strong>
+            <strong>{t("relation.possible")}</strong>
             <div>{projectNames.map((projectName) => <span key={projectName}>{projectName}</span>)}</div>
           </div>
         ) : null}
         <div className="inbox-paper-meta">
           {paper.relation_type ? <span>{paper.relation_type}</span> : null}
           <span>{(paper.categories || []).slice(0, 2).join(" · ") || "arXiv"}</span>
-          {paper.feedback_status ? <span>{paper.feedback_status}</span> : null}
+          {paper.feedback_status ? <span>{workflowStateLabel(paper.feedback_status, t)}</span> : null}
         </div>
       </article>
     );
@@ -82,6 +79,7 @@ function PaperList({ papers, activePaperId, onSelect }) {
 }
 
 function PaperDetail({ detail, onOpenReportQueue, onRecommendation, onGenerateReport }) {
+  const { t } = useTranslation("papers");
   const [selectedProjectIds, setSelectedProjectIds] = useState([]);
   const [importance, setImportance] = useState("");
 
@@ -99,8 +97,8 @@ function PaperDetail({ detail, onOpenReportQueue, onRecommendation, onGenerateRe
     return (
       <div className="inbox-detail-empty">
         <span aria-hidden="true">↗</span>
-        <h2>选择一篇论文</h2>
-        <p>论文摘要、项目关联和决策操作会显示在这里。</p>
+        <h2>{t("inbox.detail.selectTitle")}</h2>
+        <p>{t("inbox.detail.selectDescription")}</p>
       </div>
     );
   }
@@ -113,9 +111,9 @@ function PaperDetail({ detail, onOpenReportQueue, onRecommendation, onGenerateRe
   const reportReady = report.status === "done" && Boolean(String(report.report_markdown || "").trim());
   const reportBusy = report.status === "processing";
   const importanceOptions = [
-    ["high", "高", "重点跟进"],
-    ["medium", "中", "常规阅读"],
-    ["low", "低", "留作参考"]
+    ["high", t("importance.high"), t("importance.hint.high")],
+    ["medium", t("importance.medium"), t("importance.hint.medium")],
+    ["low", t("importance.low"), t("importance.hint.low")]
   ];
   const canAccept = Boolean(importance) && selectedProjectIds.length > 0 && pendingRecommendations.length > 0;
 
@@ -131,13 +129,13 @@ function PaperDetail({ detail, onOpenReportQueue, onRecommendation, onGenerateRe
     <article className="inbox-detail-card">
       <div className="detail-main">
         <header className="detail-title inbox-detail-title">
-          <span className="inbox-detail-eyebrow">候选论文 · {paper.arxiv_id || "arXiv"}</span>
+          <span className="inbox-detail-eyebrow">{t("inbox.detail.candidate", { id: paper.arxiv_id || "arXiv" })}</span>
           <h2>{paper.title}</h2>
-          <p className="inbox-detail-authors">{(paper.authors || []).slice(0, 6).join(", ") || "作者信息暂无"}</p>
+          <p className="inbox-detail-authors">{(paper.authors || []).slice(0, 6).join(", ") || t("common.noAuthors")}</p>
           <div className="inbox-detail-meta">
-            <a href={paper.link} target="_blank" rel="noreferrer">打开 arXiv ↗</a>
-            <span>{(paper.categories || []).join(" · ") || "未分类"}</span>
-            <span>全文 {paper.text_status || "pending"}</span>
+            <a href={paper.link} target="_blank" rel="noreferrer">{t("inbox.detail.openArxiv")} ↗</a>
+            <span>{(paper.categories || []).join(" · ") || t("common.uncategorized")}</span>
+            <span>{t("inbox.detail.fullTextStatus", { status: paper.text_status || "pending" })}</span>
           </div>
         </header>
 
@@ -145,14 +143,14 @@ function PaperDetail({ detail, onOpenReportQueue, onRecommendation, onGenerateRe
           <section className="recommendation-control inbox-decision-card">
             <header className="inbox-section-heading">
               <div>
-                <span>人工决策</span>
-                <h3>保存到哪些研究项目？</h3>
+                <span>{t("inbox.decision.eyebrow")}</span>
+                <h3>{t("inbox.decision.title")}</h3>
               </div>
-              <em>{pendingRecommendations.length} 个建议关联</em>
+              <em>{t("inbox.decision.suggestionCount", { count: pendingRecommendations.length })}</em>
             </header>
-            <p className="inbox-decision-hint">先选择重要性，再确认要保存到的项目。</p>
-            <div className="importance-row" role="group" aria-label="重要性">
-              <span>重要性</span>
+            <p className="inbox-decision-hint">{t("inbox.decision.hint")}</p>
+            <div className="importance-row" role="group" aria-label={t("common.importance")}>
+              <span>{t("common.importance")}</span>
               {importanceOptions.map(([value, label, hint]) => (
                 <button className={importance === value ? "active" : ""} data-importance={value} key={value} onClick={() => setImportance(value)} type="button">
                   <i aria-hidden="true" />
@@ -174,8 +172,8 @@ function PaperDetail({ detail, onOpenReportQueue, onRecommendation, onGenerateRe
                   <span className="project-checkbox-copy">
                     <strong>{recommendation.project_name}</strong>
                     <small>
-                      <span>{relationLabel(recommendation.relation_type)}</span>
-                      <span>匹配 {fmtScore(recommendation.usefulness_score)}</span>
+                      <span>{relationLabel(recommendation.relation_type, t)}</span>
+                      <span>{t("common.match", { score: fmtScore(recommendation.usefulness_score) })}</span>
                     </small>
                   </span>
                 </label>
@@ -183,9 +181,9 @@ function PaperDetail({ detail, onOpenReportQueue, onRecommendation, onGenerateRe
               })}
             </div>
             <div className="detail-actions inbox-primary-actions">
-              <button className="primary" disabled={!canAccept} onClick={() => onRecommendation({ action: "accept", importance, project_ids: selectedProjectIds })} type="button">保存到论文仓库</button>
-              <button onClick={() => onOpenReportQueue?.(paper.id)} title={`打开报告队列：${reportStatusLabel(report.status)}`} type="button">打开报告队列</button>
-              <button className="danger" onClick={() => onRecommendation({ action: "discard" })} type="button">遗弃</button>
+              <button className="primary" disabled={!canAccept} onClick={() => onRecommendation({ action: "accept", importance, project_ids: selectedProjectIds })} type="button">{t("inbox.actions.save")}</button>
+              <button onClick={() => onOpenReportQueue?.(paper.id)} title={t("inbox.actions.openReportTitle", { status: reportStatusLabel(report.status, t) })} type="button">{t("inbox.actions.openReport")}</button>
+              <button className="danger" onClick={() => onRecommendation({ action: "discard" })} type="button">{t("inbox.actions.discard")}</button>
             </div>
           </section>
         ) : null}
@@ -193,39 +191,39 @@ function PaperDetail({ detail, onOpenReportQueue, onRecommendation, onGenerateRe
         <section className="section inbox-content-section">
           <header className="inbox-section-heading">
             <div>
-              <span>推荐依据</span>
-              <h3>项目关联</h3>
+              <span>{t("inbox.sections.recommendationEvidence")}</span>
+              <h3>{t("inbox.sections.projectLinks")}</h3>
             </div>
           </header>
           <div className="evidence-list">
             {recommendations.length ? recommendations.map((recommendation) => (
               <article className="evidence" key={`${recommendation.project_id}-${recommendation.state}`}>
-                <strong>{recommendation.project_name} · {recommendation.relation_type} · {recommendation.state}</strong>
-                <p>{recommendation.reason || "暂无推荐理由。"}</p>
+                <strong>{recommendation.project_name} · {relationLabel(recommendation.relation_type, t)} · {workflowStateLabel(recommendation.state, t)}</strong>
+                <p>{recommendation.reason || t("inbox.noRecommendationReason")}</p>
                 {recommendation.obsidian_path ? <p className="muted">{recommendation.obsidian_path}</p> : null}
               </article>
-            )) : <p className="summary">暂无项目级推荐。</p>}
+            )) : <p className="summary">{t("inbox.noProjectRecommendations")}</p>}
           </div>
         </section>
 
         <section className="section inbox-content-section">
           <header className="inbox-section-heading">
             <div>
-              <span>深度阅读</span>
-              <h3>全文报告</h3>
+              <span>{t("inbox.sections.deepReading")}</span>
+              <h3>{t("inbox.sections.fullReport")}</h3>
             </div>
           </header>
           <div className={`report-state ${report.status || "missing"}`}>
-            <strong>{reportStatusLabel(report.status)}</strong>
+            <strong>{reportStatusLabel(report.status, t)}</strong>
             {report.error_message ? <p>{report.error_message}</p> : null}
             {report.model ? <p className="muted">{report.model_provider_id ? `${report.model_provider_id} · ` : ""}{report.model}</p> : null}
           </div>
           <div className="detail-actions">
             {report.status !== "done" && report.status !== "failed" ? (
-              <button disabled={reportBusy} onClick={() => onGenerateReport(false)} type="button">生成全文报告</button>
+              <button disabled={reportBusy} onClick={() => onGenerateReport(false)} type="button">{t("inbox.actions.generateReport")}</button>
             ) : null}
             {report.status === "done" || report.status === "failed" ? (
-              <button disabled={reportBusy} onClick={() => onGenerateReport(true)} type="button">重新生成</button>
+              <button disabled={reportBusy} onClick={() => onGenerateReport(true)} type="button">{t("inbox.actions.regenerate")}</button>
             ) : null}
           </div>
           {reportReady ? <LazyMarkdownReport markdown={report.report_markdown} /> : null}
@@ -234,13 +232,13 @@ function PaperDetail({ detail, onOpenReportQueue, onRecommendation, onGenerateRe
         {judgments.length ? (
           <section className="section inbox-content-section">
             <header className="inbox-section-heading">
-              <div><span>模型判断</span><h3>项目判定</h3></div>
+              <div><span>{t("inbox.sections.modelJudgment")}</span><h3>{t("inbox.sections.projectJudgment")}</h3></div>
             </header>
             <div className="evidence-list">
               {judgments.map((judgment) => (
                 <article className="evidence" key={`${judgment.project_id}-${judgment.relation_type}`}>
-                  <strong>{judgment.project_name} · {judgment.relation_type} · {fmtScore(judgment.usefulness_score)}</strong>
-                  <p>{judgment.reason || "No judgment reason."}</p>
+                  <strong>{judgment.project_name} · {relationLabel(judgment.relation_type, t)} · {fmtScore(judgment.usefulness_score)}</strong>
+                  <p>{judgment.reason || t("inbox.noJudgmentReason")}</p>
                   {judgment.missing_evidence ? <p className="muted">{judgment.missing_evidence}</p> : null}
                 </article>
               ))}
@@ -250,15 +248,18 @@ function PaperDetail({ detail, onOpenReportQueue, onRecommendation, onGenerateRe
 
         <section className="section inbox-content-section">
           <header className="inbox-section-heading">
-            <div><span>论文内容</span><h3>摘要</h3></div>
+            <div><span>{t("inbox.sections.paperContent")}</span><h3>{t("inbox.sections.abstract")}</h3></div>
           </header>
           <p className="summary">{paper.summary}</p>
         </section>
 
         <details className="section inbox-content-section inbox-collapsible-section">
           <summary className="inbox-section-heading inbox-collapsible-summary">
-            <div><span>检索线索</span><h3>匹配证据</h3></div>
-            <span className="inbox-collapse-control"><span>展开</span><i aria-hidden="true" /></span>
+            <div><span>{t("inbox.sections.retrievalClues")}</span><h3>{t("inbox.sections.matchEvidence")}</h3></div>
+            <span className="inbox-collapse-control">
+              <span data-collapse-label={t("common.collapse")}>{t("common.expand")}</span>
+              <i aria-hidden="true" />
+            </span>
           </summary>
           <div className="evidence-list inbox-retrieval-evidence">
             {evidence.length ? evidence.map((item, index) => (
@@ -266,15 +267,15 @@ function PaperDetail({ detail, onOpenReportQueue, onRecommendation, onGenerateRe
                 <strong>{item.note_title || item.note_path} · {fmtScore(item.score)}</strong>
                 {item.arxiv_text ? (
                   <>
-                    <p className="muted">Paper chunk {item.arxiv_chunk_index ?? ""}{item.arxiv_page_start ? ` · pages ${item.arxiv_page_start}-${item.arxiv_page_end || item.arxiv_page_start}` : ""}</p>
+                    <p className="muted">{t("inbox.evidence.paperChunk", { index: item.arxiv_chunk_index ?? "", pages: item.arxiv_page_start ? `${item.arxiv_page_start}-${item.arxiv_page_end || item.arxiv_page_start}` : "" })}</p>
                     <p>{String(item.arxiv_text).slice(0, 700)}</p>
                   </>
                 ) : null}
-                <p className="muted">Matched note chunk</p>
+                <p className="muted">{t("inbox.evidence.matchedNoteChunk")}</p>
                 <p>{item.text}</p>
                 <p className="muted">{(item.searchers || []).join(", ")}</p>
               </article>
-            )) : <p className="muted">No evidence chunks found.</p>}
+            )) : <p className="muted">{t("inbox.evidence.empty")}</p>}
           </div>
         </details>
       </div>
@@ -283,6 +284,7 @@ function PaperDetail({ detail, onOpenReportQueue, onRecommendation, onGenerateRe
 }
 
 export function InboxView({ notify = () => {}, onOpenReportQueue, onSelectPaper, selectedPaperId, setStatusMessage }) {
+  const { t } = useTranslation("papers");
   const cache = useApiCacheClient();
   const [activePaperId, setActivePaperId] = useState(null);
 
@@ -346,7 +348,7 @@ export function InboxView({ notify = () => {}, onOpenReportQueue, onSelectPaper,
       cache.markStale(["library", "list"]);
       cache.markStale(["projects"]);
       cache.markStale(cacheNamespace("artifact"));
-      const successMessage = payload.action === "discard" ? "已遗弃推荐" : "已保存到论文仓库";
+      const successMessage = payload.action === "discard" ? t("inbox.status.discarded") : t("inbox.status.saved");
       setStatusMessage(successMessage);
       notify(successMessage, { type: "success" });
     } catch (error) {
@@ -372,7 +374,7 @@ export function InboxView({ notify = () => {}, onOpenReportQueue, onSelectPaper,
         cache.markStale(["jobs", "history"]);
         cache.markStale(["paper-reports", "summary"]);
         cache.markStale(cacheNamespace("reader", "papers"));
-        setStatusMessage("全文报告已加入生成队列");
+        setStatusMessage(t("inbox.status.reportQueued"));
         return;
       }
       cache.setCache(["paper", "detail", String(activePaperId)], data);
@@ -387,7 +389,7 @@ export function InboxView({ notify = () => {}, onOpenReportQueue, onSelectPaper,
       cache.markStale(["paper-reports", "summary"]);
       cache.markStale(cacheNamespace("reader", "papers"));
       const nextReport = data.paper_report || {};
-      setStatusMessage(nextReport.status === "done" ? "全文报告已生成" : reportStatusLabel(nextReport.status));
+      setStatusMessage(nextReport.status === "done" ? t("reportStatus.done") : reportStatusLabel(nextReport.status, t));
     } catch (error) {
       setStatusMessage(error.message);
       await detailQuery.refresh({ force: true }).catch(() => {});
@@ -398,37 +400,37 @@ export function InboxView({ notify = () => {}, onOpenReportQueue, onSelectPaper,
     <section className="view inbox-view vision-inbox">
       <header className="vision-topbar inbox-topbar">
         <div className="vision-brand">
-          <span>论文工作区</span>
-          <h1>待判断</h1>
+          <span>{t("common.workspace")}</span>
+          <h1>{t("inbox.title")}</h1>
         </div>
         <div className="vision-top-actions">
           <span className={`vision-live-state ${papers.length ? "queued" : "ready"}`}>
             <i aria-hidden="true" />
-            {inboxLoading ? "读取队列" : papers.length ? `${papers.length} 篇待处理` : "队列已清空"}
+            {inboxLoading ? t("inbox.live.loading") : papers.length ? t("inbox.live.pending", { count: papers.length }) : t("inbox.live.empty")}
           </span>
           <RefreshButton className="vision-refresh" busy={refreshBusy} onClick={() => refresh().catch((error) => setStatusMessage(error.message))} />
         </div>
       </header>
 
-      <section className="inbox-summary-strip" aria-label="待判断概览">
-        <div><span>候选论文</span><strong>{inboxLoading ? "—" : papers.length}</strong><p>等待人工判断</p></div>
-        <div><span>报告就绪</span><strong>{inboxLoading ? "—" : reportReadyCount}</strong><p>可直接深度阅读</p></div>
-        <div><span>关联项目</span><strong>{inboxLoading ? "—" : linkedProjectCount}</strong><p>本轮覆盖范围</p></div>
+      <section className="inbox-summary-strip" aria-label={t("inbox.summary.aria")}>
+        <div><span>{t("inbox.summary.candidates")}</span><strong>{inboxLoading ? "—" : papers.length}</strong><p>{t("inbox.summary.awaiting")}</p></div>
+        <div><span>{t("inbox.summary.ready")}</span><strong>{inboxLoading ? "—" : reportReadyCount}</strong><p>{t("inbox.summary.deepRead")}</p></div>
+        <div><span>{t("inbox.summary.projects")}</span><strong>{inboxLoading ? "—" : linkedProjectCount}</strong><p>{t("inbox.summary.coverage")}</p></div>
       </section>
 
       <main className="inbox-workspace-grid">
-        <section className="inbox-panel" aria-label="论文 inbox">
+        <section className="inbox-panel" aria-label={t("inbox.aria.list")}>
           <header className="inbox-list-heading">
           <div>
-              <span>决策队列</span>
-              <h2>候选论文</h2>
-              <p>{inboxLoading ? "正在读取待判断论文" : "按匹配情况逐篇完成取舍"}</p>
+              <span>{t("inbox.list.eyebrow")}</span>
+              <h2>{t("inbox.list.title")}</h2>
+              <p>{inboxLoading ? t("inbox.list.loading") : t("inbox.list.description")}</p>
           </div>
             <em>{inboxLoading ? "…" : papers.length}</em>
           </header>
           <div className="paper-list inbox-paper-list">
           {inboxLoading ? (
-            <WorkspacePaneLoader rows={6} title="读取待判断论文" variant="list" />
+            <WorkspacePaneLoader rows={6} title={t("inbox.list.loader")} variant="list" />
           ) : (
             <PaperList
               papers={papers}
@@ -445,11 +447,11 @@ export function InboxView({ notify = () => {}, onOpenReportQueue, onSelectPaper,
           </div>
         </section>
 
-        <section className="detail-panel inbox-detail-panel" aria-label="论文详情">
+        <section className="detail-panel inbox-detail-panel" aria-label={t("inbox.aria.detail")}>
         {detailPanelLoading ? (
           <WorkspacePaneLoader
-            description={detailLoading ? "正在读取所选论文的摘要、项目判定和全文报告。" : "正在读取待判断论文列表和首篇论文详情。"}
-            title={detailLoading ? "打开论文详情" : "读取论文详情"}
+            description={detailLoading ? t("inbox.detail.loadingSelected") : t("inbox.detail.loadingFirst")}
+            title={detailLoading ? t("inbox.detail.opening") : t("inbox.detail.loading")}
             variant="detail"
           />
         ) : (

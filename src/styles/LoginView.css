@@ -32,6 +32,10 @@
   border-bottom: 1px solid var(--line-soft);
 }
 
+.login-brand > .language-control {
+  margin-left: auto;
+}
+
 .login-brand > div > strong,
 .login-brand > div > span {
   display: block;

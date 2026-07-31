@@ -1,7 +1,10 @@
+import { useTranslation } from "react-i18next";
 import "../styles/RefreshButton.css";
 
-export function RefreshButton({ busy = false, className = "", disabled = false, label = "刷新", onClick, title }) {
-  const accessibleLabel = busy ? `${label}中` : label;
+export function RefreshButton({ busy = false, className = "", disabled = false, label, onClick, title }) {
+  const { t } = useTranslation("common");
+  const resolvedLabel = label === undefined ? t("actions.refresh") : label;
+  const accessibleLabel = busy ? t("actions.inProgress", { action: resolvedLabel, defaultValue: `${resolvedLabel}…` }) : resolvedLabel;
   const classes = ["icon-button", className].filter(Boolean).join(" ");
 
   return (

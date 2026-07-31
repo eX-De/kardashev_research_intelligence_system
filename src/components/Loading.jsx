@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import "../styles/Loading.css";
 
 const DEFAULT_SKELETON_WIDTHS = ["92%", "78%", "86%", "64%"];
@@ -6,11 +7,13 @@ function classes(...items) {
   return items.filter(Boolean).join(" ");
 }
 
-export function InlineLoader({ className = "", compact = false, label = "加载中" }) {
+export function InlineLoader({ className = "", compact = false, label }) {
+  const { t } = useTranslation("common");
+  const resolvedLabel = label === undefined ? t("loading.default") : label;
   return (
     <span className={classes("inline-loader", compact && "compact", className)} role="status" aria-live="polite">
       <span className="loader-dot" aria-hidden="true" />
-      {label ? <span>{label}</span> : null}
+      {resolvedLabel ? <span>{resolvedLabel}</span> : null}
     </span>
   );
 }
@@ -32,12 +35,14 @@ export function LoadingPanel({
   compact = false,
   description = "",
   rows = 4,
-  title = "加载中"
+  title
 }) {
+  const { t } = useTranslation("common");
+  const resolvedTitle = title === undefined ? t("loading.default") : title;
   return (
     <div className={classes("loading-panel", compact && "compact", className)} role="status" aria-live="polite">
       <div className="loading-panel-head">
-        <InlineLoader label={title} />
+        <InlineLoader label={resolvedTitle} />
         {description ? <p>{description}</p> : null}
       </div>
       <SkeletonBlock lines={rows} />
@@ -45,21 +50,27 @@ export function LoadingPanel({
   );
 }
 
-export function PageLoader({ className = "", description = "正在读取数据。", title = "加载中" }) {
+export function PageLoader({ className = "", description, title }) {
+  const { t } = useTranslation("common");
   return (
     <section className={classes("view page-loader", className)}>
-      <LoadingPanel description={description} rows={5} title={title} />
+      <LoadingPanel
+        description={description === undefined ? t("loading.dataDescription") : description}
+        rows={5}
+        title={title === undefined ? t("loading.default") : title}
+      />
     </section>
   );
 }
 
 export function MarkdownReportLoader() {
+  const { t } = useTranslation("common");
   return (
     <LoadingPanel
       className="paper-report markdown-report markdown-report-loading"
-      description="正在载入报告渲染模块。"
+      description={t("loading.reportDescription")}
       rows={3}
-      title="报告渲染中"
+      title={t("loading.reportTitle")}
     />
   );
 }

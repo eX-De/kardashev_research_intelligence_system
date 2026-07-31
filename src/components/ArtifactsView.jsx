@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 
 import { api, fmtDate } from "../lib/dashboard.js";
 import { cacheNamespace, useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
@@ -7,29 +8,14 @@ import { friendlyObsidianMessage, postObsidianJson, useObsidianCapability } from
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
 import { WorkspacePaneLoader } from "./WorkspacePaneLoader.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
-import { WORKSPACE_PAGE_SIZE_OPTIONS, WorkspacePagination } from "./WorkspacePagination.jsx";
+import { useWorkspacePageSizeOptions, WorkspacePagination } from "./WorkspacePagination.jsx";
 import { WorkspaceSelect } from "./WorkspaceSelect.jsx";
 import "../styles/ArtifactsView.css";
 
-const TYPES = [
-  ["", "全部类型"],
-  ["daily_report", "日报"],
-  ["experiment_report", "实验报告"],
-  ["paper_report", "论文报告"],
-  ["project_index", "项目索引"],
-  ["project_digest", "项目摘要"],
-  ["literature_review", "综述"],
-  ["reading_note", "阅读笔记"]
-];
+const TYPE_CODES = ["", "daily_report", "experiment_report", "paper_report", "project_index", "project_digest", "literature_review", "reading_note"];
 
-const SCOPES = [
-  ["", "全部范围"],
-  ["system", "系统"],
-  ["project", "项目"],
-  ["paper", "论文"]
-];
+const SCOPE_CODES = ["", "system", "project", "paper"];
 
-const TYPE_LABELS = Object.fromEntries(TYPES.filter(([value]) => value));
 const TYPE_TONES = {
   daily_report: "green",
   experiment_report: "blue",
@@ -39,25 +25,9 @@ const TYPE_TONES = {
   project_index: "teal",
   reading_note: "rose"
 };
-const SCOPE_LABELS = {
-  paper: "论文",
-  project: "项目",
-  system: "系统"
-};
-const STATUS_LABELS = {
-  active: "可用",
-  done: "完成",
-  draft: "草稿",
-  failed: "失败",
-  pending: "等待",
-  ready: "就绪",
-  removed: "已移除",
-  synced: "已同步"
-};
-
-function labelFor(labels, value, fallback = "未知") {
+function translatedLabel(t, group, value, fallbackKey = "status.unknown") {
   const key = String(value || "").trim();
-  return key ? labels[key] || key : fallback;
+  return key ? t(`${group}.${key}`, { defaultValue: key }) : t(fallbackKey);
 }
 
 function safeToken(value, fallback = "unknown") {
@@ -65,10 +35,8 @@ function safeToken(value, fallback = "unknown") {
   return token || fallback;
 }
 
-function relationLabel(relationType) {
-  if (relationType === "direct") return "直接相关";
-  if (relationType === "indirect") return "间接相关";
-  return relationType || "可能相关";
+function relationLabel(t, relationType) {
+  return relationType ? t(`relation.${relationType}`, { defaultValue: relationType }) : t("relation.possible");
 }
 
 function sortArtifactsByUpdatedAt(left, right) {
@@ -87,6 +55,10 @@ function patchArtifactItems(items, artifact) {
 }
 
 export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusMessage }) {
+  const { t, i18n } = useTranslation("artifacts");
+  const types = useMemo(() => TYPE_CODES.map((code) => [code, t(`type.${code || "all"}`)]), [t]);
+  const scopes = useMemo(() => SCOPE_CODES.map((code) => [code, t(`scope.${code || "all"}`)]), [t]);
+  const pageSizeOptions = useWorkspacePageSizeOptions();
   const [activeId, setActiveId] = useState(null);
   const [artifactType, setArtifactType] = useState("");
   const [scopeType, setScopeType] = useState("");
@@ -145,8 +117,8 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
   );
   const detailPanelLoading = listLoading || detailLoading;
   const refreshBusy = listQuery.loading || listQuery.refreshing || detailQuery.refreshing;
-  const selectedTypeLabel = artifactType ? labelFor(TYPE_LABELS, artifactType) : "全部类型";
-  const selectedScopeLabel = scopeType ? labelFor(SCOPE_LABELS, scopeType) : "全部范围";
+  const selectedTypeLabel = artifactType ? translatedLabel(t, "type", artifactType) : t("type.all");
+  const selectedScopeLabel = scopeType ? translatedLabel(t, "scope", scopeType) : t("scope.all");
   const activeFilterCount = [artifactType, scopeType].filter(Boolean).length;
   const activeFilterLabels = [
     artifactType ? selectedTypeLabel : "",
@@ -229,7 +201,7 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
       if (data?.queued) {
         cache.markStale(["jobs", "summary"]);
         cache.markStale(["jobs", "history"]);
-        setStatusMessage("Artifact export queued");
+        setStatusMessage(t("messages.exportQueued"));
         return;
       }
       if (data.artifact?.id) {
@@ -241,9 +213,9 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
       }
       cache.markStale(["artifacts"]);
       cache.markStale(["health"]);
-      setStatusMessage(`已导出 ${data.export?.path || "artifact"}`);
+      setStatusMessage(t("messages.exported", { path: data.export?.path || "artifact" }));
     } catch (error) {
-      setStatusMessage(friendlyObsidianMessage(error));
+      setStatusMessage(friendlyObsidianMessage(error, t));
     } finally {
       setBusy(false);
     }
@@ -253,11 +225,11 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
     <section className="view artifacts-view artifacts-workspace vision-library vision-artifacts">
       <header className="vision-topbar artifacts-topbar">
         <div className="vision-brand">
-          <span>研究工作区</span>
-          <h1>研究产物</h1>
+          <span>{t("header.eyebrow")}</span>
+          <h1>{t("header.title")}</h1>
         </div>
         <div className="vision-top-actions">
-          <span className="vision-live-state ready"><i aria-hidden="true" />{listLoading ? "读取产物" : `${total} 个产物`}</span>
+          <span className="vision-live-state ready"><i aria-hidden="true" />{listLoading ? t("header.loading") : t("header.count", { count: total })}</span>
           <RefreshButton className="vision-refresh" busy={refreshBusy} onClick={refresh} />
         </div>
       </header>
@@ -266,8 +238,8 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
         <section className="library-list-panel paper-library-list-panel artifacts-list-panel">
           <header className="paper-library-header library-list-heading artifacts-list-heading">
             <div>
-              <span className="paper-library-eyebrow">产物目录</span>
-              <h2>产物列表</h2>
+              <span className="paper-library-eyebrow">{t("list.eyebrow")}</span>
+              <h2>{t("list.title")}</h2>
             </div>
             <div className="library-list-heading-actions">
               <em>{listLoading ? "…" : total}</em>
@@ -287,11 +259,11 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
               <div className="paper-active-filters">
                 {activeFilterLabels.length
                   ? activeFilterLabels.map((label) => <span key={label}>{label}</span>)
-                  : <span>全部产物</span>}
+                  : <span>{t("list.all")}</span>}
               </div>
               <div className="artifact-filter-summary-actions">
                 {activeFilterCount ? (
-                  <button className="filter-clear-button" onClick={clearFilters} type="button">清除筛选</button>
+                  <button className="filter-clear-button" onClick={clearFilters} type="button">{t("list.clear")}</button>
                 ) : null}
                 <button
                   aria-controls="artifact-filter-panel"
@@ -300,7 +272,7 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
                   onClick={() => setFiltersOpen((current) => !current)}
                   type="button"
                 >
-                  {filtersOpen ? "收起筛选" : `筛选${activeFilterCount ? ` (${activeFilterCount})` : ""}`}
+                  {filtersOpen ? t("list.collapse") : `${t("list.filter")}${activeFilterCount ? ` (${activeFilterCount})` : ""}`}
                 </button>
               </div>
             </div>
@@ -310,25 +282,25 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
               id="artifact-filter-panel"
               inert={!filtersOpen}
             >
-              <div className="library-toolbar paper-library-toolbar artifact-filter-bar" aria-label="产物筛选">
+              <div className="library-toolbar paper-library-toolbar artifact-filter-bar" aria-label={t("list.filtersAria")}>
                 <div className="library-filter-control paper-filter-control artifact-filter-control">
-                  <span>类型</span>
-                  <WorkspaceSelect ariaLabel="筛选产物类型" onChange={(value) => updateFilter(setArtifactType, value)} options={TYPES} value={artifactType} />
+                  <span>{t("list.type")}</span>
+                  <WorkspaceSelect ariaLabel={t("list.typeAria")} onChange={(value) => updateFilter(setArtifactType, value)} options={types} value={artifactType} />
                 </div>
                 <div className="library-filter-control paper-filter-control artifact-filter-control">
-                  <span>范围</span>
-                  <WorkspaceSelect ariaLabel="筛选产物范围" onChange={(value) => updateFilter(setScopeType, value)} options={SCOPES} value={scopeType} />
+                  <span>{t("list.scope")}</span>
+                  <WorkspaceSelect ariaLabel={t("list.scopeAria")} onChange={(value) => updateFilter(setScopeType, value)} options={scopes} value={scopeType} />
                 </div>
                 <div className="library-filter-control paper-filter-control artifact-filter-control">
-                  <span>每页</span>
+                  <span>{t("list.pageSize")}</span>
                   <WorkspaceSelect
-                    ariaLabel="每页产物数量"
+                    ariaLabel={t("list.pageSizeAria")}
                     onChange={(value) => {
                       selectFirstFromNextList.current = true;
                       setPageSize(Number(value));
                       setPage(1);
                     }}
-                    options={WORKSPACE_PAGE_SIZE_OPTIONS}
+                    options={pageSizeOptions}
                     value={String(pageSize)}
                   />
                 </div>
@@ -338,11 +310,11 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
 
           <div className="library-list paper-library-list artifacts-list">
             {listLoading ? (
-              <WorkspacePaneLoader rows={6} title="读取产物列表" variant="list" />
+              <WorkspacePaneLoader rows={6} title={t("list.loading")} variant="list" />
             ) : items.length ? items.map((item) => {
-              const typeLabel = labelFor(TYPE_LABELS, item.artifact_type);
-              const scopeLabel = labelFor(SCOPE_LABELS, item.scope_type);
-              const statusLabel = labelFor(STATUS_LABELS, item.status, "未知状态");
+              const typeLabel = translatedLabel(t, "type", item.artifact_type);
+              const scopeLabel = translatedLabel(t, "scope", item.scope_type);
+              const statusLabel = translatedLabel(t, "status", item.status);
               const typeTone = TYPE_TONES[item.artifact_type] || "slate";
               const scopeText = `${scopeLabel}${item.scope_id ? ` #${item.scope_id}` : ""}`;
               return (
@@ -364,20 +336,20 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
                   </div>
                   <h2>{item.title}</h2>
                   <div className="inbox-project-match artifact-card-context">
-                    <strong>产物范围</strong>
-                    <div><span>{scopeText}</span><span>更新于 {fmtDate(item.updated_at)}</span></div>
+                    <strong>{t("list.artifactScope")}</strong>
+                    <div><span>{scopeText}</span><span>{t("list.updatedAt", { date: fmtDate(item.updated_at, i18n.resolvedLanguage) })}</span></div>
                   </div>
                   <div className="inbox-paper-meta artifact-card-meta">
                     <span>Artifact #{item.id}</span>
                     {item.model ? <span>{item.model}</span> : null}
-                    <span>{item.created_at ? `创建于 ${fmtDate(item.created_at)}` : "未记录创建时间"}</span>
+                    <span>{item.created_at ? t("list.createdAt", { date: fmtDate(item.created_at, i18n.resolvedLanguage) }) : t("list.noCreatedAt")}</span>
                   </div>
                 </article>
               );
             }) : (
               <div className="artifact-empty-state">
-                <strong>暂无产物</strong>
-                <p>{artifactType || scopeType ? "当前筛选没有匹配项。" : "系统生成的 Markdown 产物会显示在这里。"}</p>
+                <strong>{t("list.empty")}</strong>
+                <p>{t(artifactType || scopeType ? "list.emptyFiltered" : "list.emptyHint")}</p>
               </div>
             )}
           </div>
@@ -394,8 +366,8 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
           {detailPanelLoading ? (
             <WorkspacePaneLoader
               className="artifact-detail-loading"
-              description={detailLoading ? "正在读取所选产物的正文、状态和同步信息。" : "正在读取产物列表和首个产物正文。"}
-              title={detailLoading ? "打开产物详情" : "读取产物详情"}
+              description={t(detailLoading ? "detail.loadingSelected" : "detail.loadingFirst")}
+              title={t(detailLoading ? "detail.opening" : "detail.loading")}
               variant="detail"
             />
           ) : detail ? (
@@ -403,13 +375,13 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
               <div className="detail-main library-detail-main">
                 <header className="detail-title inbox-detail-title library-detail-title artifact-detail-title">
                   <div className="library-detail-hero-copy">
-                    <span className="library-detail-eyebrow">研究产物 · Artifact #{detail.id}</span>
+                    <span className="library-detail-eyebrow">{t("detail.eyebrow", { id: detail.id })}</span>
                     <h2>{detail.title}</h2>
-                    <p className="library-detail-authors">{labelFor(TYPE_LABELS, detail.artifact_type)} · 更新于 {fmtDate(detail.updated_at)}</p>
+                    <p className="library-detail-authors">{t("detail.updatedAt", { type: translatedLabel(t, "type", detail.artifact_type), date: fmtDate(detail.updated_at, i18n.resolvedLanguage) })}</p>
                     <div className="inbox-detail-meta library-detail-meta artifact-meta-row">
-                      <span className={`artifact-pill artifact-type-${TYPE_TONES[detail.artifact_type] || "slate"}`}>{labelFor(TYPE_LABELS, detail.artifact_type)}</span>
-                      <span className="artifact-pill artifact-scope-pill">{labelFor(SCOPE_LABELS, detail.scope_type)}{detail.scope_id ? ` #${detail.scope_id}` : ""}</span>
-                      <span className={`artifact-pill artifact-status-${safeToken(detail.status)}`}>{labelFor(STATUS_LABELS, detail.status, "未知状态")}</span>
+                      <span className={`artifact-pill artifact-type-${TYPE_TONES[detail.artifact_type] || "slate"}`}>{translatedLabel(t, "type", detail.artifact_type)}</span>
+                      <span className="artifact-pill artifact-scope-pill">{translatedLabel(t, "scope", detail.scope_type)}{detail.scope_id ? ` #${detail.scope_id}` : ""}</span>
+                      <span className={`artifact-pill artifact-status-${safeToken(detail.status)}`}>{translatedLabel(t, "status", detail.status)}</span>
                       <button
                         className="library-hero-action"
                         disabled={busy || !obsidianCapability.available}
@@ -417,25 +389,25 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
                         title={!obsidianCapability.available ? obsidianCapability.disabledReason : undefined}
                         type="button"
                       >
-                        {busy ? "导出中" : "导出到 Obsidian"}
+                        {t(busy ? "detail.exporting" : "detail.exportObsidian")}
                       </button>
                     </div>
                     {!obsidianCapability.available ? <p className="capability-hint artifact-capability-hint">{obsidianCapability.disabledReason}</p> : null}
                   </div>
                 </header>
 
-                <section className="library-detail-stat-grid artifact-detail-stat-grid" aria-label="产物关键数据">
-                  <div><span>产物类型</span><strong>{labelFor(TYPE_LABELS, detail.artifact_type)}</strong><p>内容分类</p></div>
-                  <div><span>归属范围</span><strong>{labelFor(SCOPE_LABELS, detail.scope_type)}</strong><p>{detail.scope_id ? `对象 #${detail.scope_id}` : "系统级"}</p></div>
-                  <div><span>当前状态</span><strong>{labelFor(STATUS_LABELS, detail.status, "未知")}</strong><p>产物生命周期</p></div>
-                  <div><span>生成模型</span><strong>{detail.model || "—"}</strong><p>{detail.model_provider_id || "未记录提供方"}</p></div>
+                <section className="library-detail-stat-grid artifact-detail-stat-grid" aria-label={t("detail.statsAria")}>
+                  <div><span>{t("detail.type")}</span><strong>{translatedLabel(t, "type", detail.artifact_type)}</strong><p>{t("detail.contentCategory")}</p></div>
+                  <div><span>{t("detail.scope")}</span><strong>{translatedLabel(t, "scope", detail.scope_type)}</strong><p>{detail.scope_id ? t("detail.object", { id: detail.scope_id }) : t("detail.systemLevel")}</p></div>
+                  <div><span>{t("detail.status")}</span><strong>{translatedLabel(t, "status", detail.status)}</strong><p>{t("detail.lifecycle")}</p></div>
+                  <div><span>{t("detail.model")}</span><strong>{detail.model || "—"}</strong><p>{detail.model_provider_id || t("detail.providerMissing")}</p></div>
                 </section>
 
                 {detail.artifact_type === "daily_report" ? (
                   <section className="library-content-card artifact-related-papers-card">
                     <header className="library-section-heading">
-                      <div><span>日报关联</span><h3>关联论文</h3></div>
-                      <em>{relatedPapers.length ? `${relatedPapers.length} 篇` : "无关联"}</em>
+                      <div><span>{t("detail.dailyRelation")}</span><h3>{t("detail.relatedPapers")}</h3></div>
+                      <em>{relatedPapers.length ? t("detail.paperCount", { count: relatedPapers.length }) : t("detail.none")}</em>
                     </header>
                     {relatedPapers.length ? (
                       <div className="artifact-related-paper-list">
@@ -451,14 +423,14 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
                               <Link className="artifact-related-paper-title" to={paperPath}>
                                 <span>{paper.arxiv_id || "arXiv"}</span>
                                 <strong>{paper.title}</strong>
-                                <i aria-hidden="true">{pending ? "打开待判断 →" : "打开论文仓库 →"}</i>
+                                <i aria-hidden="true">{t(pending ? "detail.openPending" : "detail.openLibrary")}</i>
                               </Link>
                               <div className="artifact-related-paper-meta">
                                 <span className={`artifact-related-paper-state ${pending ? "pending" : "assigned"}`}>
-                                  {pending ? "待判断" : "已分配"}
+                                  {t(pending ? "detail.pending" : "detail.assigned")}
                                 </span>
-                                <span>{relationLabel(paper.relation_type)}</span>
-                                {paper.published_at ? <span>{fmtDate(paper.published_at)}</span> : null}
+                                <span>{relationLabel(t, paper.relation_type)}</span>
+                                {paper.published_at ? <span>{fmtDate(paper.published_at, i18n.resolvedLanguage)}</span> : null}
                                 {(paper.projects || []).map((project) => (
                                   <Link key={project.project_id} to={`/projects/${encodeURIComponent(String(project.project_id))}`}>
                                     {project.project_name}
@@ -473,8 +445,8 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
                     ) : (
                       <p className="artifact-related-paper-empty">
                         {dailyCandidateCount
-                          ? "本日报当前没有待判断或已分配的关联论文。"
-                          : "本日报没有关联的项目候选论文。"}
+                          ? t("detail.noRelatedCurrent")
+                          : t("detail.noCandidates")}
                       </p>
                     )}
                   </section>
@@ -483,16 +455,16 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
                 <div className="library-detail-content artifact-detail-content">
                   <section className="section inbox-content-section library-content-card artifact-markdown-card">
                     <header className="library-section-heading">
-                      <div><span>产物正文</span><h3>Markdown 内容</h3></div>
-                      <em>{detail.content_markdown ? "READY" : "EMPTY"}</em>
+                      <div><span>{t("detail.body")}</span><h3>{t("detail.markdown")}</h3></div>
+                      <em>{detail.content_markdown ? t("status.ready") : t("detail.noMarkdown")}</em>
                     </header>
                     <div className="artifact-reader-content">
                       {detail.content_markdown ? (
                         <LazyMarkdownReport markdown={detail.content_markdown} />
                       ) : (
                         <div className="artifact-empty-state artifact-reader-empty">
-                          <strong>暂无 Markdown 正文</strong>
-                          <p>该产物当前没有可阅读正文。</p>
+                          <strong>{t("detail.noMarkdown")}</strong>
+                          <p>{t("detail.noMarkdownHint")}</p>
                         </div>
                       )}
                     </div>
@@ -502,8 +474,8 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
             </article>
           ) : (
             <div className="empty-detail paper-empty-detail artifact-empty-detail">
-              <h2>选择一个产物</h2>
-              <p>Markdown 正文、状态和生成信息会显示在这里。</p>
+              <h2>{t("detail.select")}</h2>
+              <p>{t("detail.selectHint")}</p>
             </div>
           )}
         </section>

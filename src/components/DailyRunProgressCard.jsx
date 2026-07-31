@@ -1,7 +1,9 @@
+import { useTranslation } from "react-i18next";
 import { fmtDate } from "../lib/dashboard.js";
 import "../styles/DailyRunProgressCard.css";
 
 export function DailyRunProgressCard({ item }) {
+  const { t, i18n } = useTranslation("dashboard");
   const progress = item?.progress || {};
   const steps = progress.steps || [];
   const total = Number(progress.total || steps.length || 1);
@@ -12,7 +14,13 @@ export function DailyRunProgressCard({ item }) {
     ? runningIndex
     : Math.max(0, Math.min(steps.length - 1, completed));
   const activeStep = steps[activeIndex] || null;
-  const current = progress.current_label || activeStep?.label || "准备中";
+  const stageLabel = (step) => {
+    const key = step?.key;
+    return key && t(`progress.stages.${key}`, { defaultValue: "" }) || step?.label || t("progress.preparing");
+  };
+  const current = progress.current_key
+    ? t(`progress.stages.${progress.current_key}`, { defaultValue: progress.current_label || stageLabel(activeStep) })
+    : progress.current_label || stageLabel(activeStep);
   const currentKey = progress.current_key || activeStep?.key || current;
   const stageTotal = Math.max(total, steps.length, 1);
   const stageNumber = steps.length ? activeIndex + 1 : Math.min(stageTotal, completed + 1);
@@ -28,19 +36,19 @@ export function DailyRunProgressCard({ item }) {
   const latestSummaryStep = [...steps].reverse().find((step) => step.summary);
 
   const statusLabel = (status) => {
-    if (status === "completed") return "已完成";
-    if (status === "running") return "进行中";
-    if (status === "failed") return "失败";
-    return "等待中";
+    if (status === "completed") return t("progress.completed");
+    if (status === "running") return t("progress.running");
+    if (status === "failed") return t("progress.failed");
+    return t("progress.pending");
   };
 
   return (
     <article className="vision-progress">
       <div className="vision-progress-stage" key={currentKey} aria-live="polite">
         <div className="vision-progress-stage-copy">
-          <span className="vision-progress-kicker">STAGE {String(stageNumber).padStart(2, "0")} / {String(stageTotal).padStart(2, "0")}</span>
+          <span className="vision-progress-kicker">{t("progress.stage")} {String(stageNumber).padStart(2, "0")} / {String(stageTotal).padStart(2, "0")}</span>
           <strong>{current}</strong>
-          <p>{completed} 个阶段已完成{startedAt ? ` · 开始于 ${fmtDate(startedAt)}` : ""}</p>
+          <p>{t("progress.completedSummary", { count: completed })}{startedAt ? ` · ${t("progress.startedAt", { date: fmtDate(startedAt, i18n.resolvedLanguage) })}` : ""}</p>
         </div>
         <div className="vision-progress-value" aria-hidden="true">
           <strong>{percent}</strong><span>%</span>
@@ -50,7 +58,7 @@ export function DailyRunProgressCard({ item }) {
       <div
         className="vision-progress-bar"
         role="progressbar"
-        aria-label="每日流程进度"
+        aria-label={t("progress.aria")}
         aria-valuemin="0"
         aria-valuemax="100"
         aria-valuenow={percent}
@@ -63,16 +71,16 @@ export function DailyRunProgressCard({ item }) {
           className="vision-stage-track"
           style={{ gridTemplateColumns: `repeat(${steps.length}, minmax(0, 1fr))` }}
           role="list"
-          aria-label="每日流程阶段"
+          aria-label={t("progress.stagesAria")}
         >
           {steps.map((step) => (
             <span
               className={`vision-stage-segment ${step.status || "pending"}`}
               key={step.key || step.label}
               role="listitem"
-              aria-label={`${step.label}：${statusLabel(step.status)}`}
+              aria-label={t("progress.stageAria", { stage: stageLabel(step), status: statusLabel(step.status) })}
               aria-current={step.status === "running" ? "step" : undefined}
-              title={`${step.label} · ${statusLabel(step.status)}`}
+              title={`${stageLabel(step)} · ${statusLabel(step.status)}`}
             />
           ))}
         </div>
@@ -81,14 +89,14 @@ export function DailyRunProgressCard({ item }) {
       {cacheProgress && progress.current_key === "cache_text" ? (
         <div className="vision-cache-progress">
           <div className="vision-cache-copy">
-            <span>全文缓存</span>
+            <span>{t("progress.cache")}</span>
             <strong>{cacheCurrent}<small> / {cacheTotal}</small></strong>
           </div>
           <div className="vision-cache-meter">
-            <div className="vision-progress-bar" role="progressbar" aria-label="PDF/TXT 缓存进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow={cachePercent}>
+            <div className="vision-progress-bar" role="progressbar" aria-label={t("progress.cacheAria")} aria-valuemin="0" aria-valuemax="100" aria-valuenow={cachePercent}>
               <span style={{ width: `${cachePercent}%` }} />
             </div>
-            <p>PDF {cacheProgress.pdfs_downloaded || 0} · TXT {cacheProgress.texts_extracted || 0} · 失败 {cacheProgress.texts_failed || 0}</p>
+            <p>{t("progress.cacheStats", { pdf: cacheProgress.pdfs_downloaded || 0, txt: cacheProgress.texts_extracted || 0, failed: cacheProgress.texts_failed || 0 })}</p>
           </div>
           {cacheProgress.current_arxiv_id ? <span className="vision-cache-current">{cacheProgress.current_arxiv_id}</span> : null}
         </div>
@@ -97,21 +105,21 @@ export function DailyRunProgressCard({ item }) {
       {judgmentProgress && progress.current_key === "judge_project_papers" ? (
         <div className="vision-cache-progress">
           <div className="vision-cache-copy">
-            <span>项目级判定</span>
+            <span>{t("progress.judgment")}</span>
             <strong>{judgmentCompleted}<small> / {judgmentTotal}</small></strong>
           </div>
           <div className="vision-cache-meter">
-            <div className="vision-progress-bar" role="progressbar" aria-label="项目级判定进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow={judgmentPercent}>
+            <div className="vision-progress-bar" role="progressbar" aria-label={t("progress.judgmentAria")} aria-valuemin="0" aria-valuemax="100" aria-valuenow={judgmentPercent}>
               <span style={{ width: `${judgmentPercent}%` }} />
             </div>
-            <p>并发 {judgmentProgress.concurrency || 0} · 已写入 {judgmentProgress.created || 0} · 已过滤 {judgmentProgress.filtered || 0} · 跳过 {judgmentProgress.skipped || 0}</p>
+            <p>{t("progress.judgmentStats", { concurrency: judgmentProgress.concurrency || 0, created: judgmentProgress.created || 0, filtered: judgmentProgress.filtered || 0, skipped: judgmentProgress.skipped || 0 })}</p>
           </div>
         </div>
       ) : null}
 
       {latestSummaryStep ? (
         <p className="vision-progress-summary">
-          <span>{latestSummaryStep.label}</span>{latestSummaryStep.summary}
+          <span>{stageLabel(latestSummaryStep)}</span>{latestSummaryStep.summary}
         </p>
       ) : null}
     </article>

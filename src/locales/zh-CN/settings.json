@@ -1,0 +1,271 @@
+{
+  "pages": {
+    "overview": { "eyebrow": "系统工作区", "title": "设置中心" },
+    "daily": { "eyebrow": "自动化工作区", "title": "每日任务" },
+    "data": { "eyebrow": "数据工作区", "title": "数据与存储" },
+    "models": { "eyebrow": "模型工作区", "title": "模型与路由" }
+  },
+  "entries": {
+    "ariaLabel": "设置二级页面",
+    "open": "进入设置",
+    "daily": { "label": "每日任务", "description": "配置调度、论文抓取、检索推荐与任务恢复。" },
+    "data": { "label": "数据与存储", "description": "管理 Obsidian、知识库范围与论文存储目录。" },
+    "models": { "label": "模型与路由", "description": "维护 Provider，并为不同研究任务分配模型。" }
+  },
+  "about": {
+    "eyebrow": "项目资源",
+    "badge": "开源项目",
+    "title": "项目资源",
+    "description": "KRIS 源码、容器镜像与配套 Agent。",
+    "links": {
+      "krisGithub": "查看主项目源码、Issue 与版本发布记录",
+      "dockerHub": "获取最新容器镜像与历史版本标签",
+      "agentGithub": "查看配套 Agent 的安装与使用说明"
+    }
+  },
+  "health": {
+    "checking": "{{label}} 正在检查",
+    "providers": "{{count}} 个 Provider",
+    "providers_other": "{{count}} 个 Provider",
+    "notConfigured": "未配置",
+    "ready": "服务就绪",
+    "needsConfiguration": "需要配置",
+    "syncing": "同步状态"
+  },
+  "overview": {
+    "foundation": "运行基础",
+    "title": "连接与服务",
+    "description": "数据库、知识库集成和模型服务的即时状态。",
+    "allReady": "ALL SYSTEMS READY",
+    "actionNeeded": "ACTION NEEDED",
+    "syncing": "SYNCING"
+  },
+  "actions": {
+    "refreshStatus": "刷新状态",
+    "backToOverview": "返回设置概览",
+    "saving": "保存中",
+    "saveNow": "立即保存"
+  },
+  "saveStatus": {
+    "idle": "未修改",
+    "dirty": "保存中",
+    "saving": "保存中",
+    "saved": "已保存",
+    "error": "保存失败"
+  },
+  "save": {
+    "savedToast": "设置已保存",
+    "saving": "正在保存设置…",
+    "saved": "设置已保存"
+  },
+  "status": {
+    "idle": "空闲",
+    "running": "正在执行 {{job}}…",
+    "finished": "{{job}} 已完成",
+    "updatingScheduler": "正在更新调度设置…"
+  },
+  "confirm": {
+    "forceDailyRun": "今天已有失败但可恢复的每日流程。重新执行会新建一轮流程，可能重复抓取、匹配和消耗 LLM。确定重新执行？",
+    "rerunDaily": "确定重新执行今日流程？"
+  },
+  "path": {
+    "opening": "正在打开本地路径选择器…",
+    "cancelled": "已取消路径选择",
+    "selected": "路径已选择",
+    "saving": "路径已选择，正在保存"
+  },
+  "daily": {
+    "eyebrow": "每日流程",
+    "title": "每日任务",
+    "description": "集中管理每日研究流程的触发方式、论文召回、筛选策略和执行容量。",
+    "sections": {
+      "schedule": {
+        "eyebrow": "Schedule & ingestion",
+        "title": "调度与论文抓取",
+        "description": "定义每日流程何时运行，以及从 arXiv 获取哪些候选论文。"
+      },
+      "retrieval": {
+        "eyebrow": "Retrieval & ranking",
+        "title": "检索与推荐",
+        "description": "控制候选论文进入 inbox 前的召回、摘要粗筛和证据数量。"
+      },
+      "capacity": {
+        "eyebrow": "Capacity & recovery",
+        "title": "并发、缓存与补跑",
+        "description": "限制下游请求容量，保存全文缓存，并约束失败后的历史补洞规模。"
+      }
+    },
+    "fields": {
+      "schedulerRunTime": "每日执行时间",
+      "schedulerInterval": "执行间隔小时",
+      "arxivCategories": "arXiv 分类",
+      "lookbackDays": "回看天数",
+      "maxResults": "最大抓取数",
+      "requestInterval": "请求间隔秒数",
+      "ragThreshold": "RAG 阈值",
+      "ragTopK": "证据 Top K",
+      "ragSearchers": "RAG 检索器",
+      "prefilterEnabled": "启用摘要 embedding 粗筛",
+      "prefilterThreshold": "粗筛阈值",
+      "prefilterTopK": "粗筛 Top K",
+      "prefilterMin": "每日保底精排数",
+      "prefilterMax": "每日最大精排数",
+      "cacheFullText": "缓存 PDF 并提取 TXT",
+      "pdfDirectory": "PDF 缓存目录",
+      "txtDirectory": "TXT 输出目录",
+      "embeddingConcurrency": "Embedding 请求并发数",
+      "judgmentConcurrency": "项目级判定并发数",
+      "reportConcurrency": "报告队列并发数",
+      "retryLimit": "历史补洞上限"
+    }
+  },
+  "taskControl": {
+    "title": "任务控制",
+    "scheduler": {
+      "nextRun": "定时执行 · 下次执行 {{value}}",
+      "completedToday": "访问触发 · 今日已完成",
+      "firstVisit": "访问触发 · 每日首次打开页面时运行",
+      "disabled": "未启用"
+    },
+    "modes": {
+      "startup": { "label": "访问触发", "title": "每日首次访问执行", "description": "每天第一次打开 dashboard 页面自动执行一次完整流程。" },
+      "scheduler": { "label": "定时触发", "title": "按时间定时执行", "description": "保持 dashboard 进程运行，到点自动执行每日流程。" },
+      "off": { "label": "关闭", "title": "关闭自动执行", "description": "不自动运行，只保留手动执行入口。" }
+    },
+    "recovery": {
+      "title": "上次每日流程可继续",
+      "detail": "失败在：{{failedStep}}，已完成 {{count}}。",
+      "steps": "{{count}} 步",
+      "steps_other": "{{count}} 步"
+    },
+    "actions": {
+      "resume": "继续上次每日流程",
+      "runNow": "立即执行每日流程",
+      "rerun": "重新执行今日流程",
+      "resumePrevious": "恢复上次每日流程",
+      "retryHistory": "补跑历史论文"
+    },
+    "shortcuts": {
+      "syncObsidian": "同步 Obsidian",
+      "fetchArxiv": "抓取 arXiv",
+      "cacheText": "缓存 PDF/TXT",
+      "paperReports": "生成全文报告",
+      "dailyReport": "生成每日报告"
+    }
+  },
+  "taskHistory": {
+    "title": "任务历史",
+    "subtitle": "最近任务执行记录。",
+    "loading": "读取任务历史",
+    "refreshing": "正在更新任务历史…",
+    "empty": "暂无任务记录。",
+    "columns": { "task": "任务", "status": "状态", "started": "开始", "result": "结果" }
+  },
+  "data": {
+    "title": "数据与存储",
+    "description": "管理 Obsidian 连接、知识库扫描范围，以及论文和附件的保存位置。",
+    "choose": "选择",
+    "pickPathTitle": "选择{{label}}",
+    "secretSaved": "Secret 已保存；留空不修改。",
+    "accessSecret": "Access secret",
+    "sections": {
+      "connection": {
+        "eyebrow": "Storage connection",
+        "title": "Obsidian 存储连接",
+        "description": "选择本地 vault 或对象存储。系统内知识库不依赖 Obsidian，只有配置连接后才启用相关导入和导出。"
+      },
+      "layout": {
+        "eyebrow": "Vault layout",
+        "title": "知识库范围与目录",
+        "description": "定义需要扫描的内容，以及论文、附件和项目索引在 Obsidian 中的保存位置。"
+      }
+    },
+    "backends": { "local": "本地 vault", "oss": "阿里云 OSS", "s3": "S3 兼容" },
+    "fields": {
+      "storageMode": "Obsidian 存储模式",
+      "outputPrefix": "系统输出前缀",
+      "localMirror": "本地镜像目录",
+      "endpointUrl": "端点 URL",
+      "region": "区域",
+      "bucket": "存储桶",
+      "vaultPrefix": "Vault 前缀",
+      "accessKeyId": "访问密钥 ID",
+      "accessSecret": "访问密钥",
+      "optionalVault": "可选 Obsidian vault 路径",
+      "includeDirectories": "Obsidian 扫描文件夹",
+      "includeTags": "Obsidian 纳入标签",
+      "projectCenterTags": "Obsidian 项目中心页标签",
+      "cliCommand": "Obsidian CLI 命令（可选）",
+      "paperRepository": "Obsidian 论文仓库目录",
+      "paperAttachments": "Obsidian 论文附件目录",
+      "projectPaperList": "Obsidian 项目论文列表文件名"
+    },
+    "placeholders": {
+      "paperRepository": "人工智能/论文仓库",
+      "paperAttachments": "人工智能/论文仓库/附件",
+      "projectPaperList": "论文列表.md"
+    },
+    "remoteNote": "远程模式下，论文仓库和附件沿用对象存储前缀，不需要配置本地 vault 相对目录。"
+  },
+  "models": {
+    "eyebrow": "模型路由",
+    "title": "模型与路由",
+    "description": "管理模型服务、默认路由，以及不同研究任务使用的模型配置。",
+    "notConfigured": "未配置",
+    "section": { "eyebrow": "模型", "title": "Provider 与任务模型", "description": "维护 Provider，并把不同研究任务路由到对应模型。" },
+    "providers": {
+      "eyebrow": "服务注册表",
+      "active": "当前 Provider",
+      "modelCounts": "{{chat}} 个 Chat · {{embedding}} 个 Embedding",
+      "title": "服务端点",
+      "count": "{{count}} 个 Provider",
+      "count_other": "{{count}} 个 Provider",
+      "addAria": "添加模型服务",
+      "add": "添加",
+      "unnamed": "未命名 Provider",
+      "missingId": "缺少 ID",
+      "ready": "就绪",
+      "pending": "待配置",
+      "configuration": "Provider 配置",
+      "baseUrlMissing": "Base URL 未配置",
+      "credentialsSaved": "凭据已保存",
+      "awaitingCredentials": "等待凭据",
+      "remove": "移除"
+    },
+    "apiKey": {
+      "savedHint": "API key 已保存；留空不修改。",
+      "missingHint": "尚未保存 API key。",
+      "saved": "API Key 已保存",
+      "missing": "API Key 未配置"
+    },
+    "connection": {
+      "title": "连接信息",
+      "description": "OpenAI 兼容接口地址与访问凭据",
+      "displayName": "显示名称",
+      "providerId": "Provider ID",
+      "baseUrl": "基础 URL",
+      "apiKey": "API Key",
+      "clearApiKey": "保存时清除这个 Provider 的 API Key"
+    },
+    "catalog": { "title": "模型目录", "description": "使用英文逗号分隔多个模型标识", "chatModels": "Chat 模型", "embeddingModels": "Embedding 模型" },
+    "defaultRoute": { "eyebrow": "默认路由", "title": "全局默认模型", "description": "未单独指定任务模型时使用这组配置。", "badge": "基础路由", "chatProvider": "Chat Provider", "chatModel": "Chat 模型", "embeddingProvider": "Embedding Provider", "embeddingModel": "Embedding 模型" },
+    "taskRoutes": {
+      "eyebrow": "任务路由",
+      "title": "任务模型分配",
+      "description": "为不同研究环节选择独立的 Provider 和模型。",
+      "provider": "Provider",
+      "model": "模型",
+      "count": "{{count}} 条路由",
+      "count_other": "{{count}} 条路由",
+      "routes": {
+        "paperReport": { "title": "解读报告", "description": "生成论文全文结构化分析" },
+        "projectProfile": { "title": "项目摘要", "description": "归纳项目对话与每日研究进展" },
+        "readerChat": { "title": "阅读器 Chat", "description": "处理围绕论文正文的连续问答" },
+        "smartSave": { "title": "Smart Save", "description": "判断论文归档位置与项目关联" },
+        "questions": { "title": "追问生成", "description": "根据报告生成后续研究问题" }
+      }
+    },
+    "concurrency": { "title": "项目摘要并发", "description": "限制同时运行的项目摘要请求数量", "field": "并发请求数" },
+    "prompt": { "eyebrow": "默认指令", "title": "论文解读 Prompt", "description": "用于新建全文解读任务的默认结构化指令。", "field": "Prompt 内容" }
+  }
+}

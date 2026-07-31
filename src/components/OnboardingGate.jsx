@@ -1,17 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 
 import { InlineLoader } from "./Loading.jsx";
 import { useCachedApi } from "../lib/apiCache.jsx";
 import { api, chooseLocalPath, postJson } from "../lib/dashboard.js";
 import "../styles/OnboardingGate.css";
 
-const PROJECT_STATUSES = [
-  ["active", "进行中"],
-  ["planned", "计划中"],
-  ["paused", "搁置"],
-  ["completed", "已完成"]
-];
+const PROJECT_STATUSES = ["active", "planned", "paused", "completed"];
 
 function shouldShowOnboarding(settings, projects) {
   if (settings?.onboarding_completed) return false;
@@ -27,6 +23,7 @@ function shouldShowOnboarding(settings, projects) {
 }
 
 export function OnboardingGate({ notify = () => {}, setStatusMessage = () => {} }) {
+  const { t } = useTranslation(["shell", "common"]);
   const navigate = useNavigate();
   const [visible, setVisible] = useState(false);
   const [busy, setBusy] = useState("");
@@ -76,29 +73,29 @@ export function OnboardingGate({ notify = () => {}, setStatusMessage = () => {} 
   const pickObsidianVault = useCallback(async () => {
     if (busy) return;
     setBusy("vault");
-    setStatusMessage("正在选择 Obsidian vault...");
+    setStatusMessage(t("onboarding.status.selectingVault"));
     try {
       const data = await chooseLocalPath({
         mode: "directory",
-        title: "选择 Obsidian vault"
+        title: t("onboarding.chooseVault")
       });
       if (data.cancelled) {
-        setStatusMessage("已取消 Obsidian 连接");
+        setStatusMessage(t("onboarding.status.cancelled"));
         return;
       }
       const vaultPath = String(data.path || "").trim();
-      if (!vaultPath) throw new Error("未选择 Obsidian vault 路径");
+      if (!vaultPath) throw new Error(t("onboarding.errors.noVault"));
       setObsidianForm((current) => ({ ...current, obsidian_vault_path: vaultPath }));
-      setStatusMessage("Obsidian vault 已选择");
+      setStatusMessage(t("onboarding.status.vaultSelected"));
     } catch (error) {
-      notify(error.message || "Obsidian 连接失败", {
-        statusMessage: error.message || "Obsidian 连接失败",
+      notify(error.message || t("onboarding.errors.connection"), {
+        statusMessage: error.message || t("onboarding.errors.connection"),
         type: "error"
       });
     } finally {
       setBusy("");
     }
-  }, [busy, notify, setStatusMessage]);
+  }, [busy, notify, setStatusMessage, t]);
 
   const saveObsidianSetup = useCallback(async (event) => {
     event.preventDefault();
@@ -107,8 +104,8 @@ export function OnboardingGate({ notify = () => {}, setStatusMessage = () => {} 
     const vaultPath = String(obsidianForm.obsidian_vault_path || "").trim();
     const remoteBackend = ["oss", "s3", "r2"].includes(storageBackend);
     if (!remoteBackend && !vaultPath) {
-      notify("请先选择或填写 Obsidian vault 路径。", {
-        statusMessage: "缺少 Obsidian vault 路径",
+      notify(t("onboarding.errors.vaultRequired"), {
+        statusMessage: t("onboarding.errors.missingVault"),
         type: "warning"
       });
       return;
@@ -119,15 +116,15 @@ export function OnboardingGate({ notify = () => {}, setStatusMessage = () => {} 
       const accessKey = String(obsidianForm.obsidian_remote_access_key_id || "").trim();
       const secret = String(obsidianForm.obsidian_remote_secret_access_key || "").trim();
       if (!bucket || (["oss", "r2"].includes(storageBackend) && !endpoint) || (["oss", "r2"].includes(storageBackend) && (!accessKey || !secret))) {
-        notify("请补全对象存储连接信息。", {
-          statusMessage: "对象存储配置不完整",
+        notify(t("onboarding.errors.remoteRequired"), {
+          statusMessage: t("onboarding.errors.remoteIncomplete"),
           type: "warning"
         });
         return;
       }
     }
     setBusy("obsidian");
-    setStatusMessage("正在保存 Obsidian 初始化设置...");
+    setStatusMessage(t("onboarding.status.saving"));
     try {
       const payload = {
         obsidian_storage_backend: storageBackend,
@@ -150,33 +147,33 @@ export function OnboardingGate({ notify = () => {}, setStatusMessage = () => {} 
         payload.obsidian_vault_path = vaultPath;
       }
       await completeOnboarding(remoteBackend ? "obsidian_remote" : "obsidian", payload);
-      notify("Obsidian 初始化设置已保存。", {
-        statusMessage: "Obsidian 初始化完成",
+      notify(t("onboarding.saved"), {
+        statusMessage: t("onboarding.status.complete"),
         type: "success"
       });
     } catch (error) {
-      notify(error.message || "初始化设置保存失败", {
-        statusMessage: error.message || "初始化设置保存失败",
+      notify(error.message || t("onboarding.errors.save"), {
+        statusMessage: error.message || t("onboarding.errors.save"),
         type: "error"
       });
     } finally {
       setBusy("");
     }
-  }, [busy, completeOnboarding, notify, obsidianForm, setStatusMessage]);
+  }, [busy, completeOnboarding, notify, obsidianForm, setStatusMessage, t]);
 
   const createManualProject = useCallback(async (event) => {
     event.preventDefault();
     if (busy) return;
     const name = String(projectForm.name || "").trim();
     if (!name) {
-      notify("请填写项目名称。", {
-        statusMessage: "缺少项目名称",
+      notify(t("onboarding.errors.projectNameRequired"), {
+        statusMessage: t("onboarding.errors.missingProjectName"),
         type: "warning"
       });
       return;
     }
     setBusy("manual");
-    setStatusMessage("正在创建第一个项目...");
+    setStatusMessage(t("onboarding.status.creatingProject"));
     try {
       const data = await postJson("/api/projects", {
         name,
@@ -185,20 +182,20 @@ export function OnboardingGate({ notify = () => {}, setStatusMessage = () => {} 
         raw_context: projectForm.raw_context
       });
       await completeOnboarding("manual");
-      notify("第一个项目已创建。", {
-        statusMessage: "第一个项目已创建",
+      notify(t("onboarding.projectCreated"), {
+        statusMessage: t("onboarding.status.projectCreated"),
         type: "success"
       });
       if (data.project?.id) navigate(`/projects/${encodeURIComponent(String(data.project.id))}`);
     } catch (error) {
-      notify(error.message || "项目创建失败", {
-        statusMessage: error.message || "项目创建失败",
+      notify(error.message || t("onboarding.errors.projectCreate"), {
+        statusMessage: error.message || t("onboarding.errors.projectCreate"),
         type: "error"
       });
     } finally {
       setBusy("");
     }
-  }, [busy, completeOnboarding, navigate, notify, projectForm, setStatusMessage]);
+  }, [busy, completeOnboarding, navigate, notify, projectForm, setStatusMessage, t]);
 
   if (!visible) return null;
 
@@ -211,12 +208,12 @@ export function OnboardingGate({ notify = () => {}, setStatusMessage = () => {} 
         role="dialog"
       >
         <div className="onboarding-header">
-          <span>初始化</span>
-          <h2 id="onboarding-title">设置项目来源</h2>
-          <p>把第一步配置直接完成在这里；之后仍可在设置页调整。</p>
+          <span>{t("onboarding.eyebrow")}</span>
+          <h2 id="onboarding-title">{t("onboarding.title")}</h2>
+          <p>{t("onboarding.description")}</p>
         </div>
 
-        <div className="onboarding-tabs" role="tablist" aria-label="项目来源">
+        <div className="onboarding-tabs" role="tablist" aria-label={t("onboarding.source")}>
           <button
             aria-selected={mode === "obsidian"}
             className={mode === "obsidian" ? "active" : ""}
@@ -225,7 +222,7 @@ export function OnboardingGate({ notify = () => {}, setStatusMessage = () => {} 
             role="tab"
             type="button"
           >
-            连接 Obsidian
+            {t("onboarding.connectObsidian")}
           </button>
           <button
             aria-selected={mode === "manual"}
@@ -235,29 +232,29 @@ export function OnboardingGate({ notify = () => {}, setStatusMessage = () => {} 
             role="tab"
             type="button"
           >
-            系统内项目
+            {t("onboarding.manualProject")}
           </button>
         </div>
 
         {mode === "obsidian" ? (
           <form className="onboarding-form" onSubmit={saveObsidianSetup}>
             <label>
-              <span>存储模式</span>
+              <span>{t("onboarding.storageMode")}</span>
               <select
                 autoFocus
                 value={obsidianForm.obsidian_storage_backend}
                 onChange={(event) => setObsidianForm((current) => ({ ...current, obsidian_storage_backend: event.target.value }))}
               >
-                <option value="local">本地 vault</option>
-                <option value="oss">阿里云 OSS</option>
-                <option value="s3">S3 兼容</option>
+                <option value="local">{t("onboarding.storage.local")}</option>
+                <option value="oss">{t("onboarding.storage.oss")}</option>
+                <option value="s3">{t("onboarding.storage.s3")}</option>
                 <option value="r2">Cloudflare R2</option>
               </select>
             </label>
             {["oss", "s3", "r2"].includes(obsidianForm.obsidian_storage_backend) ? (
               <>
                 <label>
-                  <span>Endpoint URL</span>
+                  <span>{t("onboarding.remote.endpointUrl")}</span>
                   <input
                     placeholder={obsidianForm.obsidian_storage_backend === "r2" ? "https://<account>.r2.cloudflarestorage.com" : "https://oss-cn-hangzhou.aliyuncs.com"}
                     value={obsidianForm.obsidian_remote_endpoint_url}
@@ -265,7 +262,7 @@ export function OnboardingGate({ notify = () => {}, setStatusMessage = () => {} 
                   />
                 </label>
                 <label>
-                  <span>Region</span>
+                  <span>{t("onboarding.remote.region")}</span>
                   <input
                     placeholder={obsidianForm.obsidian_storage_backend === "r2" ? "auto" : "cn-hangzhou"}
                     value={obsidianForm.obsidian_remote_region}
@@ -273,7 +270,7 @@ export function OnboardingGate({ notify = () => {}, setStatusMessage = () => {} 
                   />
                 </label>
                 <label>
-                  <span>Bucket</span>
+                  <span>{t("onboarding.remote.bucket")}</span>
                   <input
                     placeholder="obsidian-vault"
                     value={obsidianForm.obsidian_remote_bucket}
@@ -281,7 +278,7 @@ export function OnboardingGate({ notify = () => {}, setStatusMessage = () => {} 
                   />
                 </label>
                 <label>
-                  <span>Vault prefix</span>
+                  <span>{t("onboarding.remote.vaultPrefix")}</span>
                   <input
                     placeholder="vault"
                     value={obsidianForm.obsidian_remote_prefix}
@@ -289,7 +286,7 @@ export function OnboardingGate({ notify = () => {}, setStatusMessage = () => {} 
                   />
                 </label>
                 <label>
-                  <span>系统输出前缀</span>
+                  <span>{t("onboarding.outputPrefix")}</span>
                   <input
                     placeholder="Research Intelligence"
                     value={obsidianForm.obsidian_remote_output_prefix}
@@ -297,7 +294,7 @@ export function OnboardingGate({ notify = () => {}, setStatusMessage = () => {} 
                   />
                 </label>
                 <label>
-                  <span>本地镜像目录</span>
+                  <span>{t("onboarding.mirrorDirectory")}</span>
                   <input
                     placeholder="./data/obsidian_remote_vault"
                     value={obsidianForm.obsidian_remote_mirror_dir}
@@ -305,17 +302,17 @@ export function OnboardingGate({ notify = () => {}, setStatusMessage = () => {} 
                   />
                 </label>
                 <label>
-                  <span>Access key ID</span>
+                  <span>{t("onboarding.remote.accessKeyId")}</span>
                   <input
-                    placeholder="Access key ID"
+                    placeholder={t("onboarding.remote.accessKeyId")}
                     value={obsidianForm.obsidian_remote_access_key_id}
                     onChange={(event) => setObsidianForm((current) => ({ ...current, obsidian_remote_access_key_id: event.target.value }))}
                   />
                 </label>
                 <label>
-                  <span>Access secret</span>
+                  <span>{t("onboarding.remote.accessSecret")}</span>
                   <input
-                    placeholder="Access secret"
+                    placeholder={t("onboarding.remote.accessSecret")}
                     type="password"
                     value={obsidianForm.obsidian_remote_secret_access_key}
                     onChange={(event) => setObsidianForm((current) => ({ ...current, obsidian_remote_secret_access_key: event.target.value }))}
@@ -324,19 +321,19 @@ export function OnboardingGate({ notify = () => {}, setStatusMessage = () => {} 
               </>
             ) : (
               <label>
-                <span>Obsidian vault</span>
+                <span>{t("onboarding.vault")}</span>
                 <div className="path-input-row">
                   <input
                     placeholder="D:\\Obsidian\\Vault"
                     value={obsidianForm.obsidian_vault_path}
                     onChange={(event) => setObsidianForm((current) => ({ ...current, obsidian_vault_path: event.target.value }))}
                   />
-                  <button disabled={Boolean(busy)} onClick={pickObsidianVault} type="button">选择</button>
+                  <button disabled={Boolean(busy)} onClick={pickObsidianVault} type="button">{t("actions.select", { ns: "common" })}</button>
                 </div>
               </label>
             )}
             <label>
-              <span>扫描文件夹</span>
+              <span>{t("onboarding.scanFolders")}</span>
               <input
                 placeholder="Research,Papers"
                 value={obsidianForm.obsidian_include_dirs}
@@ -344,7 +341,7 @@ export function OnboardingGate({ notify = () => {}, setStatusMessage = () => {} 
               />
             </label>
             <label>
-              <span>项目中心页标签</span>
+              <span>{t("onboarding.centerTags")}</span>
               <input
                 placeholder="project,center"
                 value={obsidianForm.obsidian_project_center_tags}
@@ -352,13 +349,13 @@ export function OnboardingGate({ notify = () => {}, setStatusMessage = () => {} 
               />
             </label>
             <div className="onboarding-actions">
-              <button className="primary" disabled={Boolean(busy)} type="submit">保存 Obsidian 设置</button>
+              <button className="primary" disabled={Boolean(busy)} type="submit">{t("onboarding.saveObsidian")}</button>
             </div>
           </form>
         ) : (
           <form className="onboarding-form onboarding-project-form" onSubmit={createManualProject}>
             <label>
-              <span>项目名称</span>
+              <span>{t("onboarding.projectName")}</span>
               <input
                 autoFocus
                 placeholder="Agentic RAG"
@@ -367,16 +364,16 @@ export function OnboardingGate({ notify = () => {}, setStatusMessage = () => {} 
               />
             </label>
             <label>
-              <span>状态</span>
+              <span>{t("onboarding.projectStatus")}</span>
               <select
                 value={projectForm.status}
                 onChange={(event) => setProjectForm((current) => ({ ...current, status: event.target.value }))}
               >
-                {PROJECT_STATUSES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                {PROJECT_STATUSES.map((value) => <option key={value} value={value}>{t(`projectStatus.${value}`, { ns: "common" })}</option>)}
               </select>
             </label>
             <label>
-              <span>关键词</span>
+              <span>{t("onboarding.keywords")}</span>
               <input
                 placeholder="RAG,agent,scientific discovery"
                 value={projectForm.keywords}
@@ -384,23 +381,23 @@ export function OnboardingGate({ notify = () => {}, setStatusMessage = () => {} 
               />
             </label>
             <label className="wide">
-              <span>原始项目上下文</span>
+              <span>{t("onboarding.rawContext")}</span>
               <textarea
-                placeholder="粘贴研究问题、README、实验计划或任意自由文本。"
+                placeholder={t("onboarding.rawContextPlaceholder")}
                 rows={5}
                 value={projectForm.raw_context}
                 onChange={(event) => setProjectForm((current) => ({ ...current, raw_context: event.target.value }))}
               />
             </label>
             <div className="onboarding-actions">
-              <button className="primary" disabled={Boolean(busy)} type="submit">创建项目</button>
+              <button className="primary" disabled={Boolean(busy)} type="submit">{t("onboarding.createProject")}</button>
             </div>
           </form>
         )}
 
         {busy ? (
           <div className="onboarding-busy">
-            <InlineLoader label={busy === "vault" ? "正在选择路径" : busy === "obsidian" ? "正在保存 Obsidian 设置" : "正在创建项目"} />
+            <InlineLoader label={t(`onboarding.busy.${busy === "vault" ? "vault" : busy === "obsidian" ? "obsidian" : "project"}`)} />
           </div>
         ) : null}
       </section>

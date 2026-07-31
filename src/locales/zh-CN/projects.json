@@ -1,0 +1,45 @@
+{
+  "common": {
+    "researchProject": "Research project",
+    "researchWorkspace": "Research workspace",
+    "projectConfiguration": "Project configuration",
+    "decisionQueue": "Decision queue",
+    "researchOutputs": "Research outputs",
+    "paperCollection": "Paper collection",
+    "knowledgeContext": "Knowledge context",
+    "select": "选择",
+    "remove": "移除",
+    "cancel": "取消",
+    "unknown": "未知",
+    "notSet": "未设置"
+  },
+  "status": {"active":"进行中","planned":"计划中","completed":"已完成","paused":"搁置","exploring":"探索中","writing":"写作中","archived":"归档"},
+  "paperRelation": {"candidate":"候选","reading":"阅读中","core":"核心文献","background":"背景资料","rejected":"已排除"},
+  "noteRelation": {"source":"资料","idea":"想法","method":"方法","result":"结果","todo":"待办","center_page":"中心页","folder_member":"项目文件夹"},
+  "sourceType": {"manual_project":"系统内项目","obsidian":"Obsidian","experiment_report":"实验报告"},
+  "importance": {"high":"高","medium":"中","low":"低"},
+  "list": {
+    "eyebrow":"研究组织","title":"项目工作台","syncing":"正在同步","activeCount":"{{count}} 个活跃项目","newProject":"新建项目",
+    "portfolio":"研究组合","heroTitle":"把论文、上下文与产物组织成持续推进的研究空间","loadingProjects":"正在读取你的研究项目。","overviewSentence":"当前共维护 {{total}} 个项目，其中 {{active}} 个正在推进。","firstProjectHint":"建立第一个项目，从研究问题开始积累长期上下文。",
+    "next":"下一步","continueExisting":"继续推进现有研究","createFirst":"创建第一个研究项目","openRecent":"打开最近项目","startCreating":"开始创建",
+    "overviewAria":"项目概览","project":"项目","activeHint":"{{count}} 个正在推进","linkedPapers":"关联论文","researchMaterials":"项目研究材料","knowledgeContext":"知识上下文","notesSources":"笔记与知识来源","artifacts":"研究产物","settledResults":"已沉淀的结果",
+    "space":"项目空间","allProjects":"全部项目","spaceDescription":"进入项目后继续管理目标、候选论文、上下文与研究产物。","statusSummary":"项目状态摘要","active":"活跃 {{count}}","paused":"暂停 {{count}}","itemCount":"{{count}} 项","loadingSpace":"读取项目空间",
+    "emptyTitle":"这里还没有研究项目","emptyDescription":"创建项目后，论文、笔记与产物会在同一个研究上下文中持续积累。",
+    "internalProject":"系统内项目","papers":"论文","context":"上下文","artifact":"产物","scaleAria":"项目规模","updatedAt":"更新于 {{date}}","openProject":"打开项目"
+  },
+  "create": {
+    "description":"建立一个长期研究空间；保存后即可关联论文、上下文和研究产物。","eyebrow":"Research workspace","requiredHint":"带 * 的字段为必填项","creating":"创建中…","createAndEnter":"创建并进入项目","title":"新建研究项目",
+    "name":"项目名称 *","namePlaceholder":"例如：Agentic Research Workflow","stage":"当前阶段","stageAria":"选择项目当前阶段","keywords":"研究关键词","context":"项目上下文","contextPlaceholder":"粘贴研究问题、README、实验计划或任何需要长期保留的背景。","contextHint":"保存后会作为项目知识上下文参与论文匹配与对话。",
+    "optionalConnection":"可选连接","available":"可用","disabled":"未启用","home":"项目主页","outputDirectory":"输出目录","chooseHome":"选择 Obsidian 项目主页","chooseOutput":"选择 Obsidian 输出目录","created":"项目已创建","createdQueued":"项目已创建，上下文正在处理"
+  },
+  "detail": {
+    "settings":"项目设置","create":"创建研究项目","lastUpdated":"最后更新 {{date}}","afterSave":"保存后进入完整项目工作区","name":"项目名称","status":"状态","statusAria":"选择项目状态","keywords":"关键词","rawContext":"原始项目上下文","rawContextPlaceholder":"粘贴项目 README、研究问题、实验计划或任意自由文本。保存后会进入系统内知识文档。","obsidianHint":"请先配置可选 Obsidian 集成。","obsidianHome":"Obsidian 项目主页","chooseHome":"选择 Obsidian 项目主页 Markdown","obsidianOutput":"Obsidian 输出目录","chooseOutput":"选择 Obsidian 输出目录","saveHint":"保存会同步更新项目检索上下文。","save":"保存项目",
+    "dailyBrief":"每日项目摘要","continueToday":"今天从这里继续","waitingBrief":"等待首次项目摘要","dailyTask":"每日任务","findings":"已记录发现","noFindings":"暂无可靠发现记录。","questions":"待解决问题","noQuestions":"暂无待解决问题。","autoUpdated":"{{model}} · 自动更新","viewSummary":"查看完整摘要","noChatSummary":"每日任务尚未生成项目 Chat 摘要","chatSummaryHint":"运行每日任务后，这里会汇总项目目标、当前方法、已记录发现与下一步问题。",
+    "pendingPapers":"待判断论文","waitingDecision":"{{count}} 篇等待决策","match":"匹配 {{score}}","confidence":"置信度 {{score}}","openPending":"打开待判断","saveImportanceAria":"保存重要性","save":"保存","reason":"推荐理由","noReason":"暂无推荐理由。","paperEvidence":"论文匹配片段","contextEvidence":"项目上下文片段","projectContextFallback":"项目上下文","emptyQueue":"当前队列为空","emptyQueueHint":"运行每日任务或同步上下文后，新的项目候选论文会出现在这里。",
+    "experimentProgress":"实验进展","reportCount":"{{count}} 份报告","openArtifact":"打开产物","export":"导出","noProgress":"暂无实验进展","noProgressHint":"Agent 回传的实验报告会显示在这里。",
+    "linkedPapers":"已关联论文","paperCount":"{{count}} 篇论文","openPaperReport":"打开论文报告：{{title}}","importance":"重要性 {{value}}","noLinkedPapers":"暂无关联论文","noLinkedPapersHint":"从待判断队列保存论文后会进入这里。",
+    "projectContext":"项目上下文","documentNoteCount":"{{documents}} 文档 · {{notes}} 笔记","systemContext":"系统内上下文","chunkCount":"{{count}} 个片段","noSystemContext":"暂无系统内上下文文档。","projectNotes":"项目笔记","addNote":"加入笔记","noteAria":"选择项目笔记","noNotes":"无可选笔记","relation":"关系","relationAria":"选择笔记关系","add":"加入","noLinkedNotes":"暂无关联笔记。",
+    "openingPicker":"正在打开本地路径选择器...","pickerCancelled":"已取消路径选择","pathSelected":"路径已选择","saved":"项目已保存","savedQueued":"项目已保存，上下文正在处理","exportQueued":"产物导出已加入队列","synced":"已同步 {{path}}","recommendationAccepted":"已从待判断保存到当前项目","noteLinked":"笔记已关联","paperRemoved":"论文已从项目移除","noteRemoved":"笔记已从项目移除",
+    "backAria":"返回项目中心","createSpace":"创建研究空间","projectSpace":"项目研究空间","newTitle":"新建项目","fallbackTitle":"项目","loadingDescription":"正在读取项目配置、关联论文、上下文和生成产物。","loadingTitle":"读取项目详情","summaryFallback":"这个项目尚未填写人工概述。可以在页面下方的项目设置中补充研究背景和目标。","noKeywords":"暂无关键词","createdAt":"创建于 {{date}}","updatedAt":"更新于 {{date}}","scaleAria":"项目规模","pending":"待判断","pendingHint":"等待项目决策","linkedHint":"已进入项目资产","contextHint":"{{documents}} 文档 · {{notes}} 笔记","artifactHint":"{{count}} 份实验报告"
+  }
+}

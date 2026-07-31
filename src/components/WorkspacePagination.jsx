@@ -1,11 +1,12 @@
+import { useTranslation } from "react-i18next";
 import "../styles/WorkspacePagination.css";
 
-export const WORKSPACE_PAGE_SIZE_OPTIONS = [
-  ["10", "10/页"],
-  ["25", "25/页"],
-  ["50", "50/页"],
-  ["100", "100/页"]
-];
+export const WORKSPACE_PAGE_SIZE_VALUES = ["10", "25", "50", "100"];
+
+export function useWorkspacePageSizeOptions() {
+  const { t } = useTranslation("common");
+  return WORKSPACE_PAGE_SIZE_VALUES.map((value) => [value, t("pagination.perPage", { count: value })]);
+}
 
 export function WorkspacePagination({
   className = "",
@@ -16,11 +17,12 @@ export function WorkspacePagination({
   onPrevious,
   pageCount
 }) {
+  const { t } = useTranslation("common");
   return (
     <div className={`pagination-row paper-pagination-row workspace-pagination ${compact ? "is-compact" : ""} ${className}`.trim()}>
-      <button aria-label="上一页" disabled={currentPage <= 1 || loading} onClick={onPrevious} type="button">上一页</button>
-      <span>{compact ? `${currentPage} / ${pageCount}` : `第 ${currentPage} 页，共 ${pageCount} 页`}</span>
-      <button aria-label="下一页" disabled={currentPage >= pageCount || loading} onClick={onNext} type="button">下一页</button>
+      <button aria-label={t("actions.previousPage")} disabled={currentPage <= 1 || loading} onClick={onPrevious} type="button">{t("actions.previousPage")}</button>
+      <span>{t(compact ? "pagination.compact" : "pagination.summary", { current: currentPage, count: pageCount })}</span>
+      <button aria-label={t("actions.nextPage")} disabled={currentPage >= pageCount || loading} onClick={onNext} type="button">{t("actions.nextPage")}</button>
     </div>
   );
 }

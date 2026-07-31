@@ -1,53 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { api, fmtDate, postJson, snippet } from "../lib/dashboard.js";
-import { PAPER_IMPORTANCE_OPTIONS, paperImportanceLabel } from "../lib/paperImportance.js";
+import { paperImportanceLabel, paperImportanceOptions } from "../lib/paperImportance.js";
 import { commitPaperListSelection, resolvePaperListSelection } from "../lib/paperSelection.js";
-import { PAPER_SOURCE_FILTER_OPTIONS, paperSourceFilterLabel } from "../lib/paperSource.js";
+import { paperSourceFilterLabel, paperSourceFilterOptions } from "../lib/paperSource.js";
 import { RefreshButton } from "./RefreshButton.jsx";
 import { WorkspacePaneLoader } from "./WorkspacePaneLoader.jsx";
-import { WORKSPACE_PAGE_SIZE_OPTIONS, WorkspacePagination } from "./WorkspacePagination.jsx";
+import { useWorkspacePageSizeOptions, WorkspacePagination } from "./WorkspacePagination.jsx";
 import { WorkspaceSelect } from "./WorkspaceSelect.jsx";
 import "../styles/PaperLibraryView.css";
 
-const STATUSES = [
-  ["", "全部"],
-  ["candidate", "候选"],
-  ["saved", "已保存"],
-  ["reading", "阅读中"],
-  ["read", "已读"],
-  ["archived", "归档"],
-  ["discarded", "已丢弃"]
-];
-
-const REPORT_PRESENCE = [
-  ["", "全部报告"],
-  ["with", "有报告"],
-  ["without", "无报告"]
-];
-
-const LIBRARY_SORTS = [
-  ["updated", "工作流状态与更新"],
-  ["importance", "重要性优先"]
-];
-
-const REPORT_STATUS_LABELS = {
-  queued: "排队",
-  processing: "生成中",
-  done: "已完成",
-  failed: "失败",
-  cancelled: "已取消"
-};
-
-const STATUS_LABELS = Object.fromEntries(STATUSES.filter(([value]) => value));
-const SOURCE_TYPE_LABELS = {
-  arxiv: "arXiv",
-  url: "URL",
-  upload: "上传",
-  web: "网页正文",
-  manual: "手动"
-};
+const STATUS_CODES = ["", "candidate", "saved", "reading", "read", "archived", "discarded"];
+const REPORT_PRESENCE_CODES = ["", "with", "without"];
+const LIBRARY_SORT_CODES = ["updated", "importance"];
 const STATUS_TONES = {
   archived: "slate",
   candidate: "blue",
@@ -56,26 +23,16 @@ const STATUS_TONES = {
   reading: "gold",
   saved: "teal"
 };
-const ASSET_STATUS_LABELS = {
-  cached: "已缓存",
-  done: "完成",
-  error: "失败",
-  failed: "失败",
-  missing: "缺失",
-  pending: "等待",
-  ready: "就绪"
-};
-
-function statusLabel(status) {
-  return STATUS_LABELS[status] || status || "未知";
+function statusLabel(status, t) {
+  return t(`library.status.${status || "unknown"}`, { defaultValue: status || t("library.status.unknown") });
 }
 
-function reportStatusLabel(status) {
-  return REPORT_STATUS_LABELS[status] || status || "报告";
+function reportStatusLabel(status, t) {
+  return t(`reportStatus.${status || "missing"}`, { defaultValue: status || t("reportStatus.missing") });
 }
 
-function sourceLabel(sourceType) {
-  return SOURCE_TYPE_LABELS[sourceType] || sourceType || "来源";
+function sourceLabel(sourceType, t) {
+  return t(`library.sourceType.${sourceType || "unknown"}`, { defaultValue: sourceType || t("library.sourceType.unknown") });
 }
 
 function safeToken(value, fallback = "unknown") {
@@ -88,8 +45,8 @@ function primarySource(sources = []) {
   return sources.find((source) => source.source_type === "arxiv") || sources[0];
 }
 
-function paperIdentity(paper) {
-  return paper?.arxiv_id || paper?.doi || paper?.canonical_key || "未记录标识";
+function paperIdentity(paper, fallback) {
+  return paper?.arxiv_id || paper?.doi || paper?.canonical_key || fallback;
 }
 
 function paperListSource(paper) {
@@ -100,6 +57,8 @@ function paperListSource(paper) {
 }
 
 export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPaperId, setStatusMessage }) {
+  const { t, i18n } = useTranslation("papers");
+  const pageSizeOptions = useWorkspacePageSizeOptions();
   const cache = useApiCacheClient();
   const [activeId, setActiveId] = useState(null);
   const [status, setStatus] = useState("");
@@ -199,7 +158,7 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
         };
       });
       cache.markStale(["health", "summary"]);
-      setStatusMessage(`论文状态已更新为 ${statusLabel(nextStatus)}`);
+      setStatusMessage(t("library.messages.statusUpdated", { status: statusLabel(nextStatus, t) }));
     } catch (error) {
       setStatusMessage(error.message);
     } finally {
@@ -217,20 +176,25 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
   const mainSource = primarySource(sources);
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const currentPage = Math.min(page, pageCount);
-  const selectedStatusLabel = status ? statusLabel(status) : "全部状态";
-  const selectedSourceLabel = paperSourceFilterLabel(sourceFilter);
-  const selectedReportLabel = REPORT_PRESENCE.find(([value]) => value === reportPresence)?.[1] || "全部报告";
-  const selectedImportanceLabel = PAPER_IMPORTANCE_OPTIONS.find(([value]) => value === importance)?.[1] || "全部重要性";
-  const selectedSortLabel = LIBRARY_SORTS.find(([value]) => value === sort)?.[1] || "工作流状态与更新";
-  const searchLabel = query.trim() ? `搜索：${query.trim()}` : "未搜索";
-  const dateRangeLabel = dateFrom || dateTo ? `${dateFrom || "不限"} 至 ${dateTo || "不限"}` : "全部日期";
+  const statusOptions = STATUS_CODES.map((value) => [value, t(`library.status.${value || "all"}`)]);
+  const reportPresenceOptions = REPORT_PRESENCE_CODES.map((value) => [value, t(`library.reportPresence.${value || "all"}`)]);
+  const librarySortOptions = LIBRARY_SORT_CODES.map((value) => [value, t(`library.sort.${value}`)]);
+  const sourceFilterOptions = paperSourceFilterOptions(t);
+  const importanceOptions = paperImportanceOptions(t);
+  const selectedStatusLabel = status ? statusLabel(status, t) : t("library.status.allStates");
+  const selectedSourceLabel = paperSourceFilterLabel(sourceFilter, t);
+  const selectedReportLabel = reportPresenceOptions.find(([value]) => value === reportPresence)?.[1] || t("library.reportPresence.all");
+  const selectedImportanceLabel = importanceOptions.find(([value]) => value === importance)?.[1] || t("importance.all");
+  const selectedSortLabel = librarySortOptions.find(([value]) => value === sort)?.[1] || t("library.sort.updated");
+  const searchLabel = query.trim() ? t("library.filters.searchValue", { query: query.trim() }) : t("library.filters.notSearched");
+  const dateRangeLabel = dateFrom || dateTo ? t("library.filters.dateRange", { from: dateFrom || t("common.unlimited"), to: dateTo || t("common.unlimited") }) : t("library.filters.allDates");
   const activeFilterCount = [status, sourceFilter !== "all", reportPresence, importance, sort !== "updated", query.trim(), dateFrom, dateTo].filter(Boolean).length;
   const activeFilterLabels = [
     status ? selectedStatusLabel : "",
     sourceFilter !== "all" ? selectedSourceLabel : "",
     reportPresence ? selectedReportLabel : "",
-    importance ? `重要性：${selectedImportanceLabel}` : "",
-    sort !== "updated" ? `排序：${selectedSortLabel}` : "",
+    importance ? t("library.filters.importanceValue", { value: selectedImportanceLabel }) : "",
+    sort !== "updated" ? t("library.filters.sortValue", { value: selectedSortLabel }) : "",
     query.trim() ? searchLabel : "",
     dateFrom || dateTo ? dateRangeLabel : ""
   ].filter(Boolean);
@@ -290,11 +254,11 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
     <section className="view library-view paper-library-view vision-library">
       <header className="vision-topbar library-topbar">
         <div className="vision-brand">
-          <span>论文工作区</span>
-          <h1>论文仓库</h1>
+          <span>{t("common.workspace")}</span>
+          <h1>{t("library.title")}</h1>
         </div>
         <div className="vision-top-actions">
-          <span className="vision-live-state ready"><i aria-hidden="true" />{loading ? "读取仓库" : `${total} 篇论文`}</span>
+          <span className="vision-live-state ready"><i aria-hidden="true" />{loading ? t("library.live.loading") : t("library.live.count", { count: total })}</span>
           <RefreshButton className="vision-refresh" busy={listQuery.status === "loading"} onClick={() => refresh().catch((error) => setStatusMessage(error.message))} />
         </div>
       </header>
@@ -303,8 +267,8 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
         <section className="library-list-panel paper-library-list-panel">
           <header className="paper-library-header library-list-heading">
           <div>
-              <span className="paper-library-eyebrow">馆藏目录</span>
-              <h2>论文列表</h2>
+              <span className="paper-library-eyebrow">{t("library.list.eyebrow")}</span>
+              <h2>{t("library.list.title")}</h2>
           </div>
             <div className="library-list-heading-actions">
               <em>{loading ? "…" : total}</em>
@@ -323,11 +287,11 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
               <div className="paper-active-filters">
                 {activeFilterLabels.length
                   ? activeFilterLabels.map((label) => <span key={label}>{label}</span>)
-                  : <span>全部论文</span>}
+                  : <span>{t("library.filters.allPapers")}</span>}
               </div>
             <div className="paper-filter-summary-actions">
               {activeFilterCount ? (
-                <button className="filter-clear-button" onClick={clearFilters} type="button">清除筛选</button>
+                <button className="filter-clear-button" onClick={clearFilters} type="button">{t("common.clearFilters")}</button>
               ) : null}
               <button
                 aria-controls="paper-library-filter-panel"
@@ -336,7 +300,7 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
                 onClick={() => setFiltersOpen((current) => !current)}
                 type="button"
               >
-                {filtersOpen ? "收起筛选" : `筛选${activeFilterCount ? ` (${activeFilterCount})` : ""}`}
+                {filtersOpen ? t("common.collapseFilters") : t("common.filters", { count: activeFilterCount || "" })}
               </button>
             </div>
           </div>
@@ -346,45 +310,45 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
             id="paper-library-filter-panel"
             inert={!filtersOpen}
           >
-            <div className="library-toolbar paper-library-toolbar" aria-label="论文筛选">
+            <div className="library-toolbar paper-library-toolbar" aria-label={t("library.filters.aria")}>
               <div className="library-filter-control paper-filter-control">
-                <span>状态</span>
-                <WorkspaceSelect ariaLabel="筛选论文状态" onChange={(nextValue) => updateFilter(setStatus, nextValue)} options={STATUSES} value={status} />
+                <span>{t("common.status")}</span>
+                <WorkspaceSelect ariaLabel={t("library.filters.statusAria")} onChange={(nextValue) => updateFilter(setStatus, nextValue)} options={statusOptions} value={status} />
               </div>
               <div className="library-filter-control paper-filter-control">
-                <span>来源</span>
-                <WorkspaceSelect ariaLabel="筛选论文来源" onChange={(nextValue) => updateFilter(setSourceFilter, nextValue)} options={PAPER_SOURCE_FILTER_OPTIONS} value={sourceFilter} />
+                <span>{t("common.source")}</span>
+                <WorkspaceSelect ariaLabel={t("library.filters.sourceAria")} onChange={(nextValue) => updateFilter(setSourceFilter, nextValue)} options={sourceFilterOptions} value={sourceFilter} />
               </div>
               <div className="library-filter-control paper-filter-control">
-                <span>全文报告</span>
-                <WorkspaceSelect ariaLabel="筛选全文报告" onChange={(nextValue) => updateFilter(setReportPresence, nextValue)} options={REPORT_PRESENCE} value={reportPresence} />
+                <span>{t("common.fullReport")}</span>
+                <WorkspaceSelect ariaLabel={t("library.filters.reportAria")} onChange={(nextValue) => updateFilter(setReportPresence, nextValue)} options={reportPresenceOptions} value={reportPresence} />
               </div>
               <div className="library-filter-control paper-filter-control">
-                <span>重要性</span>
-                <WorkspaceSelect ariaLabel="筛选论文重要性" onChange={(nextValue) => updateFilter(setImportance, nextValue)} options={PAPER_IMPORTANCE_OPTIONS} value={importance} />
+                <span>{t("common.importance")}</span>
+                <WorkspaceSelect ariaLabel={t("library.filters.importanceAria")} onChange={(nextValue) => updateFilter(setImportance, nextValue)} options={importanceOptions} value={importance} />
               </div>
               <div className="library-filter-control paper-filter-control">
-                <span>排序</span>
-                <WorkspaceSelect ariaLabel="选择论文排序" onChange={(nextValue) => updateFilter(setSort, nextValue)} options={LIBRARY_SORTS} value={sort} />
+                <span>{t("common.sort")}</span>
+                <WorkspaceSelect ariaLabel={t("library.filters.sortAria")} onChange={(nextValue) => updateFilter(setSort, nextValue)} options={librarySortOptions} value={sort} />
               </div>
               <label className="library-filter-control library-search-control paper-filter-control paper-search-control">
-                <span>搜索</span>
-                <input value={query} onChange={(event) => updateFilter(setQuery, event.target.value)} placeholder="标题、摘要或 arXiv" />
+                <span>{t("common.search")}</span>
+                <input value={query} onChange={(event) => updateFilter(setQuery, event.target.value)} placeholder={t("library.filters.searchPlaceholder")} />
               </label>
               <label className="library-filter-control paper-filter-control">
-                <span>发布日期起</span>
+                <span>{t("library.filters.dateFrom")}</span>
                 <input type="date" value={dateFrom} onChange={(event) => updateFilter(setDateFrom, event.target.value)} />
               </label>
               <label className="library-filter-control paper-filter-control">
-                <span>发布日期止</span>
+                <span>{t("library.filters.dateTo")}</span>
                 <input type="date" value={dateTo} onChange={(event) => updateFilter(setDateTo, event.target.value)} />
               </label>
               <div className="library-filter-control paper-filter-control">
-                <span>每页</span>
+                <span>{t("common.perPage")}</span>
                 <WorkspaceSelect
-                  ariaLabel="每页论文数量"
+                  ariaLabel={t("library.filters.perPageAria")}
                   onChange={(nextValue) => { selectFirstFromNextList.current = true; setPageSize(Number(nextValue)); setPage(1); }}
-                  options={WORKSPACE_PAGE_SIZE_OPTIONS}
+                  options={pageSizeOptions}
                   value={String(pageSize)}
                 />
               </div>
@@ -393,12 +357,12 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
           </div>
           <div className="library-list paper-library-list">
           {loading ? (
-            <WorkspacePaneLoader rows={6} title="读取论文列表" variant="list" />
+            <WorkspacePaneLoader rows={6} title={t("library.list.loader")} variant="list" />
           ) : (
             items.length ? items.map((item) => {
               const itemStatusTone = STATUS_TONES[item.library_status] || "slate";
               const authors = Array.isArray(item.authors) ? item.authors.slice(0, 3).join(", ") : "";
-              const published = item.published_at ? fmtDate(item.published_at) : "未记录发布日期";
+              const published = item.published_at ? fmtDate(item.published_at, i18n.resolvedLanguage || i18n.language) : t("library.noPublishedDate");
               return (
                 <article
                   className={`inbox-paper-row library-paper-row-card ${activeId === item.id ? "active" : ""}`}
@@ -413,22 +377,22 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
                   tabIndex={0}
                 >
                   <div className="inbox-paper-row-head">
-                    <span className={`paper-pill paper-status-${itemStatusTone}`}>{statusLabel(item.library_status)}</span>
-                    {item.importance ? <span className={`paper-pill paper-importance-${safeToken(item.importance)}`}>重要性 {paperImportanceLabel(item.importance)}</span> : null}
-                    <span className="library-card-asset-state">{item.chunk_count || 0} 正文块</span>
+                    <span className={`paper-pill paper-status-${itemStatusTone}`}>{statusLabel(item.library_status, t)}</span>
+                    {item.importance ? <span className={`paper-pill paper-importance-${safeToken(item.importance)}`}>{t("library.importanceBadge", { value: paperImportanceLabel(item.importance, t) })}</span> : null}
+                    <span className="library-card-asset-state">{t("library.chunkCount", { count: item.chunk_count || 0 })}</span>
                   </div>
                   <h2>{item.title}</h2>
                   <div className="inbox-project-match library-card-context">
-                    <strong>馆藏信息</strong>
+                    <strong>{t("library.collectionInfo")}</strong>
                     <div>
-                      <span>{sourceLabel(paperListSource(item))}</span>
+                      <span>{sourceLabel(paperListSource(item), t)}</span>
                       {item.year ? <span>{item.year}</span> : null}
-                      <span>{item.asset_count || 0} 项资产</span>
-                      <span>{item.artifact_count || 0} 项产物</span>
+                      <span>{t("library.assetCount", { count: item.asset_count || 0 })}</span>
+                      <span>{t("library.artifactCount", { count: item.artifact_count || 0 })}</span>
                     </div>
                   </div>
                   <div className="inbox-paper-meta">
-                    <span>{paperIdentity(item)}</span>
+                    <span>{paperIdentity(item, t("library.noIdentity"))}</span>
                     <span>{published}</span>
                     {authors || item.venue ? <span>{authors || item.venue}</span> : null}
                   </div>
@@ -436,8 +400,8 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
               );
             }) : (
               <div className="paper-empty-state">
-                <strong>暂无论文</strong>
-                <p>{status || sourceFilter !== "all" || reportPresence || importance || sort !== "updated" || query || dateFrom || dateTo ? "当前筛选没有匹配项。" : "导入或保存的论文会显示在这里。"}</p>
+                <strong>{t("library.empty.title")}</strong>
+                <p>{status || sourceFilter !== "all" || reportPresence || importance || sort !== "updated" || query || dateFrom || dateTo ? t("library.empty.filtered") : t("library.empty.description")}</p>
               </div>
             )
           )}
@@ -453,127 +417,127 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
 
         <section className="detail-panel library-detail-panel">
         {detailLoading ? (
-          <WorkspacePaneLoader description="正在打开首篇论文的摘要、资产和正文片段。" title="读取论文详情" variant="detail" />
+          <WorkspacePaneLoader description={t("library.detail.loadingDescription")} title={t("library.detail.loadingTitle")} variant="detail" />
         ) : paper ? (
           <article className="inbox-detail-card library-paper-detail library-detail-transition" key={paper.id}>
             <div className="detail-main library-detail-main">
             <header className="detail-title inbox-detail-title library-detail-title">
               <div className="library-detail-hero-copy">
-                <span className="library-detail-eyebrow">馆藏论文 · {paperIdentity(paper)}</span>
+                <span className="library-detail-eyebrow">{t("library.detail.eyebrow", { id: paperIdentity(paper, t("library.noIdentity")) })}</span>
                 <h2>{paper.title}</h2>
-                <p className="library-detail-authors">{(paper.authors || []).slice(0, 8).join(", ") || "未记录作者"}</p>
+                <p className="library-detail-authors">{(paper.authors || []).slice(0, 8).join(", ") || t("common.noAuthors")}</p>
                 <div className="inbox-detail-meta library-detail-meta">
-                  <span className={`paper-pill paper-status-${STATUS_TONES[paper.library_status] || "slate"}`}>{statusLabel(paper.library_status)}</span>
-                  {paper.importance ? <span className={`paper-pill paper-importance-${safeToken(paper.importance)}`}>重要性 {paperImportanceLabel(paper.importance)}</span> : null}
-                  <span className="paper-pill paper-source-pill">{sourceLabel(mainSource?.source_type)}</span>
+                  <span className={`paper-pill paper-status-${STATUS_TONES[paper.library_status] || "slate"}`}>{statusLabel(paper.library_status, t)}</span>
+                  {paper.importance ? <span className={`paper-pill paper-importance-${safeToken(paper.importance)}`}>{t("library.importanceBadge", { value: paperImportanceLabel(paper.importance, t) })}</span> : null}
+                  <span className="paper-pill paper-source-pill">{sourceLabel(mainSource?.source_type, t)}</span>
                   {paper.year ? <span className="paper-pill paper-year-pill">{paper.year}</span> : null}
-                  {paperReport?.status ? <span className={`paper-pill report-status-${safeToken(paperReport.status)}`}>报告：{reportStatusLabel(paperReport.status)}</span> : null}
-                  <span>{paper.venue || "未记录发表场所"}</span>
-                  <span>更新于 {fmtDate(paper.updated_at)}</span>
+                  {paperReport?.status ? <span className={`paper-pill report-status-${safeToken(paperReport.status)}`}>{t("library.reportBadge", { status: reportStatusLabel(paperReport.status, t) })}</span> : null}
+                  <span>{paper.venue || t("library.noVenue")}</span>
+                  <span>{t("common.updatedAt", { date: fmtDate(paper.updated_at, i18n.resolvedLanguage || i18n.language) })}</span>
                 </div>
                 {paperReport?.paper_id ? (
                   <div className="library-detail-hero-actions">
                     <button className="library-report-action" onClick={() => onOpenReportQueue?.(paperReport.paper_id)} type="button">
-                      <span>打开报告队列</span><i aria-hidden="true">→</i>
+                      <span>{t("inbox.actions.openReport")}</span><i aria-hidden="true">→</i>
                     </button>
                   </div>
                 ) : null}
               </div>
             </header>
 
-            <section className="library-detail-stat-grid" aria-label="论文关键数据">
-              <div><span>关联项目</span><strong>{linkedProjects.length}</strong><p>研究项目</p></div>
-              <div><span>本地资产</span><strong>{assets.length}</strong><p>文件与缓存</p></div>
-              <div><span>正文索引</span><strong>{chunks.length}</strong><p>可检索块</p></div>
-              <div><span>研究产物</span><strong>{artifacts.length}</strong><p>报告与笔记</p></div>
+            <section className="library-detail-stat-grid" aria-label={t("library.detail.statsAria")}>
+              <div><span>{t("library.detail.linkedProjects")}</span><strong>{linkedProjects.length}</strong><p>{t("library.detail.researchProjects")}</p></div>
+              <div><span>{t("library.detail.localAssets")}</span><strong>{assets.length}</strong><p>{t("library.detail.filesCache")}</p></div>
+              <div><span>{t("library.detail.textIndex")}</span><strong>{chunks.length}</strong><p>{t("library.detail.searchableChunks")}</p></div>
+              <div><span>{t("library.detail.researchArtifacts")}</span><strong>{artifacts.length}</strong><p>{t("library.detail.reportsNotes")}</p></div>
             </section>
 
             <div className="library-detail-content">
               <section className="section inbox-content-section library-content-card library-abstract-card">
                 <header className="library-section-heading">
-                  <div><span>论文概览</span><h3>摘要</h3></div>
+                  <div><span>{t("library.sections.overview")}</span><h3>{t("library.sections.abstract")}</h3></div>
                   <em>{paper.year || "—"}</em>
                 </header>
-                <p>{paper.abstract || "暂无摘要。"}</p>
+                <p>{paper.abstract || t("library.noAbstract")}</p>
               </section>
 
               <section className="section inbox-content-section library-content-card library-status-card">
                 <header className="library-section-heading">
-                  <div><span>阅读管理</span><h3>论文状态</h3></div>
-                  <em>{statusLabel(paper.library_status)}</em>
+                  <div><span>{t("library.sections.readingManagement")}</span><h3>{t("library.sections.paperStatus")}</h3></div>
+                  <em>{statusLabel(paper.library_status, t)}</em>
                 </header>
-                <p>更新当前论文在研究工作流中的位置。</p>
-                <div className="paper-status-actions library-status-actions" aria-label="论文状态">
-                  <button disabled={busy || paper.library_status === "saved"} onClick={() => updateStatus("saved")} type="button"><i className="status-dot saved" />保存</button>
-                  <button disabled={busy || paper.library_status === "reading"} onClick={() => updateStatus("reading")} type="button"><i className="status-dot reading" />阅读中</button>
-                  <button disabled={busy || paper.library_status === "read"} onClick={() => updateStatus("read")} type="button"><i className="status-dot read" />已读</button>
-                  <button className="danger" disabled={busy || paper.library_status === "discarded"} onClick={() => updateStatus("discarded")} type="button"><i className="status-dot discarded" />丢弃</button>
+                <p>{t("library.statusDescription")}</p>
+                <div className="paper-status-actions library-status-actions" aria-label={t("library.sections.paperStatus")}>
+                  <button disabled={busy || paper.library_status === "saved"} onClick={() => updateStatus("saved")} type="button"><i className="status-dot saved" />{t("library.status.saved")}</button>
+                  <button disabled={busy || paper.library_status === "reading"} onClick={() => updateStatus("reading")} type="button"><i className="status-dot reading" />{t("library.status.reading")}</button>
+                  <button disabled={busy || paper.library_status === "read"} onClick={() => updateStatus("read")} type="button"><i className="status-dot read" />{t("library.status.read")}</button>
+                  <button className="danger" disabled={busy || paper.library_status === "discarded"} onClick={() => updateStatus("discarded")} type="button"><i className="status-dot discarded" />{t("library.status.discardedAction")}</button>
                 </div>
               </section>
 
               <div className="library-detail-card-grid">
                 <section className="section inbox-content-section library-content-card">
                   <header className="library-section-heading">
-                    <div><span>研究脉络</span><h3>项目关联</h3></div>
+                    <div><span>{t("library.sections.researchContext")}</span><h3>{t("library.sections.projectLinks")}</h3></div>
                     <em>{linkedProjects.length}</em>
                   </header>
                   <div className="paper-item-list">
                     {linkedProjects.length ? linkedProjects.map((project) => (
                       <a className="paper-info-item paper-info-link" href={`/projects/${encodeURIComponent(String(project.project_id))}`} key={project.project_id}>
                         <strong>{project.project_name}</strong>
-                        <p>{project.relation}{project.importance ? ` · 重要性 ${paperImportanceLabel(project.importance)}` : ""} · {project.note || "已关联"}</p>
+                        <p>{t(`relation.${project.relation}`, { defaultValue: project.relation })}{project.importance ? ` · ${t("library.importanceBadge", { value: paperImportanceLabel(project.importance, t) })}` : ""} · {project.note || t("library.linked")}</p>
                       </a>
-                    )) : <p className="muted">暂无项目关联。</p>}
+                    )) : <p className="muted">{t("library.noProjectLinks")}</p>}
                   </div>
                 </section>
                 <section className="section inbox-content-section library-content-card">
                   <header className="library-section-heading">
-                    <div><span>研究输出</span><h3>论文产物</h3></div>
+                    <div><span>{t("library.sections.researchOutput")}</span><h3>{t("library.sections.paperArtifacts")}</h3></div>
                     <em>{artifacts.length}</em>
                   </header>
                   <div className="paper-item-list">
                     {artifacts.length ? artifacts.slice(0, 6).map((artifact) => (
                       <a className="paper-info-item paper-info-link" href={`/artifacts/${artifact.id}`} key={artifact.id}>
                         <strong>{artifact.title}</strong>
-                        <p>{artifact.artifact_type} · {artifact.status} · {fmtDate(artifact.updated_at)}</p>
+                        <p>{artifact.artifact_type} · {t(`workflowState.${artifact.status}`, { defaultValue: artifact.status })} · {fmtDate(artifact.updated_at, i18n.resolvedLanguage || i18n.language)}</p>
                       </a>
-                    )) : <p className="muted">暂无论文产物。</p>}
+                    )) : <p className="muted">{t("library.noArtifacts")}</p>}
                   </div>
                 </section>
                 <section className="section inbox-content-section library-content-card">
                   <header className="library-section-heading">
-                    <div><span>数据完整度</span><h3>资产和来源</h3></div>
+                    <div><span>{t("library.sections.dataCompleteness")}</span><h3>{t("library.sections.assetsSources")}</h3></div>
                     <em>{sources.length + assets.length}</em>
                   </header>
                   <div className="paper-item-list">
                     {sources.map((source) => (
                       <article className="paper-info-item" key={`source-${source.id}`}>
-                        <strong>{sourceLabel(source.source_type)}</strong>
-                        <p>{source.source_identifier || source.source_url || "未记录"}</p>
+                        <strong>{sourceLabel(source.source_type, t)}</strong>
+                        <p>{source.source_identifier || source.source_url || t("common.notRecorded")}</p>
                       </article>
                     ))}
                     {assets.map((asset) => (
                       <article className="paper-info-item" key={`asset-${asset.id}`}>
-                        <strong>{asset.asset_type} · {ASSET_STATUS_LABELS[asset.status] || asset.status || "状态未知"}</strong>
-                        <p>{asset.path || asset.url || asset.error_message || "未记录路径"}</p>
+                        <strong>{asset.asset_type} · {t(`library.assetStatus.${asset.status || "unknown"}`, { defaultValue: asset.status || t("library.assetStatus.unknown") })}</strong>
+                        <p>{asset.path || asset.url || asset.error_message || t("library.noPath")}</p>
                       </article>
                     ))}
-                    {!(sources.length + assets.length) ? <p className="muted">暂无资产或来源记录。</p> : null}
+                    {!(sources.length + assets.length) ? <p className="muted">{t("library.noAssetsSources")}</p> : null}
                   </div>
                 </section>
                 <section className="section inbox-content-section library-content-card paper-chunk-section">
                   <header className="library-section-heading">
-                    <div><span>全文索引</span><h3>正文片段</h3></div>
+                    <div><span>{t("library.sections.fullTextIndex")}</span><h3>{t("library.sections.textChunks")}</h3></div>
                     <em>{chunks.length}</em>
                   </header>
                   <div className="paper-item-list">
                     {chunks.slice(0, 5).map((chunk) => (
                       <article className="paper-info-item" key={chunk.id}>
-                        <strong>Chunk {chunk.chunk_index}{chunk.page_start ? ` · p.${chunk.page_start}` : ""}</strong>
+                        <strong>{t("library.chunkLabel", { index: chunk.chunk_index })}{chunk.page_start ? ` · ${t("library.pageLabel", { page: chunk.page_start })}` : ""}</strong>
                         <p>{snippet(chunk.text, 260)}</p>
                       </article>
                     ))}
-                    {!chunks.length ? <p className="muted">暂无正文块。</p> : null}
+                    {!chunks.length ? <p className="muted">{t("library.noChunks")}</p> : null}
                   </div>
                 </section>
               </div>
@@ -582,8 +546,8 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
           </article>
         ) : (
           <div className="empty-detail paper-empty-detail">
-            <h2>选择一篇论文</h2>
-            <p>论文状态、来源、资产和关联项目会显示在这里。</p>
+            <h2>{t("library.detail.selectTitle")}</h2>
+            <p>{t("library.detail.selectDescription")}</p>
           </div>
         )}
         </section>

@@ -1,7 +1,12 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
+
+import { LanguageControl } from "./LanguageControl.jsx";
+import { formatApiError } from "../lib/systemMessages.js";
 import "../styles/LoginView.css";
 
 export function LoginView({ onLogin }) {
+  const { t } = useTranslation(["shell", "common"]);
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [password, setPassword] = useState("");
@@ -9,7 +14,7 @@ export function LoginView({ onLogin }) {
   const handleSubmit = async (event) => {
     event.preventDefault();
     if (!password) {
-      setError("请输入访问密码");
+      setError(t("login.passwordRequired"));
       return;
     }
 
@@ -18,7 +23,7 @@ export function LoginView({ onLogin }) {
     try {
       await onLogin(password);
     } catch (submitError) {
-      setError(submitError.message || "登录失败，请确认密码");
+      setError(formatApiError(submitError, t, "shell:login.failed"));
       setIsSubmitting(false);
     }
   };
@@ -34,11 +39,12 @@ export function LoginView({ onLogin }) {
             <strong id="login-title">KRIS</strong>
             <span>Kardashev Research Intelligence System</span>
           </div>
+          <LanguageControl />
         </div>
 
         <form className="login-form" noValidate onSubmit={handleSubmit}>
           <label className="login-field">
-            <span>访问密码</span>
+            <span>{t("login.password")}</span>
             <input
               aria-describedby={error ? "login-error" : undefined}
               aria-invalid={Boolean(error)}
@@ -61,10 +67,10 @@ export function LoginView({ onLogin }) {
             {isSubmitting ? (
               <span className="inline-loader compact">
                 <span className="loader-dot" aria-hidden="true" />
-                验证中
+                {t("login.verifying")}
               </span>
             ) : (
-              "登录"
+              t("actions.login", { ns: "common" })
             )}
           </button>
         </form>

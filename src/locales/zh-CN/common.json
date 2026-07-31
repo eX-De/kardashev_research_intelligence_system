@@ -1,0 +1,98 @@
+{
+  "listSeparator": "；",
+  "messageSeparator": "：",
+  "language": {
+    "label": "界面语言",
+    "zh-CN": { "short": "中", "full": "简体中文" },
+    "en": { "short": "EN", "full": "English" }
+  },
+  "actions": {
+    "close": "关闭",
+    "closeDialog": "关闭弹窗",
+    "closeNotification": "关闭通知",
+    "inProgress": "{{action}}中",
+    "login": "登录",
+    "loggingOut": "退出中",
+    "logout": "退出",
+    "nextPage": "下一页",
+    "previousPage": "上一页",
+    "refresh": "刷新",
+    "select": "请选择"
+  },
+  "loading": {
+    "default": "加载中",
+    "dataDescription": "正在读取数据。",
+    "reportDescription": "正在载入报告渲染模块。",
+    "reportTitle": "报告渲染中",
+    "workspace": "读取工作区"
+  },
+  "pagination": {
+    "compact": "{{current}} / {{count}}",
+    "summary": "第 {{current}} 页，共 {{count}} 页",
+    "perPage": "{{count}}/页"
+  },
+  "theme": {
+    "label": "主题模式",
+    "light": "浅色",
+    "dark": "暗色",
+    "system": "系统",
+    "systemCurrent": "跟随系统，当前{{current}}"
+  },
+  "toast": {
+    "host": "通知",
+    "error": "错误",
+    "info": "提示",
+    "success": "成功",
+    "warning": "警告"
+  },
+  "projectStatus": {
+    "active": "进行中",
+    "planned": "计划中",
+    "completed": "已完成",
+    "paused": "搁置",
+    "exploring": "探索中",
+    "writing": "写作中",
+    "archived": "已归档"
+  },
+  "projectPaperRelation": {
+    "candidate": "候选",
+    "reading": "阅读中",
+    "core": "核心",
+    "background": "背景",
+    "rejected": "已排除"
+  },
+  "projectNoteRelation": {
+    "source": "来源",
+    "idea": "想法",
+    "method": "方法",
+    "result": "结果",
+    "todo": "待办",
+    "center_page": "中心页",
+    "folder_member": "文件夹成员"
+  },
+  "jobType": {
+    "unknown": "未知任务",
+    "run-daily": "运行每日流程",
+    "resume-daily": "继续每日流程",
+    "retry-daily": "重试每日流程",
+    "fetch-arxiv": "获取 arXiv 论文",
+    "cache-arxiv-text": "缓存 arXiv 全文",
+    "generate-paper-reports": "生成论文报告",
+    "generate-reports": "生成研究报告",
+    "sync-obsidian": "同步 Obsidian",
+    "rank-papers": "论文排序",
+    "project-index": "构建项目索引",
+    "project-export-obsidian": "导出项目到 Obsidian",
+    "project-context": "生成项目上下文"
+  },
+  "jobStatus": {
+    "queued": "排队中",
+    "pending": "等待中",
+    "running": "进行中",
+    "completed": "已完成",
+    "success": "成功",
+    "failed": "失败",
+    "cancelled": "已取消",
+    "skipped": "已跳过"
+  }
+}

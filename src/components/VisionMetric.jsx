@@ -1,16 +1,18 @@
 import { Link } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 import "../styles/VisionMetric.css";
 
-export function formatMetricCount(value) {
+export function formatMetricCount(value, locale = "zh-CN") {
   const count = Number(value);
-  return Number.isFinite(count) ? new Intl.NumberFormat("zh-CN").format(count) : "0";
+  return Number.isFinite(count) ? new Intl.NumberFormat(locale).format(count) : "0";
 }
 
 export function VisionMetric({ hint, label, tone, to, value }) {
+  const { i18n } = useTranslation();
   const content = (
     <>
       <span>{label}</span>
-      <strong>{formatMetricCount(value)}</strong>
+      <strong>{formatMetricCount(value, i18n.resolvedLanguage)}</strong>
       <p>{hint}</p>
     </>
   );

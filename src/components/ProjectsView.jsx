@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { LoadingPanel } from "./Loading.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
 import { WorkspaceDialog } from "./WorkspaceDialog.jsx";
 import { WorkspaceSelect } from "./WorkspaceSelect.jsx";
 import { formatMetricCount, VisionMetric } from "./VisionMetric.jsx";
-import { api, chooseLocalPath, fmtDate, postJson, PROJECT_STATUSES, statusLabel } from "../lib/dashboard.js";
+import { api, chooseLocalPath, fmtDate, postJson, projectStatusOptions, statusLabel } from "../lib/dashboard.js";
 import { useCachedApi } from "../lib/apiCache.jsx";
 import { friendlyObsidianMessage, useObsidianCapability } from "../lib/obsidianCapability.js";
 import "../styles/ProjectsView.css";
@@ -38,18 +39,19 @@ function ProjectGlyph() {
 }
 
 function ProjectCard({ index, project, onOpen }) {
-  const projectPath = project.obsidian_folder || project.obsidian_project_path || project.obsidian_output_dir || "系统内项目";
+  const { t, i18n } = useTranslation("projects");
+  const projectPath = project.obsidian_folder || project.obsidian_project_path || project.obsidian_output_dir || t("list.internalProject");
   const metrics = [
-    ["论文", project.paper_count],
-    ["上下文", project.note_count],
-    ["产物", project.artifact_count]
+    [t("list.papers"), project.paper_count],
+    [t("list.context"), project.note_count],
+    [t("list.artifact"), project.artifact_count]
   ];
 
   return (
     <button className={`project-vision-card project-tone-${project.status || "default"}`} onClick={() => onOpen(project.id)} type="button">
       <header>
-        <span className="project-card-index"><small>Research project</small><strong>{String(index + 1).padStart(2, "0")}</strong></span>
-        <span className={`project-card-status status-${project.status}`}><i aria-hidden="true" />{statusLabel(project.status)}</span>
+        <span className="project-card-index"><small>{t("common.researchProject")}</small><strong>{String(index + 1).padStart(2, "0")}</strong></span>
+        <span className={`project-card-status status-${project.status}`}><i aria-hidden="true" />{statusLabel(project.status, t)}</span>
       </header>
       <div className="project-card-body">
         <div className="project-card-copy">
@@ -57,25 +59,26 @@ function ProjectCard({ index, project, onOpen }) {
           <p title={projectPath}>{projectPath}</p>
         </div>
       </div>
-      <div className="project-card-metrics" aria-label="项目规模">
+      <div className="project-card-metrics" aria-label={t("list.scaleAria")}>
         {metrics.map(([label, value]) => (
-          <span key={label}><small>{label}</small><strong>{formatMetricCount(value)}</strong></span>
+          <span key={label}><small>{label}</small><strong>{formatMetricCount(value, i18n.resolvedLanguage)}</strong></span>
         ))}
       </div>
       <footer>
-        <span>更新于 {fmtDate(project.updated_at)}</span>
-        <b>打开项目 <i aria-hidden="true">→</i></b>
+        <span>{t("list.updatedAt", { date: fmtDate(project.updated_at, i18n.resolvedLanguage) })}</span>
+        <b>{t("list.openProject")} <i aria-hidden="true">→</i></b>
       </footer>
     </button>
   );
 }
 
 export function ProjectsView({ onOpenProject, setStatusMessage }) {
+  const { t } = useTranslation("projects");
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [projectForm, setProjectForm] = useState(emptyProjectForm);
   const [savingProject, setSavingProject] = useState(false);
   const projectsQuery = useCachedApi(["projects"], () => api("/api/projects"), { staleTime: 60000 });
-  const handleObsidianError = useCallback((error) => setStatusMessage(friendlyObsidianMessage(error)), [setStatusMessage]);
+  const handleObsidianError = useCallback((error) => setStatusMessage(friendlyObsidianMessage(error, t)), [setStatusMessage, t]);
   const obsidianCapability = useObsidianCapability({ onError: handleObsidianError });
 
   useEffect(() => {
@@ -112,7 +115,7 @@ export function ProjectsView({ onOpenProject, setStatusMessage }) {
       const data = await chooseLocalPath({ mode, title, relativeTo: "obsidian_vault" });
       if (!data.cancelled) updateProjectForm(field, data.relative_path ?? data.path ?? "");
     } catch (error) {
-      setStatusMessage(friendlyObsidianMessage(error));
+      setStatusMessage(friendlyObsidianMessage(error, t));
     }
   }
 
@@ -132,7 +135,7 @@ export function ProjectsView({ onOpenProject, setStatusMessage }) {
         // The project has already been created; the detail route and SSE will refresh shared state.
       }
       setProjectDialogOpen(false);
-      setStatusMessage(data.context_job?.queued ? "项目已创建，上下文正在处理" : "项目已创建");
+      setStatusMessage(t(data.context_job?.queued ? "create.createdQueued" : "create.created"));
       onOpenProject(data.project.id);
     } catch (error) {
       setStatusMessage(error.message);
@@ -158,13 +161,13 @@ export function ProjectsView({ onOpenProject, setStatusMessage }) {
     <section className="view vision-projects">
       <header className="vision-topbar project-vision-topbar">
         <div className="vision-brand">
-          <span>研究组织</span>
-          <h1>项目工作台</h1>
+          <span>{t("list.eyebrow")}</span>
+          <h1>{t("list.title")}</h1>
         </div>
         <div className="vision-top-actions">
-          <span className={`vision-live-state ${overview.active ? "running" : "ready"}`}><i aria-hidden="true" />{loading ? "正在同步" : `${overview.active} 个活跃项目`}</span>
+          <span className={`vision-live-state ${overview.active ? "running" : "ready"}`}><i aria-hidden="true" />{loading ? t("list.syncing") : t("list.activeCount", { count: overview.active })}</span>
           <RefreshButton busy={refreshBusy} className="vision-refresh" onClick={refresh} />
-          <button className="project-new-button workspace-primary-action" onClick={openNewProjectDialog} type="button"><span aria-hidden="true">＋</span>新建项目</button>
+          <button className="project-new-button workspace-primary-action" onClick={openNewProjectDialog} type="button"><span aria-hidden="true">＋</span>{t("list.newProject")}</button>
         </div>
       </header>
 
@@ -172,42 +175,42 @@ export function ProjectsView({ onOpenProject, setStatusMessage }) {
         <section className="project-vision-hero" aria-labelledby="project-vision-title">
           <div className="project-hero-art" aria-hidden="true"><i /><i /><i /></div>
           <div className="project-hero-copy">
-            <span>研究组合</span>
-            <h2 id="project-vision-title">把论文、上下文与产物组织成持续推进的研究空间</h2>
-            <p>{loading ? "正在读取你的研究项目。" : overview.total ? `当前共维护 ${overview.total} 个项目，其中 ${overview.active} 个正在推进。` : "建立第一个项目，从研究问题开始积累长期上下文。"}</p>
+            <span>{t("list.portfolio")}</span>
+            <h2 id="project-vision-title">{t("list.heroTitle")}</h2>
+            <p>{loading ? t("list.loadingProjects") : overview.total ? t("list.overviewSentence", { total: overview.total, active: overview.active }) : t("list.firstProjectHint")}</p>
           </div>
           <div className="project-hero-action">
-            <span>下一步</span>
-            <strong>{overview.total ? "继续推进现有研究" : "创建第一个研究项目"}</strong>
+            <span>{t("list.next")}</span>
+            <strong>{t(overview.total ? "list.continueExisting" : "list.createFirst")}</strong>
             <button onClick={overview.total ? () => onOpenProject(projects[0].id) : openNewProjectDialog} type="button">
-              {overview.total ? "打开最近项目" : "开始创建"}<b aria-hidden="true">→</b>
+              {t(overview.total ? "list.openRecent" : "list.startCreating")}<b aria-hidden="true">→</b>
             </button>
           </div>
         </section>
 
-        <section className="vision-stats project-vision-stats" aria-label="项目概览">
-          <VisionMetric label="项目" value={overview.total} hint={`${overview.active} 个正在推进`} tone="violet" />
-          <VisionMetric label="关联论文" value={overview.papers} hint="项目研究材料" tone="blue" />
-          <VisionMetric label="知识上下文" value={overview.notes} hint="笔记与知识来源" tone="gold" />
-          <VisionMetric label="研究产物" value={overview.artifacts} hint="已沉淀的结果" tone="coral" />
+        <section className="vision-stats project-vision-stats" aria-label={t("list.overviewAria")}>
+          <VisionMetric label={t("list.project")} value={overview.total} hint={t("list.activeHint", { count: overview.active })} tone="violet" />
+          <VisionMetric label={t("list.linkedPapers")} value={overview.papers} hint={t("list.researchMaterials")} tone="blue" />
+          <VisionMetric label={t("list.knowledgeContext")} value={overview.notes} hint={t("list.notesSources")} tone="gold" />
+          <VisionMetric label={t("list.artifacts")} value={overview.artifacts} hint={t("list.settledResults")} tone="coral" />
         </section>
 
         <section className="project-vision-workspace" aria-labelledby="project-list-title">
           <header className="project-workspace-heading">
             <div>
-              <span>项目空间</span>
-              <h2 id="project-list-title">全部项目</h2>
-              <p>进入项目后继续管理目标、候选论文、上下文与研究产物。</p>
+              <span>{t("list.space")}</span>
+              <h2 id="project-list-title">{t("list.allProjects")}</h2>
+              <p>{t("list.spaceDescription")}</p>
             </div>
-            <div className="project-workspace-summary" aria-label="项目状态摘要">
-              <span><i className="active" />活跃 {overview.active}</span>
-              <span><i className="paused" />暂停 {overview.paused}</span>
-              <strong>{overview.total} 项</strong>
+            <div className="project-workspace-summary" aria-label={t("list.statusSummary")}>
+              <span><i className="active" />{t("list.active", { count: overview.active })}</span>
+              <span><i className="paused" />{t("list.paused", { count: overview.paused })}</span>
+              <strong>{t("list.itemCount", { count: overview.total })}</strong>
             </div>
           </header>
 
           {loading ? (
-            <LoadingPanel compact rows={6} title="读取项目空间" />
+            <LoadingPanel compact rows={6} title={t("list.loadingSpace")} />
           ) : projects.length ? (
             <div className="project-vision-grid">
               {projects.map((project, index) => <ProjectCard index={index} key={project.id} onOpen={onOpenProject} project={project} />)}
@@ -215,23 +218,23 @@ export function ProjectsView({ onOpenProject, setStatusMessage }) {
           ) : (
             <div className="project-vision-empty">
               <span className="project-empty-icon"><ProjectGlyph /></span>
-              <div><strong>这里还没有研究项目</strong><p>创建项目后，论文、笔记与产物会在同一个研究上下文中持续积累。</p></div>
-              <button onClick={openNewProjectDialog} type="button">新建项目</button>
+              <div><strong>{t("list.emptyTitle")}</strong><p>{t("list.emptyDescription")}</p></div>
+              <button onClick={openNewProjectDialog} type="button">{t("list.newProject")}</button>
             </div>
           )}
         </section>
       </main>
       <WorkspaceDialog
         className="new-project-dialog"
-        description="建立一个长期研究空间；保存后即可关联论文、上下文和研究产物。"
-        eyebrow="Research workspace"
+        description={t("create.description")}
+        eyebrow={t("create.eyebrow")}
         footer={(
           <>
-            <span>带 * 的字段为必填项</span>
+            <span>{t("create.requiredHint")}</span>
             <div>
-              <button disabled={savingProject} onClick={() => setProjectDialogOpen(false)} type="button">取消</button>
+              <button disabled={savingProject} onClick={() => setProjectDialogOpen(false)} type="button">{t("common.cancel")}</button>
               <button className="workspace-dialog-primary" disabled={savingProject || !projectForm.name.trim()} form="new-project-dialog-form" type="submit">
-                {savingProject ? "创建中…" : "创建并进入项目"}<i aria-hidden="true">→</i>
+                {t(savingProject ? "create.creating" : "create.createAndEnter")}<i aria-hidden="true">→</i>
               </button>
             </div>
           </>
@@ -241,41 +244,41 @@ export function ProjectsView({ onOpenProject, setStatusMessage }) {
           if (!savingProject) setProjectDialogOpen(false);
         }}
         open={projectDialogOpen}
-        title="新建研究项目"
+        title={t("create.title")}
       >
         <form className="workspace-form" id="new-project-dialog-form" onSubmit={createProject}>
           <label className="workspace-field workspace-field-wide">
-            <span>项目名称 *</span>
-            <input autoFocus onChange={(event) => updateProjectForm("name", event.target.value)} placeholder="例如：Agentic Research Workflow" required value={projectForm.name} />
+            <span>{t("create.name")}</span>
+            <input autoFocus onChange={(event) => updateProjectForm("name", event.target.value)} placeholder={t("create.namePlaceholder")} required value={projectForm.name} />
           </label>
           <div className="workspace-field">
-            <span>当前阶段</span>
-            <WorkspaceSelect ariaLabel="选择项目当前阶段" onChange={(nextValue) => updateProjectForm("status", nextValue)} options={PROJECT_STATUSES} value={projectForm.status} />
+            <span>{t("create.stage")}</span>
+            <WorkspaceSelect ariaLabel={t("create.stageAria")} onChange={(nextValue) => updateProjectForm("status", nextValue)} options={projectStatusOptions(t)} value={projectForm.status} />
           </div>
           <label className="workspace-field">
-            <span>研究关键词</span>
+            <span>{t("create.keywords")}</span>
             <input onChange={(event) => updateProjectForm("keywords", event.target.value)} placeholder="RAG, agent, scientific discovery" value={projectForm.keywords} />
           </label>
           <label className="workspace-field workspace-field-wide">
-            <span>项目上下文</span>
-            <textarea onChange={(event) => updateProjectForm("raw_context", event.target.value)} placeholder="粘贴研究问题、README、实验计划或任何需要长期保留的背景。" rows={5} value={projectForm.raw_context} />
-            <small>保存后会作为项目知识上下文参与论文匹配与对话。</small>
+            <span>{t("create.context")}</span>
+            <textarea onChange={(event) => updateProjectForm("raw_context", event.target.value)} placeholder={t("create.contextPlaceholder")} rows={5} value={projectForm.raw_context} />
+            <small>{t("create.contextHint")}</small>
           </label>
           <section className="workspace-form-section workspace-field-wide">
-            <header><div><span>可选连接</span><strong>Obsidian</strong></div><em>{obsidianCapability.available ? "可用" : "未启用"}</em></header>
+            <header><div><span>{t("create.optionalConnection")}</span><strong>Obsidian</strong></div><em>{t(obsidianCapability.available ? "create.available" : "create.disabled")}</em></header>
             <div className="workspace-form-grid">
               <label className="workspace-field">
-                <span>项目主页</span>
+                <span>{t("create.home")}</span>
                 <div className="workspace-path-field">
                   <input disabled={!obsidianCapability.available} onChange={(event) => updateProjectForm("obsidian_project_path", event.target.value)} placeholder="Projects/Research/Home.md" value={projectForm.obsidian_project_path} />
-                  <button disabled={!obsidianCapability.available} onClick={() => pickProjectPath("obsidian_project_path", "file", "选择 Obsidian 项目主页")} type="button">选择</button>
+                  <button disabled={!obsidianCapability.available} onClick={() => pickProjectPath("obsidian_project_path", "file", t("create.chooseHome"))} type="button">{t("common.select")}</button>
                 </div>
               </label>
               <label className="workspace-field">
-                <span>输出目录</span>
+                <span>{t("create.outputDirectory")}</span>
                 <div className="workspace-path-field">
                   <input disabled={!obsidianCapability.available} onChange={(event) => updateProjectForm("obsidian_output_dir", event.target.value)} placeholder="Projects/Research" value={projectForm.obsidian_output_dir} />
-                  <button disabled={!obsidianCapability.available} onClick={() => pickProjectPath("obsidian_output_dir", "directory", "选择 Obsidian 输出目录")} type="button">选择</button>
+                  <button disabled={!obsidianCapability.available} onClick={() => pickProjectPath("obsidian_output_dir", "directory", t("create.chooseOutput"))} type="button">{t("common.select")}</button>
                 </div>
               </label>
             </div>

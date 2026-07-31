@@ -2,11 +2,6 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 
 export const THEME_STORAGE_KEY = "kris.theme.mode";
 export const THEME_MODES = ["light", "dark", "system"];
-export const THEME_LABELS = {
-  light: "浅色",
-  dark: "暗色",
-  system: "系统"
-};
 
 const ThemeContext = createContext(null);
 

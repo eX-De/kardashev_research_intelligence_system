@@ -195,6 +195,10 @@ def update_notification(status: dict[str, Any]) -> dict[str, Any] | None:
         "severity": "warn",
         "title": "有新版本可用",
         "detail": detail,
+        "data": {
+            "current_version": current,
+            "latest_version": latest,
+        },
         "created_at": update["checked_at"] or update["published_at"],
         "source": {"update": update},
         "channels": ["list", "toast"],

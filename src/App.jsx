@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import {
   BrowserRouter,
   Navigate,
@@ -23,7 +24,9 @@ import { Sidebar } from "./components/Sidebar.jsx";
 import { ToastHost } from "./components/ToastHost.jsx";
 import { ApiCacheProvider } from "./lib/apiCache.jsx";
 import { AUTH_REQUIRED_EVENT, api, postJson } from "./lib/dashboard.js";
+import { LocaleProvider } from "./lib/locale.jsx";
 import { useServerEvents } from "./lib/serverEvents.js";
+import { formatApiError } from "./lib/systemMessages.js";
 import { ThemeProvider } from "./lib/theme.jsx";
 import "./styles/App.css";
 
@@ -61,9 +64,33 @@ function authFlag(data) {
   return null;
 }
 
-function authStatusLabel(authInfo) {
-  if (authInfo?.auth_required === false) return "无密码模式";
-  return "已登录";
+function authStatusLabel(authInfo, t) {
+  if (authInfo?.auth_required === false) return t("auth.noPassword");
+  return t("auth.loggedIn");
+}
+
+function isMessageDescriptor(message) {
+  return Boolean(message && typeof message === "object" && typeof message.key === "string");
+}
+
+function isSystemNotificationDescriptor(message) {
+  return Boolean(message && typeof message === "object" && message.kind === "system-notification" && message.notification);
+}
+
+function messageHasContent(message) {
+  if (typeof message === "string") return Boolean(message.trim());
+  if (isSystemNotificationDescriptor(message)) return true;
+  return isMessageDescriptor(message) && Boolean(message.key.trim() || String(message.fallback || "").trim());
+}
+
+function resolveMessage(t, message) {
+  if (isSystemNotificationDescriptor(message)) return "";
+  if (!isMessageDescriptor(message)) return String(message ?? "");
+  return t(message.key, {
+    ...(message.values || {}),
+    defaultValue: message.fallback,
+    ns: message.namespace
+  });
 }
 
 function isAuthenticatedStatus(data) {
@@ -208,17 +235,19 @@ function LoginRoute({ authenticated, onLogin }) {
 }
 
 function AuthLoadingScreen() {
+  const { t } = useTranslation("app");
   return (
     <main className="auth-loading" aria-busy="true">
       <div className="auth-loading-panel">
         <span className="loader-dot" aria-hidden="true" />
-        <strong>正在验证访问状态</strong>
+        <strong>{t("auth.checking")}</strong>
       </div>
     </main>
   );
 }
 
 function ProtectedShell({ authInfo, authStatusLabel, notify, onLogout, setStatusMessage, statusMessage, toasts, onDismissToast }) {
+  const { t } = useTranslation("app");
   const location = useLocation();
   const navigate = useNavigate();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
@@ -265,8 +294,8 @@ function ProtectedShell({ authInfo, authStatusLabel, notify, onLogout, setStatus
       navigate(`/login?next=${encodeURIComponent(nextPath)}`, { replace: true });
     } catch (error) {
       setIsLoggingOut(false);
-      notify(error.message || "退出登录失败", {
-        statusMessage: "退出登录失败",
+      notify(formatApiError(error, t, "app:auth.logoutFailed"), {
+        statusMessage: t("auth.logoutFailed"),
         type: "error"
       });
     }
@@ -278,16 +307,16 @@ function ProtectedShell({ authInfo, authStatusLabel, notify, onLogout, setStatus
       .then((data) => {
         if (!active) return;
         if (data.startup_daily_trigger?.triggered) {
-          setStatusMessage("每日流程已在后台启动");
+          setStatusMessage(t("status.dailyStarted"));
         }
       })
       .catch((error) => {
-        if (active) setStatusMessage(error.message);
+        if (active) setStatusMessage(formatApiError(error, t));
       });
     return () => {
       active = false;
     };
-  }, [setStatusMessage]);
+  }, [setStatusMessage, t]);
 
   return (
     <>
@@ -336,7 +365,8 @@ function CachedProtectedShell(props) {
 }
 
 function AuthenticatedApp() {
-  const [statusMessage, setStatusMessage] = useState("Idle");
+  const { t } = useTranslation("app");
+  const [statusMessage, setStatusMessage] = useState(() => t("status.idle"));
   const [toasts, setToasts] = useState([]);
   const [authState, setAuthState] = useState({
     authenticated: false,
@@ -352,8 +382,7 @@ function AuthenticatedApp() {
   }, []);
 
   const notify = useCallback((message, options = {}) => {
-    const text = typeof message === "string" ? message : String(message ?? "");
-    if (!text.trim()) return null;
+    if (!messageHasContent(message)) return null;
 
     const type = TOAST_TYPES.has(options.type) ? options.type : "info";
     const duration = Number.isFinite(options.duration)
@@ -364,14 +393,14 @@ function AuthenticatedApp() {
     const id = `toast-${Date.now()}-${toastIdRef.current + 1}`;
     toastIdRef.current += 1;
 
-    setToasts((current) => [...current, { duration, id, message: text, type }].slice(-MAX_TOASTS));
+    setToasts((current) => [...current, { duration, id, message, type }].slice(-MAX_TOASTS));
 
     if (options.statusMessage) {
-      setStatusMessage(typeof options.statusMessage === "string" ? options.statusMessage : text);
+      setStatusMessage(resolveMessage(t, options.statusMessage));
     }
 
     return id;
-  }, []);
+  }, [t]);
 
   const notifyNotification = useCallback((notification) => {
     if (!notification || typeof notification !== "object") return null;
@@ -382,13 +411,8 @@ function AuthenticatedApp() {
         : [];
     if (!channels.includes("toast")) return null;
 
-    const title = typeof notification.title === "string" ? notification.title.trim() : "";
-    const detail = typeof notification.detail === "string" ? notification.detail.trim() : "";
-    const message = [title, detail].filter(Boolean).join("：");
-    if (!message) return null;
-
     const type = NOTIFICATION_TOAST_TYPES[notification.severity] || "info";
-    return notify(message, { type });
+    return notify({ kind: "system-notification", notification }, { type });
   }, [notify]);
 
   useEffect(() => {
@@ -435,7 +459,7 @@ function AuthenticatedApp() {
     const data = await postJson("/api/auth/login", { password });
     const flag = authFlag(data);
     if (flag === false) {
-      throw new Error("密码验证失败");
+      throw new Error(t("auth.loginFailed"));
     }
 
     setAuthState({
@@ -443,8 +467,8 @@ function AuthenticatedApp() {
       checked: true,
       info: data
     });
-    setStatusMessage("Idle");
-  }, []);
+    setStatusMessage(t("status.idle"));
+  }, [t]);
 
   const handleLogout = useCallback(async () => {
     const data = await postJson("/api/auth/logout");
@@ -453,9 +477,9 @@ function AuthenticatedApp() {
       checked: true,
       info: data
     });
-    setStatusMessage("Idle");
+    setStatusMessage(t("status.idle"));
     return data;
-  }, []);
+  }, [t]);
 
   if (!authState.checked) {
     return <AuthLoadingScreen />;
@@ -470,7 +494,7 @@ function AuthenticatedApp() {
           <RequireAuth authenticated={authState.authenticated}>
             <CachedProtectedShell
               authInfo={authState.info}
-              authStatusLabel={authStatusLabel(authState.info)}
+              authStatusLabel={authStatusLabel(authState.info, t)}
               notify={notify}
               notifyNotification={notifyNotification}
               onDismissToast={dismissToast}
@@ -488,10 +512,12 @@ function AuthenticatedApp() {
 
 export function App() {
   return (
-    <ThemeProvider>
-      <BrowserRouter>
-        <AuthenticatedApp />
-      </BrowserRouter>
-    </ThemeProvider>
+    <LocaleProvider>
+      <ThemeProvider>
+        <BrowserRouter>
+          <AuthenticatedApp />
+        </BrowserRouter>
+      </ThemeProvider>
+    </LocaleProvider>
   );
 }

@@ -1,5 +1,7 @@
 import { NavLink } from "react-router-dom";
+import { useTranslation } from "react-i18next";
 
+import { LanguageControl } from "./LanguageControl.jsx";
 import { ThemeControl } from "./ThemeControl.jsx";
 import "../styles/Sidebar.css";
 
@@ -17,44 +19,45 @@ function NavIcon({ name }) {
   return <svg aria-hidden="true" className="nav-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7">{NAV_ICONS[name]}</svg>;
 }
 
-function authLabel(authInfo, fallback) {
+function authLabel(authInfo, fallback, loggedInLabel) {
   if (fallback) return fallback;
   const user = authInfo?.user;
   if (typeof user === "string" && user.trim()) return user;
   if (user?.name) return user.name;
   if (user?.username) return user.username;
   if (authInfo?.name) return authInfo.name;
-  return "已登录";
+  return loggedInLabel;
 }
 
 export function Sidebar({ authInfo, authStatusLabel, isLoggingOut = false, onLogout, onOpenPaperImport, onOpenSearch, statusMessage }) {
+  const { t } = useTranslation(["shell", "common", "app"]);
   const canLogout = authInfo?.auth_required !== false;
   const isApplePlatform = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
   const searchShortcutLabel = isApplePlatform ? "⌘ K" : "Ctrl K";
   const importShortcutLabel = isApplePlatform ? "⌘ I" : "Ctrl I";
   const navSections = [
     {
-      label: "研究工作区",
+      label: t("sidebar.workspace"),
       items: [
-        { to: "/", label: "首页", hint: "今日研究脉搏", icon: "home", end: true },
+        { to: "/", label: t("sidebar.home"), hint: t("sidebar.homeHint"), icon: "home", end: true },
         {
           to: "/papers",
-          label: "论文",
-          hint: "发现、判断与深读",
+          label: t("sidebar.papers"),
+          hint: t("sidebar.papersHint"),
           icon: "papers",
           children: [
-            { to: "/papers/inbox", label: "待判断", index: "01" },
-            { to: "/papers/library", label: "论文仓库", index: "02" },
-            { to: "/papers/reports", label: "报告队列", index: "03" }
+            { to: "/papers/inbox", label: t("sidebar.inbox"), index: "01" },
+            { to: "/papers/library", label: t("sidebar.library"), index: "02" },
+            { to: "/papers/reports", label: t("sidebar.reports"), index: "03" }
           ]
         },
-        { to: "/projects", label: "项目", hint: "组织研究上下文", icon: "projects" },
-        { to: "/artifacts", label: "产物", hint: "沉淀报告与洞察", icon: "artifacts" }
+        { to: "/projects", label: t("sidebar.projects"), hint: t("sidebar.projectsHint"), icon: "projects" },
+        { to: "/artifacts", label: t("sidebar.artifacts"), hint: t("sidebar.artifactsHint"), icon: "artifacts" }
       ]
     },
     {
-      label: "系统",
-      items: [{ to: "/settings", label: "设置", hint: "连接、规则与任务", icon: "settings" }]
+      label: t("sidebar.system"),
+      items: [{ to: "/settings", label: t("sidebar.settings"), hint: t("sidebar.settingsHint"), icon: "settings" }]
     }
   ];
 
@@ -73,24 +76,29 @@ export function Sidebar({ authInfo, authStatusLabel, isLoggingOut = false, onLog
         </div>
       </div>
 
-      <div className="sidebar-theme-row">
-        <span>界面主题</span>
-        <ThemeControl />
+      <div className="sidebar-preferences">
+        <div className="sidebar-theme-row">
+          <span>{t("sidebar.theme")}</span>
+          <ThemeControl />
+        </div>
+        <div className="sidebar-theme-row sidebar-language-row" aria-label={t("sidebar.language")}>
+          <LanguageControl />
+        </div>
       </div>
 
       <button className="sidebar-search-trigger" onClick={onOpenSearch} type="button">
         <span className="sidebar-search-icon"><NavIcon name="search" /></span>
-        <span className="sidebar-search-copy">搜索论文、产物与项目…</span>
+        <span className="sidebar-search-copy">{t("sidebar.search")}</span>
         <kbd>{searchShortcutLabel}</kbd>
       </button>
 
       <button className="sidebar-search-trigger sidebar-import-trigger" onClick={onOpenPaperImport} type="button">
         <span className="sidebar-search-icon"><NavIcon name="importPaper" /></span>
-        <span className="sidebar-search-copy">导入报告队列论文</span>
+        <span className="sidebar-search-copy">{t("sidebar.import")}</span>
         <kbd>{importShortcutLabel}</kbd>
       </button>
 
-      <nav className="main-nav" aria-label="主导航">
+      <nav className="main-nav" aria-label={t("sidebar.mainNav")}>
         {navSections.map((section) => (
           <section className="nav-section" key={section.label}>
             <header>{section.label}</header>
@@ -103,7 +111,7 @@ export function Sidebar({ authInfo, authStatusLabel, isLoggingOut = false, onLog
                     <span className="nav-arrow" aria-hidden="true">↗</span>
                   </NavLink>
                   {children?.length ? (
-                    <div className="nav-submenu" aria-label={`${label}二级导航`}>
+                    <div className="nav-submenu" aria-label={t("sidebar.secondaryNav", { label })}>
                       {children.map((item) => (
                         <NavLink className={({ isActive }) => `nav-subitem ${isActive ? "active" : ""}`} end={item.end} key={item.to} to={item.to}>
                           <span>{item.index}</span><strong>{item.label}</strong><i aria-hidden="true" />
@@ -119,21 +127,21 @@ export function Sidebar({ authInfo, authStatusLabel, isLoggingOut = false, onLog
       </nav>
 
       <div className="sidebar-footer">
-        <div className="sidebar-session" aria-label="认证状态">
+        <div className="sidebar-session" aria-label={t("sidebar.authStatus")}>
           <div>
-            <span>访问状态</span>
-            <strong>{authLabel(authInfo, authStatusLabel)}</strong>
+            <span>{t("sidebar.accessStatus")}</span>
+            <strong>{authLabel(authInfo, authStatusLabel, t("auth.loggedIn", { ns: "app" }))}</strong>
           </div>
           {canLogout ? (
             <button className="sidebar-logout" disabled={!onLogout || isLoggingOut} onClick={onLogout} type="button">
-              {isLoggingOut ? "退出中" : "退出"}
+              {isLoggingOut ? t("actions.loggingOut", { ns: "common" }) : t("actions.logout", { ns: "common" })}
             </button>
           ) : null}
         </div>
 
         <div className="status">
           <span className="status-pulse" aria-hidden="true" />
-          <span><span className="status-label">系统状态</span><strong>{statusMessage || "Ready"}</strong></span>
+          <span><span className="status-label">{t("sidebar.systemStatus")}</span><strong>{statusMessage || t("status.ready", { ns: "app" })}</strong></span>
         </div>
       </div>
     </aside>

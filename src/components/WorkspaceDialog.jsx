@@ -1,10 +1,12 @@
 import { useEffect, useId, useState } from "react";
 import { createPortal } from "react-dom";
+import { useTranslation } from "react-i18next";
 import "../styles/WorkspaceDialog.css";
 
 const DIALOG_EXIT_MS = 220;
 
 export function WorkspaceDialog({ children, className = "", description, eyebrow, footer, icon = "WS", onClose, open, title }) {
+  const { t } = useTranslation("common");
   const titleId = useId();
   const [present, setPresent] = useState(open);
   const [closing, setClosing] = useState(false);
@@ -51,7 +53,7 @@ export function WorkspaceDialog({ children, className = "", description, eyebrow
             <h2 id={titleId}>{title}</h2>
             {description ? <p>{description}</p> : null}
           </div>
-          <button aria-label="关闭弹窗" className="workspace-dialog-close" onClick={onClose} type="button">
+          <button aria-label={t("actions.closeDialog")} className="workspace-dialog-close" onClick={onClose} type="button">
             <svg aria-hidden="true" fill="none" viewBox="0 0 20 20" stroke="currentColor" strokeLinecap="round" strokeWidth="1.7"><path d="m6 6 8 8M14 6l-8 8" /></svg>
           </button>
         </header>

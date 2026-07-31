@@ -119,6 +119,10 @@ test("running daily progress is surfaced and suppresses generic running job", as
     const itemTypes = result.items.map((item) => item.type);
     assert.equal(result.items[0].type, "daily_run_progress");
     assert.deepEqual(result.items[0].progress, progress);
+    assert.deepEqual(result.items[0].data, {
+      current_key: "fetch_arxiv",
+      current_label: "抓取 arXiv"
+    });
     assert.deepEqual(result.items[0].source, { job_id: 9, job_type: "run-daily" });
     assert.equal(itemTypes.includes("job_running"), false);
   });
@@ -143,6 +147,7 @@ test("completed daily report stays pinned until the next daily run starts", asyn
     assert.equal(result.items[0].type, "daily_run_completed");
     assert.equal(result.items[0].source.artifact_id, 77);
     assert.equal(result.items[0].source.job_id, 11);
+    assert.equal(result.items[0].data.new_papers, 20);
   });
 
   const runningDaily = {
@@ -181,6 +186,7 @@ test("arXiv rate limit failure is actionable and suppresses generic failure", as
     assert.equal(rateLimited.severity, "warn");
     assert.equal(rateLimited.requires_action, true);
     assert.equal(rateLimited.source.error_type, "arxiv_rate_limited");
+    assert.equal(rateLimited.data.failed_step, "");
     assert.match(rateLimited.source.technical_message, /HTTP Error 429/);
     assert.equal(itemTypes.includes("job_failed"), false);
   });
@@ -211,6 +217,10 @@ test("update availability is built from app_settings status", async () => {
     assert.equal(update.created_at, "2026-06-06T03:00:00+00:00");
     assert.equal(update.source.update.latest_tag, "v0.2.4");
     assert.equal(update.source.update.release_url, "https://example.test/release");
+    assert.deepEqual(update.data, {
+      current_version: "0.2.3",
+      latest_version: "0.2.4"
+    });
   });
 });
 
@@ -277,6 +287,7 @@ test("recoverable daily run is recommended ahead of generic failure", async () =
     assert.equal(recovery.requires_action, true);
     assert.equal(recovery.source.recovery.recommended_action, "resume-daily");
     assert.equal(recovery.source.recovery.failed_label, "生成日报产物");
+    assert.equal(recovery.data.failed_step, "generate_daily_report_artifact");
   });
 });
 
@@ -299,6 +310,7 @@ test("recent experiment reports include artifact project and source metadata", a
     assert.equal(report.source.artifact_id, 21);
     assert.equal(report.source.project_id, 7);
     assert.equal(report.source.source_agent, "codex");
+    assert.equal(report.data.title, "KRIS run 42");
   });
 });
 

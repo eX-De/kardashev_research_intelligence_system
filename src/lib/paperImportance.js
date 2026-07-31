@@ -1,12 +1,12 @@
-export const PAPER_IMPORTANCE_OPTIONS = [
-  ["", "全部重要性"],
-  ["high", "高"],
-  ["medium", "中"],
-  ["low", "低"]
-];
+export const PAPER_IMPORTANCE_CODES = ["", "high", "medium", "low"];
 
-const PAPER_IMPORTANCE_LABELS = Object.fromEntries(PAPER_IMPORTANCE_OPTIONS.filter(([value]) => value));
+export function paperImportanceOptions(t) {
+  return PAPER_IMPORTANCE_CODES.map((value) => [value, t(`importance.${value || "all"}`)]);
+}
 
-export function paperImportanceLabel(importance) {
-  return PAPER_IMPORTANCE_LABELS[importance] || importance || "未标注";
+export function paperImportanceLabel(importance, t) {
+  if (!importance) return t("importance.unlabeled");
+  return ["high", "medium", "low"].includes(importance)
+    ? t(`importance.${importance}`)
+    : importance;
 }
