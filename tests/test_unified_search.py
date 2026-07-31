@@ -142,7 +142,8 @@ class UnifiedDeepSearchTests(unittest.TestCase):
             );
             CREATE TABLE paper_sources (paper_id INTEGER, source_identifier TEXT);
             CREATE TABLE paper_reader_messages (
-              id INTEGER PRIMARY KEY, paper_id INTEGER, library_paper_id INTEGER, content TEXT, created_at TEXT
+              id INTEGER PRIMARY KEY, paper_id INTEGER, library_paper_id INTEGER, content TEXT,
+              created_at TEXT, role TEXT DEFAULT 'user', source TEXT DEFAULT 'chat'
             );
             CREATE TABLE arxiv_paper_embeddings (paper_id INTEGER, model TEXT, embedding_json TEXT);
             CREATE TABLE arxiv_text_chunks (id INTEGER PRIMARY KEY, paper_id INTEGER, chunk_index INTEGER DEFAULT 0, text TEXT, page_start INTEGER, page_end INTEGER);
@@ -367,25 +368,38 @@ class UnifiedDeepSearchTests(unittest.TestCase):
 
     @patch("worker.unified_search._ensure_search_pgvector_indexes", return_value={})
     @patch("worker.unified_search.embed_text", return_value=[1.0, 0.0])
-    def test_arxiv_rows_are_excluded_while_library_reader_messages_remain_searchable(self, _embed, _indexes) -> None:
+    def test_arxiv_rows_are_excluded_while_user_prompts_are_independent_conversations(self, _embed, _indexes) -> None:
         self.conn.execute("DELETE FROM paper_embeddings")
         self.conn.execute("DELETE FROM paper_chunk_embeddings")
         self.conn.execute(
             "INSERT INTO papers(id, title, abstract, library_status, updated_at) VALUES (15, 'Archived secret', 'Archived secret', 'archived', '2026-01-13')"
         )
         self.conn.execute("INSERT INTO paper_embeddings VALUES (15, 'embed-v1', '[1, 0]')")
-        self.conn.execute(
-            "INSERT INTO paper_reader_messages VALUES (70, 1, 11, 'Reader secret', '2026-01-13')"
+        self.conn.executescript(
+            """
+            INSERT INTO paper_reader_messages(id, paper_id, library_paper_id, content, created_at, role, source)
+            VALUES (70, 1, 11, 'Reader secret first', '2026-01-13', 'user', 'chat');
+            INSERT INTO paper_reader_messages(id, paper_id, library_paper_id, content, created_at, role, source)
+            VALUES (71, 1, 11, 'Reader secret second', '2026-01-14', 'user', 'chat');
+            INSERT INTO paper_reader_messages(id, paper_id, library_paper_id, content, created_at, role, source)
+            VALUES (72, 1, 11, 'Reader secret assistant', '2026-01-15', 'assistant', 'chat');
+            INSERT INTO paper_reader_messages(id, paper_id, library_paper_id, content, created_at, role, source)
+            VALUES (73, 1, 11, 'Reader secret analysis', '2026-01-16', 'user', 'analysis_prompt');
+            """
         )
         statements: list[str] = []
         self.conn.set_trace_callback(statements.append)
         result = deep_search(
             self.conn,
             FakeSettings(),
-            {"query": "Reader secret", "types": ["paper"], "limit": 20},
+            {"query": "Reader secret", "types": ["conversation"], "limit": 20},
         )
         self.conn.set_trace_callback(None)
-        self.assertEqual([(item["entity_id"], item["href"]) for item in result["results"]], [(11, "/papers/library/11")])
+        self.assertEqual(
+            [(item["entity_id"], item["parent_paper_id"], item["href"]) for item in result["results"]],
+            [(71, 11, "/papers/chat/11?message=71"), (70, 11, "/papers/chat/11?message=70")],
+        )
+        self.assertTrue(all(item["parent_paper_title"] == "Vector paper" for item in result["results"]))
         self.assertFalse(any("arxiv" in source for source in result["stats"]["searched_sources"]))
         self.assertFalse(any(" arxiv_" in statement.lower() for statement in statements))
 

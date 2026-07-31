@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { setPoolForTesting } from "../../server/db.js";
+import { setPoolForTesting, ValidationError } from "../../server/db.js";
 import {
   cancelReaderReport,
   deleteReaderMessage,
   deleteReaderReport,
+  getReaderConversations,
   getReaderPaperDetail,
   getReaderPapers,
   retryReaderReport,
@@ -159,6 +160,44 @@ function createReaderFake() {
         grouped.set(artifact.status, current);
       }
       return { rows: [...grouped.values()].map((row) => ({ ...row, count: String(row.count) })) };
+    }
+    if (normalized.startsWith("WITH CHAT_STATS AS")) {
+      let conversationRows = papers
+        .map((paper) => {
+          const chatMessages = messages.filter((message) => Number(message.library_paper_id) === Number(paper.id) && message.source === "chat");
+          const userMessages = chatMessages.filter((message) => message.role === "user");
+          const report = reportRows()
+            .filter((artifact) => Number(artifact.scope_id) === Number(paper.id))
+            .sort((left, right) => String(right.updated_at).localeCompare(String(left.updated_at)) || Number(right.id) - Number(left.id))[0] || null;
+          if (!userMessages.length && !report) return null;
+          const latestPrompt = [...userMessages].sort((left, right) => String(right.created_at).localeCompare(String(left.created_at)) || Number(right.id) - Number(left.id))[0] || null;
+          const latestMessage = [...chatMessages].sort((left, right) => String(right.created_at).localeCompare(String(left.created_at)) || Number(right.id) - Number(left.id))[0] || null;
+          const lastActivityAt = [latestMessage?.created_at, report?.updated_at].filter(Boolean).sort().at(-1) || "";
+          return {
+            paper_id: paper.id,
+            title: paper.title,
+            arxiv_id: paper.arxiv_id,
+            last_user_prompt: latestPrompt?.content || "",
+            last_message_at: latestMessage?.created_at || "",
+            last_activity_at: lastActivityAt,
+            message_count: String(chatMessages.length),
+            question_count: String(userMessages.length),
+            report_status: report?.status || ""
+          };
+        })
+        .filter(Boolean)
+        .sort((left, right) => String(right.last_activity_at).localeCompare(String(left.last_activity_at)) || Number(right.paper_id) - Number(left.paper_id));
+      if (normalized.includes("WHERE COALESCE(CS.QUESTION_COUNT, 0) > 0")) {
+        conversationRows = conversationRows.filter((row) => Number(row.question_count) > 0);
+      } else if (normalized.includes("WHERE COALESCE(CS.QUESTION_COUNT, 0) = 0")) {
+        conversationRows = conversationRows.filter((row) => Number(row.question_count) === 0);
+      }
+      const total = conversationRows.length;
+      const limit = Number(params.at(-2));
+      const offset = Number(params.at(-1));
+      return {
+        rows: conversationRows.slice(offset, offset + limit).map((row) => ({ ...row, total: String(total) }))
+      };
     }
     if (normalized.startsWith("SELECT A.ID, A.SCOPE_ID")) {
       return {
@@ -402,6 +441,79 @@ test("getReaderPaperDetail prepends synthetic report messages before persisted c
   assert.equal(detail.reader_messages[1].source, "analysis_report");
   assert.equal(detail.reader_messages[2].content, "Question");
   assert.deepEqual(detail.reference_papers, []);
+});
+
+test("getReaderConversations combines user questions with report-only papers and filters by question presence", async () => {
+  const fake = createReaderFake();
+  fake.messages.push({
+    id: "402",
+    library_paper_id: "101",
+    role: "assistant",
+    content: "Answer",
+    source: "chat",
+    model_provider_id: "provider",
+    model: "model",
+    created_at: "2026-07-06T00:01:00Z"
+  });
+  fake.messages.push({
+    id: "403",
+    library_paper_id: "102",
+    role: "assistant",
+    content: "Orphan answer",
+    source: "chat",
+    model_provider_id: "provider",
+    model: "model",
+    created_at: "2026-07-06T00:02:00Z"
+  });
+  fake.artifacts.push({
+    ...fake.artifacts[0],
+    id: "302",
+    scope_id: "102",
+    title: "Reference Paper",
+    status: "done",
+    updated_at: "2026-07-06T00:03:00Z"
+  });
+  const data = await getReaderConversations({ limit: "25" }, fake.pool);
+  assert.deepEqual(data, {
+    items: [
+      {
+        paper_id: 102,
+        title: "Reference Paper",
+        arxiv_id: "2607.00002",
+        message_count: 1,
+        question_count: 0,
+        last_message_at: "2026-07-06T00:02:00Z",
+        last_activity_at: "2026-07-06T00:03:00Z",
+        last_user_prompt: "",
+        report_status: "done"
+      },
+      {
+        paper_id: 101,
+        title: "Reader Paper",
+        arxiv_id: "2607.00001",
+        message_count: 2,
+        question_count: 1,
+        last_message_at: "2026-07-06T00:01:00Z",
+        last_activity_at: "2026-07-06T00:01:00Z",
+        last_user_prompt: "Question",
+        report_status: "queued"
+      }
+    ],
+    total: 2,
+    limit: 25,
+    offset: 0
+  });
+  const withQuestions = await getReaderConversations({ questions: "with" }, fake.pool);
+  assert.deepEqual(withQuestions.items.map((item) => item.paper_id), [101]);
+  assert.equal(withQuestions.total, 1);
+  const withoutQuestions = await getReaderConversations({ questions: "without" }, fake.pool);
+  assert.deepEqual(withoutQuestions.items.map((item) => item.paper_id), [102]);
+  assert.equal(withoutQuestions.total, 1);
+  await assert.rejects(() => getReaderConversations({ questions: "invalid" }, fake.pool), ValidationError);
+  const queryCall = fake.calls.find((call) => /WITH chat_stats AS/i.test(call.sql));
+  assert.match(queryCall.sql, /WHERE source = 'chat' AND role = 'user'/i);
+  assert.match(queryCall.sql, /artifact_type = \$1/i);
+  assert.equal(queryCall.params[0], "paper_report");
 });
 
 test("getReaderPapers applies status, project, source, and pagination to the server query", async () => {

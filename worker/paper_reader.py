@@ -140,9 +140,9 @@ def _reader_question_model(settings: Settings) -> tuple[str, str]:
 
 
 def _reader_report_prompt(settings: Settings) -> str:
-    from .paper_reports import PAPER_READER_DEFAULT_PROMPT
+    from .paper_prompts import resolve_paper_reader_prompt
 
-    return clean_unicode(str(settings.paper_reader_default_prompt or "")).strip() or PAPER_READER_DEFAULT_PROMPT
+    return resolve_paper_reader_prompt(settings)
 
 
 def paper_reader_messages(conn: DbConnection, paper_id: int) -> list[dict[str, object]]:

@@ -3,9 +3,11 @@ import test from "node:test";
 
 import { setPoolForTesting, toJson, ValidationError } from "../../server/db.js";
 import {
+  DEFAULT_PAPER_READER_PROMPTS,
   getAppSettings,
   normalizeProviderBaseUrl,
   normalizeSettingsPayload,
+  resolvePaperReaderPrompt,
   saveAppSettings,
   SETTING_SCHEMA
 } from "../../server/settings.js";
@@ -52,6 +54,8 @@ const SETTINGS_ENV_KEYS = [
   "OBSIDIAN_REMOTE_APPEND_ONLY",
   "EMBEDDING_CONCURRENCY",
   "PAPER_READER_DEFAULT_PROMPT",
+  "PAPER_READER_PROMPT_MODE",
+  "PAPER_READER_PROMPT_LOCALE",
   "PAPER_REPORT_PROVIDER_ID",
   "PAPER_REPORT_MODEL",
   "PROJECT_CHAT_PROFILE_PROVIDER_ID",
@@ -153,6 +157,10 @@ test("getAppSettings hides secrets and preserves settings response shape", async
       assert.equal(data.settings.obsidian_remote_secret_access_key_configured, true);
       assert.equal(data.settings.obsidian_remote_append_only, true);
       assert.equal(data.settings.scheduler_enabled, true);
+      assert.equal(data.settings.paper_reader_prompt_mode, "default");
+      assert.equal(data.settings.paper_reader_prompt_locale, "zh-CN");
+      assert.equal(data.settings.paper_reader_default_prompt, "");
+      assert.deepEqual(data.settings.paper_reader_prompt_defaults, DEFAULT_PAPER_READER_PROMPTS);
       assert.deepEqual(data.settings.llm_providers, [{
         id: "openai",
         name: "OpenAI",
@@ -304,6 +312,71 @@ test("normalizeSettingsPayload matches csv tags, validation, and provider URL ru
     () => normalizeSettingsPayload({ project_judgment_concurrency: 9 }),
     ValidationError
   );
+  assert.throws(
+    () => normalizeSettingsPayload({ paper_reader_prompt_mode: "automatic" }),
+    ValidationError
+  );
+  assert.throws(
+    () => normalizeSettingsPayload({ paper_reader_prompt_locale: "fr" }),
+    ValidationError
+  );
+});
+
+test("paper reading prompt mode resolves localized defaults without overwriting custom text", () => {
+  assert.equal(
+    resolvePaperReaderPrompt({ paper_reader_prompt_mode: "default", paper_reader_prompt_locale: "en" }),
+    DEFAULT_PAPER_READER_PROMPTS.en
+  );
+  assert.equal(
+    resolvePaperReaderPrompt({
+      paper_reader_prompt_mode: "custom",
+      paper_reader_prompt_locale: "zh-CN",
+      paper_reader_default_prompt: "Focus on the evaluation protocol."
+    }, { locale: "en" }),
+    "Focus on the evaluation protocol."
+  );
+  assert.equal(
+    resolvePaperReaderPrompt({
+      paper_reader_prompt_mode: "default",
+      paper_reader_prompt_locale: "zh-CN",
+      paper_reader_default_prompt: "An unused custom prompt"
+    }, { locale: "en" }),
+    DEFAULT_PAPER_READER_PROMPTS.en
+  );
+});
+
+test("legacy stored prompts infer default or custom mode without data loss", async () => {
+  await withCleanSettingsEnv(async () => {
+    const customFake = createSettingsPool({ paper_reader_default_prompt: "Analyze only the methods." });
+    setPoolForTesting(customFake.pool);
+    try {
+      const custom = await getAppSettings();
+      assert.equal(custom.settings.paper_reader_prompt_mode, "custom");
+      assert.equal(custom.settings.paper_reader_default_prompt, "Analyze only the methods.");
+    } finally {
+      setPoolForTesting(null);
+    }
+
+    const defaultFake = createSettingsPool({
+      paper_reader_default_prompt: `请阅读这篇论文 PDF，输出结构化解读：
+
+1. 研究问题和背景
+2. 方法和实验设计
+3. 主要发现
+4. 局限性
+5. 对后续研究或应用的启发
+
+请尽量使用中文，保留关键英文术语。`
+    });
+    setPoolForTesting(defaultFake.pool);
+    try {
+      const defaults = await getAppSettings();
+      assert.equal(defaults.settings.paper_reader_prompt_mode, "default");
+      assert.equal(defaults.settings.paper_reader_default_prompt, "");
+    } finally {
+      setPoolForTesting(null);
+    }
+  });
 });
 
 test("SETTING_SCHEMA describes secret and worker-visible fields centrally", () => {
@@ -311,6 +384,8 @@ test("SETTING_SCHEMA describes secret and worker-visible fields centrally", () =
   assert.equal(SETTING_SCHEMA.obsidian_remote_secret_access_key.type, "string");
   assert.equal(SETTING_SCHEMA.paper_report_queue_concurrency.type, "int");
   assert.equal(SETTING_SCHEMA.paper_report_provider_id.worker_visible, true);
+  assert.equal(SETTING_SCHEMA.paper_reader_prompt_mode.worker_visible, true);
+  assert.equal(SETTING_SCHEMA.paper_reader_prompt_locale.worker_visible, true);
   assert.equal(SETTING_SCHEMA.project_chat_profile_model.worker_visible, true);
   assert.equal(SETTING_SCHEMA.project_chat_profile_concurrency.type, "int");
   assert.equal(SETTING_SCHEMA.project_chat_profile_concurrency.worker_visible, true);

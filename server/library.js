@@ -11,6 +11,7 @@ import {
 export const VALID_LIBRARY_STATUSES = new Set(["candidate", "saved", "reading", "read", "archived", "discarded"]);
 export const LIBRARY_SOURCE_VALUES = new Set(["daily", "manual"]);
 export const REPORT_PRESENCE_VALUES = new Set(["with", "without"]);
+export const REPORT_STATUS_VALUES = new Set(["missing", "queued", "processing", "done", "failed", "cancelled"]);
 export const IMPORTANCE_VALUES = new Set(["high", "medium", "low"]);
 export const LIBRARY_SORT_VALUES = new Set(["updated", "importance"]);
 const DEFAULT_HIDDEN_LIBRARY_STATUSES = ["archived", "discarded"];
@@ -75,6 +76,15 @@ function normalizeReportPresence(value) {
     throw new ValidationError(`Invalid report presence: ${reportPresence}`);
   }
   return reportPresence;
+}
+
+function normalizeReportStatus(value) {
+  const reportStatus = text(value);
+  if (!reportStatus) return "";
+  if (!REPORT_STATUS_VALUES.has(reportStatus)) {
+    throw new ValidationError(`Invalid report status: ${reportStatus}`);
+  }
+  return reportStatus;
 }
 
 function normalizeImportance(value) {
@@ -171,6 +181,36 @@ function chunkPayload(row) {
   };
 }
 
+function paperReportSummaryPayload(row) {
+  const paperId = Number(row.id);
+  if (!row.report_artifact_id) {
+    return {
+      paper_id: paperId,
+      artifact_id: null,
+      status: "missing",
+      source: row.report_source || "daily",
+      source_key: "",
+      created_at: null,
+      updated_at: null,
+      started_at: null,
+      finished_at: null
+    };
+  }
+  const content = parseJson(row.report_content_json, {});
+  const source = parseJson(row.report_source_json, {});
+  return {
+    paper_id: paperId,
+    artifact_id: Number(row.report_artifact_id),
+    status: row.report_status || "missing",
+    source: row.report_source || "daily",
+    source_key: source.source_key || "",
+    created_at: row.report_created_at || null,
+    updated_at: row.report_updated_at || null,
+    started_at: content.started_at ?? null,
+    finished_at: content.finished_at ?? null
+  };
+}
+
 function readingStateForStatus(status, existing = "") {
   if (status === "reading") return "reading";
   if (status === "read") return "read";
@@ -183,6 +223,7 @@ function buildLibraryFilter(params = {}) {
     library_status: normalizeLibraryStatus(params.status ?? params.library_status, { allowBlank: true }),
     source: normalizeLibrarySource(params.source),
     report_presence: normalizeReportPresence(params.report_presence),
+    report_status: normalizeReportStatus(params.report_status),
     importance: normalizeImportance(params.importance),
     sort: normalizeLibrarySort(params.sort),
     project_id: optionalInteger(params.project_id, "project_id", { minimum: 1 }),
@@ -228,6 +269,21 @@ function buildLibraryFilter(params = {}) {
           AND report_filter.artifact_type = 'paper_report'
           AND report_filter.status <> 'removed'
       )
+    `);
+  }
+  if (filter.report_status) {
+    values.push(filter.report_status);
+    clauses.push(`
+      COALESCE((
+        SELECT report_status_filter.status
+        FROM artifacts report_status_filter
+        WHERE report_status_filter.scope_type = 'paper'
+          AND report_status_filter.scope_id = p.id
+          AND report_status_filter.artifact_type = 'paper_report'
+          AND report_status_filter.status <> 'removed'
+        ORDER BY report_status_filter.updated_at DESC, report_status_filter.id DESC
+        LIMIT 1
+      ), 'missing') = $${values.length}
     `);
   }
   if (filter.importance) {
@@ -324,6 +380,22 @@ export async function getPaperLibrary(params = {}, db = { query }) {
           p.published_at DESC
         LIMIT $${limitParam} OFFSET $${offsetParam}
       ),
+      latest_reports AS (
+        SELECT DISTINCT ON (a.scope_id)
+          a.scope_id AS paper_id,
+          a.id AS report_artifact_id,
+          a.status AS report_status,
+          a.content_json AS report_content_json,
+          a.source_json AS report_source_json,
+          a.created_at AS report_created_at,
+          a.updated_at AS report_updated_at
+        FROM artifacts a
+        WHERE a.scope_type = 'paper'
+          AND a.artifact_type = 'paper_report'
+          AND a.status <> 'removed'
+          AND a.scope_id IN (SELECT id FROM filtered)
+        ORDER BY a.scope_id, a.updated_at DESC, a.id DESC
+      ),
       asset_counts AS (
         SELECT paper_id, COUNT(*) AS asset_count
         FROM paper_assets
@@ -347,11 +419,30 @@ export async function getPaperLibrary(params = {}, db = { query }) {
         f.*,
         COALESCE(ac.asset_count, 0) AS asset_count,
         COALESCE(cc.chunk_count, 0) AS chunk_count,
-        COALESCE(afc.artifact_count, 0) AS artifact_count
+        COALESCE(afc.artifact_count, 0) AS artifact_count,
+        lr.report_artifact_id,
+        lr.report_status,
+        lr.report_content_json,
+        lr.report_source_json,
+        lr.report_created_at,
+        lr.report_updated_at,
+        CASE WHEN EXISTS (
+          SELECT 1
+          FROM paper_sources report_source
+          WHERE report_source.paper_id = f.id
+            AND (
+              COALESCE(report_source.fetched_batch_id, '') = 'reader-import'
+              OR report_source.source_type IN ('url', 'upload', 'web', 'manual')
+              OR COALESCE(report_source.source_identifier, '') LIKE 'reader-upload-%'
+              OR COALESCE(report_source.source_identifier, '') LIKE 'reader-url-%'
+              OR COALESCE(report_source.source_identifier, '') LIKE 'reader-web-%'
+            )
+        ) THEN 'manual' ELSE 'daily' END AS report_source
       FROM filtered f
       LEFT JOIN asset_counts ac ON ac.paper_id = f.id
       LEFT JOIN chunk_counts cc ON cc.paper_id = f.id
       LEFT JOIN artifact_counts afc ON afc.paper_id = f.id
+      LEFT JOIN latest_reports lr ON lr.paper_id = f.id
       ORDER BY
         ${outerImportanceOrder}
         CASE f.library_status
@@ -374,7 +465,8 @@ export async function getPaperLibrary(params = {}, db = { query }) {
       ...paperPayload(row),
       asset_count: numberValue(row.asset_count),
       chunk_count: numberValue(row.chunk_count),
-      artifact_count: numberValue(row.artifact_count)
+      artifact_count: numberValue(row.artifact_count),
+      paper_report: paperReportSummaryPayload(row)
     })),
     total,
     limit: filter.limit,

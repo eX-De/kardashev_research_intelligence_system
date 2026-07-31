@@ -61,3 +61,31 @@ test("quickSearch covers local paper metadata/fulltext and non-Obsidian project 
   assert.equal(result.results[0].href, "/papers/library/9");
   assert.equal(statements.some((sql) => sql.includes("arxiv_papers") || sql.includes("arxiv_text_chunks")), false);
 });
+
+test("quickSearch returns each persisted user Chat prompt as an independent conversation", async () => {
+  const statements = [];
+  const db = {
+    async query(sql) {
+      statements.push(sql);
+      if (sql.includes("FROM paper_reader_messages")) {
+        return {
+          rows: [
+            { entity_type: "conversation", entity_id: 41, title: "How was recall measured?", snippet: "Retrieval paper", source_type: "reader_user_prompt", identity_namespace: "conversation", parent_paper_id: 9, parent_paper_title: "Retrieval paper", project_id: null, updated_at: "2026-01-06", href: "/papers/chat/9?message=41", match_rank: 4, match_kind: "keyword" },
+            { entity_type: "conversation", entity_id: 42, title: "Compare recall with the baseline", snippet: "Retrieval paper", source_type: "reader_user_prompt", identity_namespace: "conversation", parent_paper_id: 9, parent_paper_title: "Retrieval paper", project_id: null, updated_at: "2026-01-07", href: "/papers/chat/9?message=42", match_rank: 4, match_kind: "keyword" }
+          ]
+        };
+      }
+      throw new Error("unexpected SQL");
+    }
+  };
+
+  const result = await quickSearch({ q: "recall", types: "conversation" }, db);
+
+  assert.deepEqual(result.results.map((item) => item.entity_id), [42, 41]);
+  assert.equal(result.results[0].parent_paper_id, 9);
+  assert.equal(result.results[0].parent_paper_title, "Retrieval paper");
+  assert.equal(result.results[0].href, "/papers/chat/9?message=42");
+  assert.match(statements[0], /m\.role = 'user'/);
+  assert.match(statements[0], /m\.source = 'chat'/);
+  assert.match(statements[0], /m\.id AS entity_id/);
+});

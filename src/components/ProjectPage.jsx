@@ -263,7 +263,7 @@ function LinkedPapersPanel({ linkedPapers, onUnlinkPaper }) {
               <Link
                 aria-label={t("detail.openPaperReport", { title: paper.title })}
                 className="project-detail-resource-link"
-                to={`/papers/reports/${encodeURIComponent(String(paper.id))}`}
+                to={`/papers/library/${encodeURIComponent(String(paper.id))}`}
               >
                 <strong>{paper.title}</strong>
                 <p>{t(`paperRelation.${paper.relation}`, { defaultValue: paper.relation })} · {paper.arxiv_id}{paper.importance ? ` · ${t("detail.importance", { value: t(`importance.${paper.importance}`, { defaultValue: paper.importance }) })}` : ""}{paper.project_score ? ` · ${t("detail.match", { score: fmtScore(paper.project_score) })}` : ""}</p>

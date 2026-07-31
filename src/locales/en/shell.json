@@ -2,8 +2,8 @@
   "sidebar": {
     "theme": "Theme",
     "language": "Language",
-    "search": "Search papers, artifacts, and projects…",
-    "import": "Import a paper to the report queue",
+    "search": "Search papers, prompts, artifacts, and projects…",
+    "import": "Import a paper",
     "mainNav": "Main navigation",
     "secondaryNav": "{{label}} secondary navigation",
     "workspace": "Research workspace",
@@ -15,6 +15,7 @@
     "inbox": "Inbox",
     "library": "Paper library",
     "reports": "Report queue",
+    "chat": "Chat",
     "projects": "Projects",
     "projectsHint": "Organize research context",
     "artifacts": "Artifacts",

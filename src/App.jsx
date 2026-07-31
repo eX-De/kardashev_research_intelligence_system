@@ -22,9 +22,9 @@ import { ProjectPage } from "./components/ProjectPage.jsx";
 import { ProjectsView } from "./components/ProjectsView.jsx";
 import { Sidebar } from "./components/Sidebar.jsx";
 import { ToastHost } from "./components/ToastHost.jsx";
-import { ApiCacheProvider } from "./lib/apiCache.jsx";
+import { ApiCacheProvider, useApiCacheClient } from "./lib/apiCache.jsx";
 import { AUTH_REQUIRED_EVENT, api, postJson } from "./lib/dashboard.js";
-import { LocaleProvider } from "./lib/locale.jsx";
+import { LocaleProvider, useLocale } from "./lib/locale.jsx";
 import { useServerEvents } from "./lib/serverEvents.js";
 import { formatApiError } from "./lib/systemMessages.js";
 import { ThemeProvider } from "./lib/theme.jsx";
@@ -116,7 +116,7 @@ function safeNextPath(value, fallback = "/") {
   }
 }
 
-function PapersRoute({ importOpen = false, notify, onClosePaperImport, onOpenPaperImport, section, setStatusMessage }) {
+function PapersRoute({ importOpen = false, notify, onClosePaperImport, section, setStatusMessage }) {
   const navigate = useNavigate();
   const { paperId } = useParams();
 
@@ -125,9 +125,14 @@ function PapersRoute({ importOpen = false, notify, onClosePaperImport, onOpenPap
     navigate(paperPath(section, targetPaperId), { replace: Boolean(options.replace) });
   }, [navigate, section]);
 
-  const openReportQueue = useCallback((targetPaperId, options = {}) => {
+  const openLibraryPaper = useCallback((targetPaperId, options = {}) => {
     if (!targetPaperId) return;
-    navigate(paperPath("reports", targetPaperId), { replace: Boolean(options.replace) });
+    navigate(paperPath("library", targetPaperId), { replace: Boolean(options.replace) });
+  }, [navigate]);
+
+  const openChat = useCallback((targetPaperId, options = {}) => {
+    if (!targetPaperId) return;
+    navigate(paperPath("chat", targetPaperId), { replace: Boolean(options.replace) });
   }, [navigate]);
 
   return (
@@ -135,9 +140,9 @@ function PapersRoute({ importOpen = false, notify, onClosePaperImport, onOpenPap
       importOpen={importOpen}
       notify={notify}
       onClosePaperImport={onClosePaperImport}
-      onOpenPaperImport={onOpenPaperImport}
       section={section}
-      onOpenReportQueue={openReportQueue}
+      onOpenChat={openChat}
+      onOpenLibraryPaper={openLibraryPaper}
       onSelectPaper={selectPaper}
       selectedPaperId={paperId}
       setStatusMessage={setStatusMessage}
@@ -183,7 +188,7 @@ function ArtifactsRoute({ setStatusMessage }) {
   );
 }
 
-function AppRoutes({ importOpen, notify, onClosePaperImport, onOpenPaperImport, setStatusMessage }) {
+function AppRoutes({ importOpen, notify, onClosePaperImport, setStatusMessage }) {
   return (
     <Routes>
       <Route path="/" element={<DashboardView setStatusMessage={setStatusMessage} notify={notify} />} />
@@ -192,10 +197,12 @@ function AppRoutes({ importOpen, notify, onClosePaperImport, onOpenPaperImport, 
       <Route path="/papers" element={<Navigate to="/papers/inbox" replace />} />
       <Route path="/papers/inbox" element={<PapersRoute notify={notify} section="inbox" setStatusMessage={setStatusMessage} />} />
       <Route path="/papers/inbox/:paperId" element={<PapersRoute notify={notify} section="inbox" setStatusMessage={setStatusMessage} />} />
-      <Route path="/papers/library" element={<PapersRoute notify={notify} section="library" setStatusMessage={setStatusMessage} />} />
-      <Route path="/papers/library/:paperId" element={<PapersRoute notify={notify} section="library" setStatusMessage={setStatusMessage} />} />
-      <Route path="/papers/reports" element={<PapersRoute importOpen={importOpen} notify={notify} onClosePaperImport={onClosePaperImport} onOpenPaperImport={onOpenPaperImport} section="reports" setStatusMessage={setStatusMessage} />} />
-      <Route path="/papers/reports/:paperId" element={<PapersRoute importOpen={importOpen} notify={notify} onClosePaperImport={onClosePaperImport} onOpenPaperImport={onOpenPaperImport} section="reports" setStatusMessage={setStatusMessage} />} />
+      <Route path="/papers/library" element={<PapersRoute importOpen={importOpen} notify={notify} onClosePaperImport={onClosePaperImport} section="library" setStatusMessage={setStatusMessage} />} />
+      <Route path="/papers/library/:paperId" element={<PapersRoute importOpen={importOpen} notify={notify} onClosePaperImport={onClosePaperImport} section="library" setStatusMessage={setStatusMessage} />} />
+      <Route path="/papers/chat" element={<PapersRoute notify={notify} section="chat" setStatusMessage={setStatusMessage} />} />
+      <Route path="/papers/chat/:paperId" element={<PapersRoute notify={notify} section="chat" setStatusMessage={setStatusMessage} />} />
+      <Route path="/papers/reports" element={<LegacyReportRoute />} />
+      <Route path="/papers/reports/:paperId" element={<LegacyReportRoute />} />
       <Route path="/projects" element={<ProjectsRoute setStatusMessage={setStatusMessage} />} />
       <Route path="/projects/new" element={<ProjectPageRoute isNew setStatusMessage={setStatusMessage} />} />
       <Route path="/projects/:projectId" element={<ProjectPageRoute setStatusMessage={setStatusMessage} />} />
@@ -262,11 +269,11 @@ function ProtectedShell({ authInfo, authStatusLabel, notify, onLogout, setStatus
   const openPaperImport = useCallback(() => {
     setIsSearchOpen(false);
     setIsPaperImportOpen(true);
-    if (!location.pathname.startsWith("/papers/reports")) navigate("/papers/reports");
+    if (!location.pathname.startsWith("/papers/library")) navigate("/papers/library");
   }, [location.pathname, navigate]);
 
   useEffect(() => {
-    if (!location.pathname.startsWith("/papers/reports")) setIsPaperImportOpen(false);
+    if (!location.pathname.startsWith("/papers/library")) setIsPaperImportOpen(false);
   }, [location.pathname]);
 
   useEffect(() => {
@@ -342,7 +349,6 @@ function ProtectedShell({ authInfo, authStatusLabel, notify, onLogout, setStatus
           importOpen={isPaperImportOpen}
           notify={notify}
           onClosePaperImport={closePaperImport}
-          onOpenPaperImport={openPaperImport}
           setStatusMessage={setStatusMessage}
         />
       </main>
@@ -355,9 +361,31 @@ function ServerEventBridge({ notify, notifyNotification }) {
   return null;
 }
 
+function PaperReaderPromptLocaleSync() {
+  const { locale } = useLocale();
+  const cache = useApiCacheClient();
+
+  useEffect(() => {
+    let active = true;
+    postJson("/api/settings", { paper_reader_prompt_locale: locale })
+      .then((data) => {
+        if (active) cache.setCache(["settings"], data);
+      })
+      .catch(() => {
+        // The active locale remains browser-persistent even if server sync is temporarily unavailable.
+      });
+    return () => {
+      active = false;
+    };
+  }, [cache, locale]);
+
+  return null;
+}
+
 function CachedProtectedShell(props) {
   return (
     <ApiCacheProvider>
+      <PaperReaderPromptLocaleSync />
       <ServerEventBridge notify={props.notify} notifyNotification={props.notifyNotification} />
       <ProtectedShell {...props} />
     </ApiCacheProvider>
@@ -520,4 +548,9 @@ export function App() {
       </ThemeProvider>
     </LocaleProvider>
   );
+}
+
+function LegacyReportRoute() {
+  const { paperId } = useParams();
+  return <Navigate replace to={paperId ? paperPath("library", paperId) : "/papers/library"} />;
 }

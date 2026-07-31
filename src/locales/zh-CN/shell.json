@@ -2,8 +2,8 @@
   "sidebar": {
     "theme": "界面主题",
     "language": "界面语言",
-    "search": "搜索论文、产物与项目…",
-    "import": "导入报告队列论文",
+    "search": "搜索论文、提问、产物与项目…",
+    "import": "导入论文",
     "mainNav": "主导航",
     "secondaryNav": "{{label}}二级导航",
     "workspace": "研究工作区",
@@ -15,6 +15,7 @@
     "inbox": "待判断",
     "library": "论文仓库",
     "reports": "报告队列",
+    "chat": "Chat",
     "projects": "项目",
     "projectsHint": "组织研究上下文",
     "artifacts": "产物",

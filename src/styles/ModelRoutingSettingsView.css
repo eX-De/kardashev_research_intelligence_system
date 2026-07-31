@@ -28,4 +28,14 @@
   .model-routing-settings-view .settings-section-head {
     align-items: flex-start;
   }
+
+  .model-routing-settings-view .paper-prompt-mode-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .model-routing-settings-view .paper-prompt-mode-control {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }

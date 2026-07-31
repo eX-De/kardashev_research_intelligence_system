@@ -137,7 +137,21 @@ function createLibraryPool() {
           ...paper,
           asset_count: String(assets.filter((asset) => asset.paper_id === paper.id).length),
           chunk_count: String(chunks.filter((chunk) => chunk.paper_id === paper.id).length),
-          artifact_count: String(artifacts.filter((artifact) => artifact.scope_type === "paper" && artifact.scope_id === paper.id).length)
+          artifact_count: String(artifacts.filter((artifact) => artifact.scope_type === "paper" && artifact.scope_id === paper.id).length),
+          ...(() => {
+            const report = artifacts
+              .filter((artifact) => artifact.scope_type === "paper" && artifact.scope_id === paper.id && artifact.artifact_type === "paper_report" && artifact.status !== "removed")
+              .sort((left, right) => String(right.updated_at).localeCompare(String(left.updated_at)) || Number(right.id) - Number(left.id))[0];
+            return report ? {
+              report_artifact_id: report.id,
+              report_status: report.status,
+              report_content_json: report.content_json,
+              report_source_json: report.source_json,
+              report_created_at: report.created_at,
+              report_updated_at: report.updated_at,
+              report_source: "daily"
+            } : {};
+          })()
         }));
       return { rows: selected };
     }
@@ -198,6 +212,7 @@ function createLibraryPool() {
   }
 
   return {
+    artifacts,
     calls,
     papers,
     txCalls,
@@ -227,8 +242,42 @@ test("getPaperLibrary hides archived by default and returns counts", async () =>
     assert.equal(data.items[0].asset_count, 1);
     assert.equal(data.items[0].chunk_count, 1);
     assert.equal(data.items[0].artifact_count, 1);
+    assert.deepEqual(data.items[0].paper_report, {
+      paper_id: 1,
+      artifact_id: 40,
+      status: "done",
+      source: "daily",
+      source_key: "paper_report:1",
+      created_at: "2026-07-05T00:00:00Z",
+      updated_at: "2026-07-06T00:00:00Z",
+      started_at: "start",
+      finished_at: "finish"
+    });
+    assert.equal(data.items[0].paper_report.report_markdown, undefined);
     assert.deepEqual(data.items[0].authors, ["A", "B"]);
     assert.deepEqual(fake.calls[0].params, ["archived", "discarded", 25, 0]);
+  } finally {
+    setPoolForTesting(null);
+  }
+});
+
+test("getPaperLibrary returns a stable missing report summary", async () => {
+  const fake = createLibraryPool();
+  fake.artifacts.length = 0;
+  setPoolForTesting(fake.pool);
+  try {
+    const data = await getPaperLibrary({ limit: "25", offset: "0" });
+    assert.deepEqual(data.items[0].paper_report, {
+      paper_id: 1,
+      artifact_id: null,
+      status: "missing",
+      source: "daily",
+      source_key: "",
+      created_at: null,
+      updated_at: null,
+      started_at: null,
+      finished_at: null
+    });
   } finally {
     setPoolForTesting(null);
   }
@@ -256,6 +305,20 @@ test("getPaperLibrary rejects invalid report presence", async () => {
   setPoolForTesting(fake.pool);
   try {
     await assert.rejects(() => getPaperLibrary({ report_presence: "maybe" }), ValidationError);
+  } finally {
+    setPoolForTesting(null);
+  }
+});
+
+test("getPaperLibrary filters by the latest report status", async () => {
+  const fake = createLibraryPool();
+  setPoolForTesting(fake.pool);
+  try {
+    await getPaperLibrary({ report_status: "failed", limit: "25", offset: "0" });
+    assert.match(fake.calls[0].sql, /COALESCE\(\(\s*SELECT report_status_filter\.status/i);
+    assert.match(fake.calls[0].sql, /ORDER BY report_status_filter\.updated_at DESC, report_status_filter\.id DESC/i);
+    assert.equal(fake.calls[0].params.includes("failed"), true);
+    await assert.rejects(() => getPaperLibrary({ report_status: "unknown" }), ValidationError);
   } finally {
     setPoolForTesting(null);
   }

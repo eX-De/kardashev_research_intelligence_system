@@ -1595,7 +1595,7 @@ def run_rank_job(conn: DbConnection, settings, *, job_id: int | None = None) -> 
         result.update(rank_project_papers(conn, settings))
         result.update(generate_missing_project_judgments(conn, settings))
         result.update(sync_project_paper_recommendations(conn))
-        result.update(ensure_paper_reports_for_recommendations(conn))
+        result.update(ensure_paper_reports_for_recommendations(conn, settings=settings))
         result.update(process_paper_report_queue(conn, settings))
         update_job_meta(conn, active_job_id, "Ranking completed", result)
     return result
@@ -1626,7 +1626,7 @@ def run_generate_paper_reports_job(
     job_id: int | None = None,
 ) -> dict[str, Any]:
     with _job_context(conn, "generate-paper-reports", job_id) as active_job_id:
-        result = ensure_paper_reports_for_recommendations(conn)
+        result = ensure_paper_reports_for_recommendations(conn, settings=settings)
         result.update(process_paper_report_queue(conn, settings, limit=limit))
         update_job_meta(conn, active_job_id, "Full paper reports generated", result)
     return result
@@ -1903,7 +1903,7 @@ def run_daily_job(
 
         paper_report_result = run_or_resume(
             "paper_reports",
-            lambda: ensure_paper_reports_for_recommendations(conn, selected_paper_ids),
+            lambda: ensure_paper_reports_for_recommendations(conn, selected_paper_ids, settings),
         )
         accumulated.update(paper_report_result)
 

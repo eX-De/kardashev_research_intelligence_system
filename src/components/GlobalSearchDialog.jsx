@@ -6,7 +6,7 @@ import { api, postJson } from "../lib/dashboard.js";
 import "../styles/GlobalSearchDialog.css";
 
 const MODE_KEY = "kris.unified-search.mode";
-const TYPE_CODES = ["all", "paper", "artifact", "project"];
+const TYPE_CODES = ["all", "paper", "conversation", "artifact", "project"];
 
 function initialDeepSearch() {
   if (typeof window === "undefined") return false;
@@ -136,20 +136,23 @@ export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }
   }, [isOpen, onClose, onOpen]);
 
   useEffect(() => {
-    if (!isOpen) return undefined;
+    if (!isOpen || !isRendered) return undefined;
     returnFocusTarget.current = document.activeElement;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     const frame = window.requestAnimationFrame(() => {
-      inputRef.current?.focus();
-      inputRef.current?.select();
+      const input = inputRef.current;
+      if (!input) return;
+      input.focus({ preventScroll: true });
+      const cursor = input.value.length;
+      input.setSelectionRange?.(cursor, cursor);
     });
     return () => {
       window.cancelAnimationFrame(frame);
       document.body.style.overflow = previousOverflow;
       returnFocusTarget.current?.focus?.();
     };
-  }, [isOpen]);
+  }, [isOpen, isRendered]);
 
   useEffect(() => {
     const workerJobId = job?.worker_job_id;
@@ -196,7 +199,7 @@ export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }
 
     try {
       if (!useDeepSearch) {
-        const data = await api(`/api/search?q=${encodeURIComponent(value)}&mode=quick&types=paper,artifact,project&limit=50`);
+        const data = await api(`/api/search?q=${encodeURIComponent(value)}&mode=quick&types=paper,conversation,artifact,project&limit=50`);
         if (token !== requestToken.current) return;
         setResponse(data);
         setBusy(false);
@@ -207,7 +210,7 @@ export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }
       const queued = await postJson("/api/search", {
         mode: "deep",
         query: value,
-        types: ["paper", "artifact", "project"],
+        types: ["paper", "conversation", "artifact", "project"],
         limit: 50
       });
       if (token !== requestToken.current) return;

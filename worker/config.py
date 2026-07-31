@@ -83,6 +83,8 @@ class Settings:
     obsidian_remote_output_prefix: str = "Research Intelligence"
     obsidian_remote_append_only: bool = True
     embedding_concurrency: int = 2
+    paper_reader_prompt_mode: str = "default"
+    paper_reader_prompt_locale: str = "zh-CN"
     paper_reader_default_prompt: str = ""
     paper_report_provider_id: str = ""
     paper_report_model: str = ""
@@ -163,6 +165,10 @@ def load_settings() -> Settings:
     _load_dotenv()
     vault = env_value("OBSIDIAN_VAULT_PATH", "").strip()
     providers = _providers_from_env()
+    paper_reader_custom_prompt = env_value("PAPER_READER_DEFAULT_PROMPT", "")
+    paper_reader_prompt_mode = env_value("PAPER_READER_PROMPT_MODE", "").strip().lower()
+    if paper_reader_prompt_mode not in {"default", "custom"}:
+        paper_reader_prompt_mode = "custom" if paper_reader_custom_prompt.strip() else "default"
     return Settings(
         obsidian_vault_path=Path(vault).expanduser() if vault else None,
         obsidian_include_dirs=_csv("OBSIDIAN_INCLUDE_DIRS", "Research,Papers"),
@@ -219,7 +225,9 @@ def load_settings() -> Settings:
         ).strip().replace("\\", "/").strip("/") or "Research Intelligence",
         obsidian_remote_append_only=_bool("OBSIDIAN_REMOTE_APPEND_ONLY", "true"),
         embedding_concurrency=_positive_int("EMBEDDING_CONCURRENCY", 2),
-        paper_reader_default_prompt=env_value("PAPER_READER_DEFAULT_PROMPT", ""),
+        paper_reader_prompt_mode=paper_reader_prompt_mode,
+        paper_reader_prompt_locale=env_value("PAPER_READER_PROMPT_LOCALE", "zh-CN").strip() or "zh-CN",
+        paper_reader_default_prompt=paper_reader_custom_prompt,
         paper_report_provider_id=env_value("PAPER_REPORT_PROVIDER_ID", ""),
         paper_report_model=env_value("PAPER_REPORT_MODEL", ""),
         project_chat_profile_provider_id=env_value("PROJECT_CHAT_PROFILE_PROVIDER_ID", ""),

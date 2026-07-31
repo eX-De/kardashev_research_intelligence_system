@@ -48,7 +48,7 @@ export function Sidebar({ authInfo, authStatusLabel, isLoggingOut = false, onLog
           children: [
             { to: "/papers/inbox", label: t("sidebar.inbox"), index: "01" },
             { to: "/papers/library", label: t("sidebar.library"), index: "02" },
-            { to: "/papers/reports", label: t("sidebar.reports"), index: "03" }
+            { to: "/papers/chat", label: t("sidebar.chat"), index: "03" }
           ]
         },
         { to: "/projects", label: t("sidebar.projects"), hint: t("sidebar.projectsHint"), icon: "projects" },

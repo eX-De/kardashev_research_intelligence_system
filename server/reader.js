@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { ConflictError, NotFoundError, ValidationError, maybeOne, parseJson, query, toJson, withTransaction } from "./db.js";
-import { DEFAULT_PAPER_READER_PROMPT, getAppSettings } from "./settings.js";
+import { getAppSettings, resolvePaperReaderPrompt } from "./settings.js";
 
 const PAPER_REPORT_ARTIFACT_TYPE = "paper_report";
 const PAPER_READER_ANALYSIS_SYSTEM = "You are a research document reading assistant. Read the supplied cleaned document text and answer accurately from it.";
@@ -55,6 +55,14 @@ function normalizeReaderStatus(value) {
   if (!status) return "";
   if (!REPORT_STATUSES.includes(status)) throw new ValidationError(`Invalid report status: ${status}`);
   return status;
+}
+
+function normalizeQuestionFilter(value) {
+  const filter = text(value).toLowerCase() || "all";
+  if (!["all", "with", "without"].includes(filter)) {
+    throw new ValidationError("questions must be all, with, or without");
+  }
+  return filter;
 }
 
 function likeEscape(value) {
@@ -378,6 +386,98 @@ export async function getPaperReportsSummary(db = { query }) {
   return {
     stats: await paperReportStats(db),
     latest
+  };
+}
+
+export async function getReaderConversations(params = {}, db = { query }) {
+  const limit = normalizeLimit(params.limit, 50);
+  const offset = normalizeOffset(params.offset);
+  const questionFilter = normalizeQuestionFilter(params.questions);
+  const questionFilterSql = questionFilter === "with"
+    ? "WHERE COALESCE(cs.question_count, 0) > 0"
+    : questionFilter === "without"
+      ? "WHERE COALESCE(cs.question_count, 0) = 0"
+      : "";
+  const result = await db.query(
+    `
+      WITH chat_stats AS (
+        SELECT
+          library_paper_id,
+          COUNT(*) AS message_count,
+          COUNT(*) FILTER (WHERE role = 'user') AS question_count,
+          MAX(created_at) AS latest_message_at
+        FROM paper_reader_messages
+        WHERE source = 'chat'
+        GROUP BY library_paper_id
+      ),
+      latest_user_prompts AS (
+        SELECT DISTINCT ON (library_paper_id)
+          library_paper_id,
+          content AS latest_prompt
+        FROM paper_reader_messages
+        WHERE source = 'chat' AND role = 'user'
+        ORDER BY library_paper_id, created_at DESC, id DESC
+      ),
+      report_rows AS (
+        SELECT DISTINCT ON (scope_id)
+          scope_id AS library_paper_id,
+          status AS report_status,
+          updated_at AS latest_report_at
+        FROM artifacts
+        WHERE scope_type = 'paper'
+          AND artifact_type = $1
+          AND status != 'removed'
+        ORDER BY scope_id, updated_at DESC, id DESC
+      ),
+      eligible_papers AS (
+        SELECT library_paper_id
+        FROM chat_stats
+        WHERE question_count > 0
+        UNION
+        SELECT library_paper_id
+        FROM report_rows
+      )
+      SELECT
+        p.id AS paper_id,
+        p.title,
+        p.arxiv_id,
+        up.latest_prompt AS last_user_prompt,
+        cs.latest_message_at AS last_message_at,
+        GREATEST(
+          COALESCE(cs.latest_message_at, ''),
+          COALESCE(rr.latest_report_at, '')
+        ) AS last_activity_at,
+        COALESCE(cs.message_count, 0) AS message_count,
+        COALESCE(cs.question_count, 0) AS question_count,
+        COALESCE(rr.report_status, '') AS report_status,
+        COUNT(*) OVER() AS total
+      FROM eligible_papers ep
+      JOIN papers p ON p.id = ep.library_paper_id
+      LEFT JOIN chat_stats cs ON cs.library_paper_id = ep.library_paper_id
+      LEFT JOIN latest_user_prompts up ON up.library_paper_id = ep.library_paper_id
+      LEFT JOIN report_rows rr ON rr.library_paper_id = ep.library_paper_id
+      ${questionFilterSql}
+      ORDER BY last_activity_at DESC, p.id DESC
+      LIMIT $2 OFFSET $3
+    `,
+    [PAPER_REPORT_ARTIFACT_TYPE, limit, offset]
+  );
+  const rows = result.rows || [];
+  return {
+    items: rows.map((row) => ({
+      paper_id: Number(row.paper_id),
+      title: row.title || "",
+      arxiv_id: row.arxiv_id || "",
+      message_count: numberValue(row.message_count),
+      question_count: numberValue(row.question_count),
+      last_message_at: row.last_message_at || "",
+      last_activity_at: row.last_activity_at || "",
+      last_user_prompt: row.last_user_prompt || "",
+      report_status: row.report_status || ""
+    })),
+    total: numberValue(rows[0]?.total),
+    limit,
+    offset
   };
 }
 
@@ -973,9 +1073,9 @@ async function upsertQueuedReport(db, paperId, prompt) {
   return { artifact_id: Number(inserted.rows[0].id), paper_reports_queued: 1 };
 }
 
-async function reportPrompt() {
+async function reportPrompt(locale = "") {
   const data = await getAppSettings();
-  return text(data?.settings?.paper_reader_default_prompt) || DEFAULT_PAPER_READER_PROMPT;
+  return resolvePaperReaderPrompt(data?.settings || {}, { locale });
 }
 
 export async function getReaderPaperDetail(paperId, db = { query }) {
@@ -1328,9 +1428,9 @@ export async function cancelReaderReport(paperId) {
   return { ...detail, ok: true };
 }
 
-export async function retryReaderReport(paperId) {
+export async function retryReaderReport(paperId, payload = {}) {
   const id = positiveId(paperId, "paper_id");
-  const prompt = await reportPrompt();
+  const prompt = await reportPrompt(payload.locale);
   await withTransaction(async (client) => {
     await upsertQueuedReport(client, id, prompt);
   });

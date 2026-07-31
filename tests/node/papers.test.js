@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { setPoolForTesting } from "../../server/db.js";
-import { DEFAULT_PAPER_READER_PROMPT } from "../../server/settings.js";
+import { DEFAULT_PAPER_READER_PROMPTS } from "../../server/settings.js";
 import {
   ensurePaperReportsForRecommendations,
   savePaperFeedback,
@@ -12,7 +12,7 @@ import {
 
 const T0 = "2026-07-07T00:00:00Z";
 
-function createPapersFake() {
+function createPapersFake(initialSettings = {}) {
   const txCalls = [];
   const arxivPapers = [
     {
@@ -104,6 +104,7 @@ function createPapersFake() {
   ];
   const projectPapers = [];
   const calls = [];
+  const appSettings = new Map(Object.entries(initialSettings));
 
   function nextId(items, offset) {
     return String(offset + items.length + 1);
@@ -119,6 +120,11 @@ function createPapersFake() {
     if (["BEGIN", "COMMIT", "ROLLBACK"].includes(normalized)) {
       txCalls.push(normalized);
       return { rows: [] };
+    }
+    if (normalized.startsWith("SELECT KEY, VALUE_JSON FROM APP_SETTINGS")) {
+      return {
+        rows: [...appSettings.entries()].map(([key, value]) => ({ key, value_json: JSON.stringify(value) }))
+      };
     }
     if (normalized.startsWith("SELECT * FROM ARXIV_PAPERS WHERE ID = $1")) {
       return { rows: arxivPapers.filter((paper) => Number(paper.id) === Number(params[0])) };
@@ -464,7 +470,10 @@ test("syncProjectPaperRecommendations preserves accepted state while refreshing 
 });
 
 test("ensurePaperReportsForRecommendations creates queued report artifacts", async () => {
-  const fake = createPapersFake();
+  const fake = createPapersFake({
+    paper_reader_prompt_mode: "default",
+    paper_reader_prompt_locale: "en"
+  });
   fake.recommendations.splice(0, fake.recommendations.length, fake.recommendations[0]);
   fake.recommendations[0].state = "pending";
   setPoolForTesting(fake.pool);
@@ -480,7 +489,7 @@ test("ensurePaperReportsForRecommendations creates queued report artifacts", asy
     assert.equal(content.paper_id, 201);
     assert.equal(content.legacy_arxiv_paper_id, undefined);
     assert.deepEqual(content.source_project_ids, [7]);
-    assert.equal(content.prompt, DEFAULT_PAPER_READER_PROMPT);
+    assert.equal(content.prompt, DEFAULT_PAPER_READER_PROMPTS.en);
     const source = JSON.parse(artifact.source_json);
     assert.equal(source.source_key, "paper_report:201");
     assert.equal(source.legacy_arxiv_paper_id, undefined);

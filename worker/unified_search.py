@@ -12,7 +12,7 @@ from .search import tokenize
 from .search_corpus import artifact_searchable_sql, searchable_library_paper_sql
 
 
-VALID_ENTITY_TYPES = frozenset({"paper", "artifact", "project"})
+VALID_ENTITY_TYPES = frozenset({"paper", "conversation", "artifact", "project"})
 DEFAULT_SEARCH_LIMIT = 30
 MAX_SEARCH_LIMIT = 100
 MIN_DEEP_SEARCH_SCORE = 0.4
@@ -218,6 +218,7 @@ def _add_lexical_candidate(
     updated_at: object,
     href: str,
     identity_namespace: str = "",
+    metadata: dict[str, object] | None = None,
 ) -> None:
     lexical_score, lexical_matches = _lexical_score(query, title, snippet)
     if lexical_score <= 0:
@@ -238,6 +239,7 @@ def _add_lexical_candidate(
             "updated_at": updated_at,
             "href": href,
             "hits": [],
+            **(metadata or {}),
         }
         return
     previous_score = float(candidate["lexical_score"])
@@ -359,6 +361,8 @@ def _library_paper_reader_message_lexical_results(
         FROM paper_reader_messages m
         JOIN papers p ON p.id = m.library_paper_id
         WHERE {searchable_library_paper_sql("p")}
+          AND m.role = 'user'
+          AND m.source = 'chat'
           AND LOWER(COALESCE(m.content, '')) LIKE ?
         ORDER BY m.created_at DESC
         LIMIT ?
@@ -369,18 +373,20 @@ def _library_paper_reader_message_lexical_results(
         if not _date_allowed(row["created_at"], filters):
             continue
         paper_id = int(row["paper_id"])
+        message_id = int(row["id"])
         _add_lexical_candidate(
             candidates,
             query=query,
-            entity_type="paper",
-            entity_id=paper_id,
-            title=str(row["title"]),
-            snippet=str(row["content"]),
-            source_type="paper_reader_message",
+            entity_type="conversation",
+            entity_id=message_id,
+            title=str(row["content"]),
+            snippet=str(row["title"]),
+            source_type="reader_user_prompt",
             project_id=None,
             updated_at=row["created_at"],
-            href=f"/papers/library/{paper_id}",
-            identity_namespace="library",
+            href=f"/papers/chat/{paper_id}?message={message_id}",
+            identity_namespace="conversation",
+            metadata={"parent_paper_id": paper_id, "parent_paper_title": str(row["title"])},
         )
 
 
@@ -893,9 +899,10 @@ def deep_search(conn: DbConnection, settings: Settings, payload: dict[str, objec
     if "paper" in selected_types:
         source_calls.append(("library_paper_keywords", _library_paper_lexical_results))
         source_calls.append(("library_paper_fulltext_keywords", _library_paper_fulltext_lexical_results))
-        source_calls.append(("library_paper_reader_message_keywords", _library_paper_reader_message_lexical_results))
         source_calls.append(("library_papers", _library_paper_results))
         source_calls.append(("library_paper_chunks", _library_paper_chunk_results))
+    if "conversation" in selected_types:
+        source_calls.append(("reader_user_prompt_keywords", _library_paper_reader_message_lexical_results))
     if "artifact" in selected_types:
         source_calls.append(("artifact_keywords", _artifact_lexical_results))
     if "project" in selected_types:

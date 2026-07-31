@@ -271,6 +271,7 @@
 .global-result-kind { align-self: start; padding: 5px 7px; border-radius: 7px; text-align: center; color: #586cc0; background: rgba(99,120,206,.11); font-size: 10px; font-weight: 800; }
 .global-result-kind.kind-artifact { color: #74511a; background: #fff1d4; }
 .global-result-kind.kind-project { color: #65509c; background: #eee9ff; }
+.global-result-kind.kind-conversation { color: #276b66; background: #ddf4ef; }
 .global-search-result small { color: var(--muted, #778096); font-size: 10px; }
 .global-search-result h3 { margin: 4px 0 5px; color: var(--ink, #20283d); font-size: 14px; line-height: 1.35; }
 .global-search-result p { display: -webkit-box; margin: 0; overflow: hidden; color: var(--muted, #778096); font-size: 12px; line-height: 1.55; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
@@ -348,6 +349,7 @@
 :root[data-theme="dark"] .global-search-result mark { background: rgba(205,158,38,.34); }
 :root[data-theme="dark"] .global-result-kind.kind-artifact { color: #e7c47f; background: rgba(190,132,30,.13); }
 :root[data-theme="dark"] .global-result-kind.kind-project { color: #c6b6fa; background: rgba(139,105,200,.15); }
+:root[data-theme="dark"] .global-result-kind.kind-conversation { color: #8bd8cf; background: rgba(50,148,137,.16); }
 
 @media (max-width: 620px) {
   .global-search-backdrop { align-items: start; padding: 12px; }

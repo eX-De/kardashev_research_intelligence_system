@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { NotFoundError, ValidationError, maybeOne, parseJson, query, toJson, withTransaction } from "./db.js";
-import { DEFAULT_PAPER_READER_PROMPT } from "./settings.js";
+import { getAppSettings, resolvePaperReaderPrompt } from "./settings.js";
 import {
   ensureLibraryPaperIdForLegacyPaper,
   getReaderPaperDetail
@@ -454,6 +454,8 @@ export async function syncProjectPaperRecommendations(paperIds = null) {
 }
 
 export async function ensurePaperReportsForRecommendations(paperIds = null) {
+  const settingsData = await getAppSettings();
+  const prompt = resolvePaperReaderPrompt(settingsData.settings || {});
   const projectsByPaper = await sourceProjectsForRecommendedPapers({ query }, paperIds);
   return withTransaction(async (client) => {
     let created = 0;
@@ -466,7 +468,7 @@ export async function ensurePaperReportsForRecommendations(paperIds = null) {
         await savePaperReportState(client, {
           ...state,
           status: "queued",
-          prompt: DEFAULT_PAPER_READER_PROMPT,
+          prompt,
           system_prompt: PAPER_READER_ANALYSIS_SYSTEM,
           source_project_ids: projectIds,
           report_markdown: "",
@@ -479,7 +481,7 @@ export async function ensurePaperReportsForRecommendations(paperIds = null) {
         await savePaperReportState(client, {
           ...state,
           source_project_ids: projectIds,
-          prompt: state.prompt || DEFAULT_PAPER_READER_PROMPT,
+          prompt: state.prompt || prompt,
           system_prompt: state.system_prompt || PAPER_READER_ANALYSIS_SYSTEM
         });
         refreshed += 1;

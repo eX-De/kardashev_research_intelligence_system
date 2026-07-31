@@ -54,7 +54,7 @@ function NumberField({ label, name, min, max, step, value, onChange }) {
 }
 
 function ProviderManager({ providers, settings, onAddProvider, onProviderChange, onRemoveProvider, onSettingChange }) {
-  const { t } = useTranslation("settings");
+  const { i18n, t } = useTranslation("settings");
   const [activeProviderIndex, setActiveProviderIndex] = useState(0);
   const rows = providers.length ? providers : [emptyProvider()];
   const activeIndex = Math.min(activeProviderIndex, rows.length - 1);
@@ -69,6 +69,16 @@ function ProviderManager({ providers, settings, onAddProvider, onProviderChange,
   };
   const chatModels = modelsForProvider(settings.llm_chat_provider_id);
   const embeddingModels = modelsForProvider(settings.llm_embedding_provider_id, "embedding_models");
+  const promptLocale = String(i18n.resolvedLanguage || i18n.language || "zh-CN").toLowerCase().startsWith("en")
+    ? "en"
+    : "zh-CN";
+  const promptDefaults = settings.paper_reader_prompt_defaults || {};
+  const localizedDefaultPrompt = String(
+    promptDefaults[promptLocale] || promptDefaults["zh-CN"] || settings.paper_reader_default_prompt || ""
+  );
+  const customPrompt = String(settings.paper_reader_default_prompt || "");
+  const promptMode = settings.paper_reader_prompt_mode === "custom" ? "custom" : "default";
+  const promptValue = promptMode === "custom" ? customPrompt : localizedDefaultPrompt;
 
   useEffect(() => {
     if (activeProviderIndex > rows.length - 1) {
@@ -84,6 +94,18 @@ function ProviderManager({ providers, settings, onAddProvider, onProviderChange,
   function removeProvider() {
     onRemoveProvider?.(activeIndex);
     setActiveProviderIndex(Math.max(activeIndex - 1, 0));
+  }
+
+  function changePromptMode(nextMode) {
+    if (nextMode === promptMode) return;
+    if (
+      nextMode === "custom"
+      && (!customPrompt.trim() || Object.values(promptDefaults).includes(customPrompt.trim()))
+    ) {
+      onSettingChange("paper_reader_default_prompt", localizedDefaultPrompt);
+    }
+    onSettingChange("paper_reader_prompt_mode", nextMode);
+    onSettingChange("paper_reader_prompt_locale", promptLocale);
   }
 
   const changeProvider = (field, value) => onProviderChange?.(activeIndex, field, value);
@@ -208,7 +230,40 @@ function ProviderManager({ providers, settings, onAddProvider, onProviderChange,
         <header className="routing-panel-heading">
           <div><span>{t("models.prompt.eyebrow")}</span><h3>{t("models.prompt.title")}</h3><p>{t("models.prompt.description")}</p></div>
         </header>
-        <label><span>{t("models.prompt.field")}</span><textarea onChange={(event) => onSettingChange("paper_reader_default_prompt", event.target.value)} value={settings.paper_reader_default_prompt || ""} /></label>
+        <div className="paper-prompt-editor">
+          <div className="paper-prompt-mode-row">
+            <span>
+              <strong>{t("models.prompt.mode.label")}</strong>
+              <small>{t(`models.prompt.mode.${promptMode}Hint`)}</small>
+            </span>
+            <div className="paper-prompt-mode-control" role="radiogroup" aria-label={t("models.prompt.mode.label")}>
+              {["default", "custom"].map((mode) => (
+                <button
+                  aria-checked={promptMode === mode}
+                  className={promptMode === mode ? "active" : ""}
+                  key={mode}
+                  onClick={() => changePromptMode(mode)}
+                  role="radio"
+                  type="button"
+                >
+                  {t(`models.prompt.mode.${mode}`)}
+                </button>
+              ))}
+            </div>
+          </div>
+          <label>
+            <span>{t(promptMode === "custom" ? "models.prompt.customField" : "models.prompt.defaultField")}</span>
+            <textarea
+              aria-describedby="paper-prompt-language-hint"
+              onChange={(event) => onSettingChange("paper_reader_default_prompt", event.target.value)}
+              readOnly={promptMode === "default"}
+              value={promptValue}
+            />
+          </label>
+          <small className="paper-prompt-language-hint" id="paper-prompt-language-hint">
+            {t("models.prompt.languageHint", { language: t(`models.prompt.languages.${promptLocale}`) })}
+          </small>
+        </div>
       </section>
     </>
   );

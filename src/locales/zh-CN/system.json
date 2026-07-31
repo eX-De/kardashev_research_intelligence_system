@@ -90,8 +90,8 @@
     },
     "paper_report_queue_failed": {
       "title": "全文报告生成失败",
-      "detail": "{{count}} 篇报告失败，需要在报告队列中重试或检查 LLM/PDF/TXT 配置。",
-      "detail_other": "{{count}} 篇报告失败，需要在报告队列中重试或检查 LLM/PDF/TXT 配置。"
+      "detail": "{{count}} 篇报告失败，需要在论文仓库中重试或检查 LLM/PDF/TXT 配置。",
+      "detail_other": "{{count}} 篇报告失败，需要在论文仓库中重试或检查 LLM/PDF/TXT 配置。"
     },
     "paper_report_queue_backlog": {
       "title": "全文报告等待生成",

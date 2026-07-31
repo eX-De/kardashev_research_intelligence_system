@@ -1329,9 +1329,66 @@
 
 .vision-settings .model-prompt-panel { padding: 0; }
 
-.vision-settings .model-prompt-panel > label { display: grid; gap: 8px; padding: 17px 19px 19px; }
+.vision-settings .paper-prompt-editor { display: grid; gap: 14px; padding: 17px 19px 19px; }
+
+.vision-settings .paper-prompt-editor > label { display: grid; gap: 8px; }
+
+.vision-settings .paper-prompt-mode-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 12px 13px;
+  border: 1px solid rgba(255, 255, 255, 0.065);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.022);
+}
+
+.vision-settings .paper-prompt-mode-row > span { min-width: 0; }
+
+.vision-settings .paper-prompt-mode-row strong { display: block; color: #e9ebf5; font-size: 11px; }
+
+.vision-settings .paper-prompt-mode-row small { display: block; margin-top: 4px; color: #8e95aa; font-size: 9px; line-height: 1.45; }
+
+.vision-settings .paper-prompt-mode-control {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 10px;
+  background: rgba(7, 9, 18, 0.32);
+}
+
+.vision-settings .paper-prompt-mode-control button {
+  min-height: 28px;
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 7px;
+  color: #8e95aa;
+  background: transparent;
+  box-shadow: none;
+  font-size: 9px;
+  font-weight: 720;
+}
+
+.vision-settings .paper-prompt-mode-control button:hover { transform: none; color: #c8cdea; }
+
+.vision-settings .paper-prompt-mode-control button.active {
+  color: #dce1ff;
+  background: rgba(139, 158, 255, 0.14);
+  box-shadow: 0 1px 3px rgba(3, 5, 12, 0.24);
+}
 
 .vision-settings .model-prompt-panel textarea { min-height: 160px; font-family: "SFMono-Regular", Consolas, "Microsoft YaHei UI", monospace; font-size: 11px; line-height: 1.65; }
+
+.vision-settings .model-prompt-panel textarea[readonly] {
+  color: #a9b0c7;
+  background: rgba(255, 255, 255, 0.018);
+  cursor: default;
+}
+
+.vision-settings .paper-prompt-language-hint { color: #858ca2; font-size: 9px; line-height: 1.45; }
 
 :root[data-theme="light"] .vision-settings .model-provider-studio,
 :root[data-theme="light"] .vision-settings .model-routing-workspace .model-routing-panel,
@@ -1363,6 +1420,34 @@
 :root[data-theme="light"] .vision-settings .provider-sidebar-head > div > span,
 :root[data-theme="light"] .vision-settings .provider-editor-head > div:not(.provider-editor-actions) > span,
 :root[data-theme="light"] .vision-settings .routing-panel-heading > div > span { color: #6678c6; }
+
+:root[data-theme="light"] .vision-settings .paper-prompt-mode-row {
+  border-color: rgba(54, 67, 99, 0.09);
+  background: rgba(75, 89, 124, 0.025);
+}
+
+:root[data-theme="light"] .vision-settings .paper-prompt-mode-row strong { color: #3d465c; }
+
+:root[data-theme="light"] .vision-settings .paper-prompt-mode-row small,
+:root[data-theme="light"] .vision-settings .paper-prompt-language-hint { color: #778096; }
+
+:root[data-theme="light"] .vision-settings .paper-prompt-mode-control {
+  border-color: rgba(54, 67, 99, 0.1);
+  background: rgba(68, 82, 117, 0.045);
+}
+
+:root[data-theme="light"] .vision-settings .paper-prompt-mode-control button { color: #727b91; }
+
+:root[data-theme="light"] .vision-settings .paper-prompt-mode-control button.active {
+  color: #5264b5;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(42, 54, 89, 0.12);
+}
+
+:root[data-theme="light"] .vision-settings .model-prompt-panel textarea[readonly] {
+  color: #626b81;
+  background: rgba(68, 82, 117, 0.025);
+}
 
 :root[data-theme="light"] .vision-settings .model-provider-studio .provider-tab,
 :root[data-theme="light"] .vision-settings .provider-field-group,

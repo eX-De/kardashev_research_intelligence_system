@@ -8,16 +8,12 @@ from typing import Any
 from .config import LLMProvider, Settings, normalize_provider_base_url
 from .db import from_json, to_json, utc_now
 from .env import env_value
-
-DEFAULT_PAPER_READER_PROMPT = """请阅读这份研究文档，输出结构化解读：
-
-1. 研究问题和背景
-2. 方法和实验设计
-3. 主要发现
-4. 局限性
-5. 对后续研究或应用的启发
-
-请尽量使用中文，保留关键英文术语。"""
+from .paper_prompts import (
+    PAPER_READER_DEFAULT_PROMPTS,
+    infer_paper_reader_prompt_mode,
+    is_builtin_paper_reader_prompt,
+    normalize_paper_reader_prompt_locale,
+)
 
 CSV_FIELDS = {
     "obsidian_include_dirs",
@@ -71,6 +67,8 @@ STRING_FIELDS = {
     "llm_chat_model",
     "llm_embedding_provider_id",
     "llm_embedding_model",
+    "paper_reader_prompt_mode",
+    "paper_reader_prompt_locale",
     "paper_reader_default_prompt",
     "paper_report_provider_id",
     "paper_report_model",
@@ -183,6 +181,27 @@ def _providers_from_value(value: Any, existing: dict[str, LLMProvider] | None = 
 
 
 def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, Any]:
+    paper_reader_custom_prompt = str(
+        stored.get("paper_reader_default_prompt", settings.paper_reader_default_prompt or "")
+    )
+    paper_reader_prompt_mode_source = (
+        stored.get("paper_reader_prompt_mode")
+        if "paper_reader_prompt_mode" in stored
+        else "" if "paper_reader_default_prompt" in stored
+        else settings.paper_reader_prompt_mode
+    )
+    paper_reader_prompt_mode = infer_paper_reader_prompt_mode(
+        paper_reader_prompt_mode_source,
+        paper_reader_custom_prompt,
+    )
+    paper_reader_prompt_locale = normalize_paper_reader_prompt_locale(
+        stored.get("paper_reader_prompt_locale", settings.paper_reader_prompt_locale)
+    )
+    paper_reader_custom_prompt_payload = (
+        ""
+        if paper_reader_prompt_mode == "default" and is_builtin_paper_reader_prompt(paper_reader_custom_prompt)
+        else paper_reader_custom_prompt
+    )
     return {
         "obsidian_vault_path": str(settings.obsidian_vault_path or ""),
         "obsidian_storage_backend": settings.obsidian_storage_backend,
@@ -227,12 +246,10 @@ def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, An
         "llm_chat_model": settings.llm_chat_model,
         "llm_embedding_provider_id": settings.llm_embedding_provider_id,
         "llm_embedding_model": settings.llm_embedding_model,
-        "paper_reader_default_prompt": str(
-            stored.get(
-                "paper_reader_default_prompt",
-                settings.paper_reader_default_prompt or DEFAULT_PAPER_READER_PROMPT,
-            )
-        ),
+        "paper_reader_prompt_mode": paper_reader_prompt_mode,
+        "paper_reader_prompt_locale": paper_reader_prompt_locale,
+        "paper_reader_default_prompt": paper_reader_custom_prompt_payload,
+        "paper_reader_prompt_defaults": PAPER_READER_DEFAULT_PROMPTS,
         "paper_report_provider_id": str(
             stored.get("paper_report_provider_id", settings.paper_report_provider_id or "")
         ),
@@ -368,6 +385,21 @@ def apply_stored_settings(conn: Any, settings: Settings) -> Settings:
             value = str(stored[field])
             updates[field] = value
 
+    custom_prompt = updates.get("paper_reader_default_prompt", settings.paper_reader_default_prompt)
+    prompt_mode_value = (
+        stored.get("paper_reader_prompt_mode")
+        if "paper_reader_prompt_mode" in stored
+        else None if "paper_reader_default_prompt" in stored
+        else settings.paper_reader_prompt_mode
+    )
+    updates["paper_reader_prompt_mode"] = infer_paper_reader_prompt_mode(
+        prompt_mode_value,
+        custom_prompt,
+    )
+    updates["paper_reader_prompt_locale"] = normalize_paper_reader_prompt_locale(
+        stored.get("paper_reader_prompt_locale", settings.paper_reader_prompt_locale)
+    )
+
     return replace(settings, **updates)
 
 
@@ -417,6 +449,14 @@ def save_app_settings(conn: Any, payload: dict[str, Any]) -> dict[str, Any]:
             value = float(raw_value or 0)
         elif key in BOOL_FIELDS:
             value = _bool(raw_value)
+        elif key == "paper_reader_prompt_mode":
+            value = str(raw_value or "").strip().lower()
+            if value not in {"default", "custom"}:
+                raise RuntimeError("paper_reader_prompt_mode must be default or custom")
+        elif key == "paper_reader_prompt_locale":
+            value = str(raw_value or "").strip()
+            if value not in {"zh-CN", "en"}:
+                raise RuntimeError("paper_reader_prompt_locale must be zh-CN or en")
         elif key == "scheduler_run_time":
             value = str(raw_value or "09:00")
             if not re.match(r"^\d{2}:\d{2}$", value):

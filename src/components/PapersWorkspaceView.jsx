@@ -1,6 +1,6 @@
 import { InboxView } from "./InboxView.jsx";
+import { PaperChatView } from "./PaperChatView.jsx";
 import { PaperLibraryView } from "./PaperLibraryView.jsx";
-import { ReportQueueView } from "./ReportQueueView.jsx";
 import "../styles/PapersWorkspaceView.css";
 
 const PAPER_SECTIONS = {
@@ -10,8 +10,8 @@ const PAPER_SECTIONS = {
   library: {
     component: PaperLibraryView
   },
-  reports: {
-    component: ReportQueueView
+  chat: {
+    component: PaperChatView
   }
 };
 
@@ -19,8 +19,8 @@ export function PapersWorkspaceView({
   importOpen,
   notify,
   onClosePaperImport,
-  onOpenReportQueue,
-  onOpenPaperImport,
+  onOpenChat,
+  onOpenLibraryPaper,
   onSelectPaper,
   section = "inbox",
   selectedPaperId,
@@ -33,7 +33,7 @@ export function PapersWorkspaceView({
     "papers-workspace-view",
     section === "inbox" ? "inbox-workspace-shell" : "",
     section === "library" ? "library-workspace-shell" : "",
-    section === "reports" ? "reports-workspace-shell" : ""
+    section === "chat" ? "chat-workspace-shell" : ""
   ]
     .filter(Boolean)
     .join(" ");
@@ -44,13 +44,13 @@ export function PapersWorkspaceView({
         importOpen={importOpen}
         notify={notify}
         onClosePaperImport={onClosePaperImport}
-        onOpenPaperImport={onOpenPaperImport}
-        onOpenReportQueue={onOpenReportQueue}
+        onOpenChat={onOpenChat}
+        onOpenLibraryPaper={onOpenLibraryPaper}
         onSelectPaper={onSelectPaper}
         selectedPaperId={selectedPaperId}
         setStatusMessage={setStatusMessage}
-        targetPaperId={section === "reports" ? selectedPaperId : null}
-        targetPaperKey={section === "reports" ? selectedPaperId : ""}
+        targetPaperId={section === "chat" ? selectedPaperId : null}
+        targetPaperKey={section === "chat" ? selectedPaperId : ""}
       />
     </section>
   );

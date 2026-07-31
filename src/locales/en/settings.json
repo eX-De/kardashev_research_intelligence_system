@@ -266,6 +266,21 @@
       }
     },
     "concurrency": { "title": "Project profile concurrency", "description": "Limit concurrent project-profile requests", "field": "Concurrent requests" },
-    "prompt": { "eyebrow": "Default instruction", "title": "Paper reading prompt", "description": "Default structured instruction for new full-text reading tasks.", "field": "Prompt content" }
+    "prompt": {
+      "eyebrow": "Reading instruction",
+      "title": "Paper reading prompt",
+      "description": "Use the built-in instruction for the interface language, or save a custom instruction that language changes will not overwrite.",
+      "mode": {
+        "label": "Prompt mode",
+        "default": "Use default",
+        "custom": "Custom",
+        "defaultHint": "New reading tasks automatically use the built-in prompt for the current interface language.",
+        "customHint": "New reading tasks use the custom prompt saved below."
+      },
+      "defaultField": "Default prompt for this language",
+      "customField": "Custom prompt",
+      "languageHint": "Current default language: {{language}}. The default prompt follows the interface language.",
+      "languages": { "zh-CN": "Chinese", "en": "English" }
+    }
   }
 }

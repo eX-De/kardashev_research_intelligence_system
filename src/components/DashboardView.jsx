@@ -511,7 +511,7 @@ export function DashboardView({ setStatusMessage, notify = () => {} }) {
                 <span><strong>{t("page.inbox")}</strong><small>{t("page.inboxHint")}</small></span>
                 <b aria-hidden="true">→</b>
               </Link>
-              <Link to="/papers/reports">
+              <Link to="/papers/library">
                 <span><strong>{t("page.reports")}</strong><small>{t("page.reportTasks", { count: formatMetricCount(reportCount, i18n.resolvedLanguage) })}</small></span>
                 <b aria-hidden="true">→</b>
               </Link>
@@ -530,7 +530,7 @@ export function DashboardView({ setStatusMessage, notify = () => {} }) {
         <section className="vision-stats" aria-label={t("page.scaleAria")}>
           <VisionMetric label={t("page.projects")} value={counts.projects} hint={t("page.projectsHint")} tone="violet" to="/projects" />
           <VisionMetric label={t("page.library")} value={counts.papers} hint={t("page.libraryHint")} tone="blue" to="/papers/library" />
-          <VisionMetric label={t("page.reports")} value={reportCount} hint={t("page.reportsHint")} tone="coral" to="/papers/reports" />
+          <VisionMetric label={t("page.reports")} value={reportCount} hint={t("page.reportsHint")} tone="coral" to="/papers/library" />
           <VisionMetric label={t("page.context")} value={counts.knowledge_documents || counts.notes} hint={t("page.contextHint")} tone="gold" to="/artifacts" />
         </section>
 

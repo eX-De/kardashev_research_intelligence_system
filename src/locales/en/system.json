@@ -90,8 +90,8 @@
     },
     "paper_report_queue_failed": {
       "title": "Full-paper report generation failed",
-      "detail_one": "{{count}} report failed. Retry it in the report queue or check the LLM and PDF/TXT configuration.",
-      "detail_other": "{{count}} reports failed. Retry them in the report queue or check the LLM and PDF/TXT configuration."
+      "detail_one": "{{count}} report failed. Retry it in the paper library or check the LLM and PDF/TXT configuration.",
+      "detail_other": "{{count}} reports failed. Retry them in the paper library or check the LLM and PDF/TXT configuration."
     },
     "paper_report_queue_backlog": {
       "title": "Full-paper reports are waiting",

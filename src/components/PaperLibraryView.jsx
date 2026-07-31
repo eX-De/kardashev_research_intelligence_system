@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
+import { cacheNamespace, useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { api, fmtDate, postJson, snippet } from "../lib/dashboard.js";
 import { paperImportanceLabel, paperImportanceOptions } from "../lib/paperImportance.js";
 import { commitPaperListSelection, resolvePaperListSelection } from "../lib/paperSelection.js";
 import { paperSourceFilterLabel, paperSourceFilterOptions } from "../lib/paperSource.js";
+import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
+import { PaperImportDialog } from "./PaperImportDialog.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
 import { WorkspacePaneLoader } from "./WorkspacePaneLoader.jsx";
 import { useWorkspacePageSizeOptions, WorkspacePagination } from "./WorkspacePagination.jsx";
@@ -13,7 +15,7 @@ import { WorkspaceSelect } from "./WorkspaceSelect.jsx";
 import "../styles/PaperLibraryView.css";
 
 const STATUS_CODES = ["", "candidate", "saved", "reading", "read", "archived", "discarded"];
-const REPORT_PRESENCE_CODES = ["", "with", "without"];
+const REPORT_STATUS_CODES = ["", "missing", "queued", "processing", "done", "failed", "cancelled"];
 const LIBRARY_SORT_CODES = ["updated", "importance"];
 const STATUS_TONES = {
   archived: "slate",
@@ -45,8 +47,31 @@ function primarySource(sources = []) {
   return sources.find((source) => source.source_type === "arxiv") || sources[0];
 }
 
+function latestByUpdatedAt(items = []) {
+  return [...items].sort((left, right) => {
+    const updatedOrder = String(right?.updated_at || "").localeCompare(String(left?.updated_at || ""));
+    return updatedOrder || Number(right?.id || 0) - Number(left?.id || 0);
+  })[0] || null;
+}
+
+function paperSourceUrl(sources = []) {
+  return latestByUpdatedAt(sources.filter((source) => source?.source_url))?.source_url || "";
+}
+
+function paperPdfUrl(paperId, assets = []) {
+  const pdfAsset = latestByUpdatedAt(assets.filter((asset) => asset?.asset_type === "pdf"));
+  if (pdfAsset?.path) return `/api/reader/papers/${paperId}/pdf`;
+  return pdfAsset?.url || "";
+}
+
 function paperIdentity(paper, fallback) {
   return paper?.arxiv_id || paper?.doi || paper?.canonical_key || fallback;
+}
+
+function stringList(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
+  if (typeof value === "string") return value.split(/[;,]/).map((item) => item.trim()).filter(Boolean);
+  return [];
 }
 
 function paperListSource(paper) {
@@ -56,14 +81,21 @@ function paperListSource(paper) {
   return paper?.source_type || "manual";
 }
 
-export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPaperId, setStatusMessage }) {
+export function PaperLibraryView({
+  importOpen = false,
+  onClosePaperImport,
+  onOpenChat,
+  onSelectPaper,
+  selectedPaperId,
+  setStatusMessage
+}) {
   const { t, i18n } = useTranslation("papers");
   const pageSizeOptions = useWorkspacePageSizeOptions();
   const cache = useApiCacheClient();
   const [activeId, setActiveId] = useState(null);
   const [status, setStatus] = useState("");
   const [sourceFilter, setSourceFilter] = useState("all");
-  const [reportPresence, setReportPresence] = useState("");
+  const [reportStatusFilter, setReportStatusFilter] = useState("");
   const [importance, setImportance] = useState("");
   const [sort, setSort] = useState("updated");
   const [query, setQuery] = useState("");
@@ -73,6 +105,11 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
   const [busy, setBusy] = useState(false);
+  const [activeDetailTab, setActiveDetailTab] = useState("overview");
+  const [linkingProjectId, setLinkingProjectId] = useState(null);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [savingTitle, setSavingTitle] = useState(false);
   const selectFirstFromNextList = useRef(false);
 
   const queryString = useMemo(() => {
@@ -80,14 +117,14 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
     const params = new URLSearchParams({ limit: String(pageSize), offset: String(offset) });
     if (status) params.set("status", status);
     if (sourceFilter !== "all") params.set("source", sourceFilter);
-    if (reportPresence) params.set("report_presence", reportPresence);
+    if (reportStatusFilter) params.set("report_status", reportStatusFilter);
     if (importance) params.set("importance", importance);
     if (sort !== "updated") params.set("sort", sort);
     if (query.trim()) params.set("q", query.trim());
     if (dateFrom) params.set("date_from", dateFrom);
     if (dateTo) params.set("date_to", dateTo);
     return params.toString();
-  }, [dateFrom, dateTo, importance, page, pageSize, query, reportPresence, sort, sourceFilter, status]);
+  }, [dateFrom, dateTo, importance, page, pageSize, query, reportStatusFilter, sort, sourceFilter, status]);
 
   const listQuery = useCachedApi(
     ["library", "list", queryString],
@@ -102,6 +139,7 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
     () => api(`/api/library/${activeId}`),
     { enabled: Boolean(activeId), staleTime: 60000 }
   );
+  const projectsQuery = useCachedApi(["projects"], () => api("/api/projects"), { staleTime: 60000 });
   const detailResult = detailQuery.data || null;
   const detailMatchesActivePaper = Boolean(detailResult?.paper?.id)
     && Number(detailResult.paper.id) === Number(activeId);
@@ -129,9 +167,9 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
   }, [activeId, items, listQuery.hasData, onSelectPaper, selectedPaperId]);
 
   useEffect(() => {
-    const error = listQuery.error || detailQuery.error;
+    const error = listQuery.error || detailQuery.error || projectsQuery.error;
     if (error) setStatusMessage(error.message);
-  }, [detailQuery.error, listQuery.error, setStatusMessage]);
+  }, [detailQuery.error, listQuery.error, projectsQuery.error, setStatusMessage]);
 
   async function updateStatus(nextStatus) {
     if (!detail?.paper?.id) return;
@@ -166,38 +204,191 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
     }
   }
 
+  async function refreshPaperData() {
+    cache.markStale(cacheNamespace("library"));
+    cache.markStale(cacheNamespace("reader", "papers"));
+    cache.markStale(cacheNamespace("paper-reports"));
+    await Promise.all([
+      listQuery.refresh({ force: true }),
+      activeId ? detailQuery.refresh({ force: true }) : Promise.resolve()
+    ]);
+  }
+
+  async function runReportAction(action) {
+    if (!detail?.paper?.id || busy) return;
+    const paperId = detail.paper.id;
+    setBusy(true);
+    try {
+      if (action === "generate" || action === "regenerate") {
+        await postJson(`/api/papers/${paperId}/report`, {
+          force: action === "regenerate",
+          locale: i18n.resolvedLanguage || i18n.language
+        });
+        setStatusMessage(t("library.report.messages.queued"));
+      } else if (action === "cancel") {
+        await postJson(`/api/reader/papers/${paperId}/cancel`, {});
+        setStatusMessage(t("library.report.messages.cancelled"));
+      } else if (action === "retry") {
+        await postJson(`/api/reader/papers/${paperId}/retry`, {
+          locale: i18n.resolvedLanguage || i18n.language
+        });
+        setStatusMessage(t("library.report.messages.requeued"));
+      } else if (action === "delete") {
+        if (!window.confirm(t("library.report.confirmDelete"))) return;
+        await api(`/api/reader/papers/${paperId}/report`, { method: "DELETE" });
+        setStatusMessage(t("library.report.messages.deleted"));
+      }
+      await refreshPaperData();
+    } catch (error) {
+      setStatusMessage(error.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function linkPaperToProject(projectId) {
+    const paperId = Number(detail?.paper?.id || 0);
+    const numericProjectId = Number(projectId || 0);
+    if (!paperId || !numericProjectId || linkingProjectId) return;
+    const project = (projectsQuery.data?.items || []).find((item) => Number(item.id) === numericProjectId);
+    setLinkingProjectId(numericProjectId);
+    try {
+      await postJson(`/api/projects/${numericProjectId}/papers`, {
+        paper_id: paperId,
+        relation: "reading",
+        note: "manual_from_paper_library"
+      });
+      cache.markStale(cacheNamespace("library"));
+      cache.markStale(cacheNamespace("reader", "papers"));
+      cache.markStale(["reader", "paper", String(paperId)]);
+      cache.markStale(["project", String(numericProjectId)]);
+      cache.markStale(["projects"]);
+      await detailQuery.refresh({ force: true });
+      setStatusMessage(t("reader.messages.projectLinked", { project: project?.name || "" }));
+    } catch (error) {
+      setStatusMessage(error.message);
+    } finally {
+      setLinkingProjectId(null);
+    }
+  }
+
+  async function unlinkPaperFromProject(projectId) {
+    const paperId = Number(detail?.paper?.id || 0);
+    const numericProjectId = Number(projectId || 0);
+    if (!paperId || !numericProjectId || linkingProjectId) return;
+    const project = (projectsQuery.data?.items || []).find((item) => Number(item.id) === numericProjectId);
+    setLinkingProjectId(numericProjectId);
+    try {
+      await api(`/api/projects/${numericProjectId}/papers/${paperId}`, { method: "DELETE" });
+      cache.markStale(cacheNamespace("library"));
+      cache.markStale(cacheNamespace("reader", "papers"));
+      cache.markStale(["reader", "paper", String(paperId)]);
+      cache.markStale(["project", String(numericProjectId)]);
+      cache.markStale(["projects"]);
+      await detailQuery.refresh({ force: true });
+      setStatusMessage(t("reader.messages.projectUnlinked", { project: project?.name || "" }));
+    } catch (error) {
+      setStatusMessage(error.message);
+    } finally {
+      setLinkingProjectId(null);
+    }
+  }
+
+  async function savePaperTitle(event) {
+    event.preventDefault();
+    const paperId = Number(detail?.paper?.id || 0);
+    const title = titleDraft.trim();
+    if (!paperId || savingTitle) return;
+    if (!title || title === String(detail.paper.title || "").trim()) {
+      setTitleDraft(detail.paper.title || "");
+      setEditingTitle(false);
+      return;
+    }
+    setSavingTitle(true);
+    try {
+      const data = await api(`/api/reader/papers/${paperId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title })
+      });
+      const updatedAt = data?.paper?.updated_at || detail.paper.updated_at;
+      detailQuery.patch((current) => ({
+        ...(current || {}),
+        paper: { ...(current?.paper || {}), title, updated_at: updatedAt }
+      }));
+      listQuery.patch((current) => ({
+        ...(current || {}),
+        items: (current?.items || []).map((item) => Number(item.id) === paperId ? { ...item, title, updated_at: updatedAt } : item)
+      }));
+      cache.markStale(cacheNamespace("reader", "papers"));
+      cache.markStale(["reader", "paper", String(paperId)]);
+      setEditingTitle(false);
+      setStatusMessage(t("reader.messages.titleUpdated"));
+    } catch (error) {
+      setStatusMessage(error.message);
+    } finally {
+      setSavingTitle(false);
+    }
+  }
+
   const paper = detail?.paper;
   const paperReport = detail?.paper_report;
+  const reportStatus = paperReport?.status || "missing";
   const sources = detail?.sources || [];
   const assets = detail?.assets || [];
   const chunks = detail?.chunks || [];
   const linkedProjects = detail?.linked_projects || [];
   const artifacts = detail?.artifacts || [];
+  const projects = projectsQuery.data?.items || [];
   const mainSource = primarySource(sources);
+  const pdfAsset = latestByUpdatedAt(assets.filter((asset) => asset?.asset_type === "pdf"));
+  const textAsset = latestByUpdatedAt(assets.filter((asset) => asset?.asset_type === "text"));
+  const categories = stringList(mainSource?.metadata?.categories);
+  const sourceUrl = paperSourceUrl(sources);
+  const pdfUrl = paperPdfUrl(paper?.id, assets);
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const currentPage = Math.min(page, pageCount);
   const statusOptions = STATUS_CODES.map((value) => [value, t(`library.status.${value || "all"}`)]);
-  const reportPresenceOptions = REPORT_PRESENCE_CODES.map((value) => [value, t(`library.reportPresence.${value || "all"}`)]);
+  const reportStatusOptions = REPORT_STATUS_CODES.map((value) => [value, t(`reportStatus.${value || "all"}`)]);
   const librarySortOptions = LIBRARY_SORT_CODES.map((value) => [value, t(`library.sort.${value}`)]);
   const sourceFilterOptions = paperSourceFilterOptions(t);
   const importanceOptions = paperImportanceOptions(t);
   const selectedStatusLabel = status ? statusLabel(status, t) : t("library.status.allStates");
   const selectedSourceLabel = paperSourceFilterLabel(sourceFilter, t);
-  const selectedReportLabel = reportPresenceOptions.find(([value]) => value === reportPresence)?.[1] || t("library.reportPresence.all");
+  const selectedReportLabel = reportStatusOptions.find(([value]) => value === reportStatusFilter)?.[1] || t("reportStatus.all");
   const selectedImportanceLabel = importanceOptions.find(([value]) => value === importance)?.[1] || t("importance.all");
   const selectedSortLabel = librarySortOptions.find(([value]) => value === sort)?.[1] || t("library.sort.updated");
   const searchLabel = query.trim() ? t("library.filters.searchValue", { query: query.trim() }) : t("library.filters.notSearched");
   const dateRangeLabel = dateFrom || dateTo ? t("library.filters.dateRange", { from: dateFrom || t("common.unlimited"), to: dateTo || t("common.unlimited") }) : t("library.filters.allDates");
-  const activeFilterCount = [status, sourceFilter !== "all", reportPresence, importance, sort !== "updated", query.trim(), dateFrom, dateTo].filter(Boolean).length;
+  const activeFilterCount = [status, sourceFilter !== "all", reportStatusFilter, importance, sort !== "updated", query.trim(), dateFrom, dateTo].filter(Boolean).length;
   const activeFilterLabels = [
     status ? selectedStatusLabel : "",
     sourceFilter !== "all" ? selectedSourceLabel : "",
-    reportPresence ? selectedReportLabel : "",
+    reportStatusFilter ? selectedReportLabel : "",
     importance ? t("library.filters.importanceValue", { value: selectedImportanceLabel }) : "",
     sort !== "updated" ? t("library.filters.sortValue", { value: selectedSortLabel }) : "",
     query.trim() ? searchLabel : "",
     dateFrom || dateTo ? dateRangeLabel : ""
   ].filter(Boolean);
+
+  const linkedProjectIds = new Set(linkedProjects.map((item) => Number(item.project_id)));
+  const projectLinkOptions = [
+    ["", !projects.length ? t("reader.projectLink.noProjects") : linkingProjectId ? t("reader.projectLink.linking") : t("reader.projectLink.action")],
+    ...projects.map((project) => ({
+      disabled: linkedProjectIds.has(Number(project.id)),
+      label: linkedProjectIds.has(Number(project.id)) ? t("reader.projectLink.linkedName", { name: project.name }) : project.name,
+      value: String(project.id)
+    }))
+  ];
+
+  useEffect(() => {
+    setActiveDetailTab("overview");
+    setEditingTitle(false);
+  }, [paper?.id]);
+
+  useEffect(() => {
+    if (!editingTitle) setTitleDraft(paper?.title || "");
+  }, [editingTitle, paper?.id, paper?.title]);
 
   useEffect(() => {
     // A new page starts with an empty cache entry. Do not treat that loading
@@ -219,7 +410,7 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
     selectFirstFromNextList.current = true;
     setStatus("");
     setSourceFilter("all");
-    setReportPresence("");
+    setReportStatusFilter("");
     setImportance("");
     setSort("updated");
     setQuery("");
@@ -321,7 +512,7 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
               </div>
               <div className="library-filter-control paper-filter-control">
                 <span>{t("common.fullReport")}</span>
-                <WorkspaceSelect ariaLabel={t("library.filters.reportAria")} onChange={(nextValue) => updateFilter(setReportPresence, nextValue)} options={reportPresenceOptions} value={reportPresence} />
+                <WorkspaceSelect ariaLabel={t("library.filters.reportAria")} onChange={(nextValue) => updateFilter(setReportStatusFilter, nextValue)} options={reportStatusOptions} value={reportStatusFilter} />
               </div>
               <div className="library-filter-control paper-filter-control">
                 <span>{t("common.importance")}</span>
@@ -379,6 +570,7 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
                   <div className="inbox-paper-row-head">
                     <span className={`paper-pill paper-status-${itemStatusTone}`}>{statusLabel(item.library_status, t)}</span>
                     {item.importance ? <span className={`paper-pill paper-importance-${safeToken(item.importance)}`}>{t("library.importanceBadge", { value: paperImportanceLabel(item.importance, t) })}</span> : null}
+                    <span className={`paper-pill report-status-${safeToken(item.paper_report?.status || "missing")}`}>{reportStatusLabel(item.paper_report?.status, t)}</span>
                     <span className="library-card-asset-state">{t("library.chunkCount", { count: item.chunk_count || 0 })}</span>
                   </div>
                   <h2>{item.title}</h2>
@@ -401,7 +593,7 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
             }) : (
               <div className="paper-empty-state">
                 <strong>{t("library.empty.title")}</strong>
-                <p>{status || sourceFilter !== "all" || reportPresence || importance || sort !== "updated" || query || dateFrom || dateTo ? t("library.empty.filtered") : t("library.empty.description")}</p>
+                <p>{status || sourceFilter !== "all" || reportStatusFilter || importance || sort !== "updated" || query || dateFrom || dateTo ? t("library.empty.filtered") : t("library.empty.description")}</p>
               </div>
             )
           )}
@@ -435,113 +627,237 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
                   <span>{paper.venue || t("library.noVenue")}</span>
                   <span>{t("common.updatedAt", { date: fmtDate(paper.updated_at, i18n.resolvedLanguage || i18n.language) })}</span>
                 </div>
-                {paperReport?.paper_id ? (
-                  <div className="library-detail-hero-actions">
-                    <button className="library-report-action" onClick={() => onOpenReportQueue?.(paperReport.paper_id)} type="button">
-                      <span>{t("inbox.actions.openReport")}</span><i aria-hidden="true">→</i>
-                    </button>
-                  </div>
-                ) : null}
+                <div className="paper-detail-actions">
+                  <button className="paper-detail-action" onClick={() => onOpenChat?.(paper.id)} type="button">
+                    <span>{t("library.actions.openChat")}</span><i aria-hidden="true">→</i>
+                  </button>
+                  {sourceUrl ? (
+                    <a className="paper-detail-action" href={sourceUrl} target="_blank" rel="noreferrer" title={sourceUrl}>
+                      <span>{t("reader.actions.openSource")}</span><i aria-hidden="true">↗</i>
+                    </a>
+                  ) : null}
+                  {pdfUrl ? (
+                    <a className="paper-detail-action" href={pdfUrl} target="_blank" rel="noreferrer">
+                      <span>{t("reader.actions.openPdf")}</span><i aria-hidden="true">↗</i>
+                    </a>
+                  ) : null}
+                </div>
               </div>
             </header>
 
-            <section className="library-detail-stat-grid" aria-label={t("library.detail.statsAria")}>
-              <div><span>{t("library.detail.linkedProjects")}</span><strong>{linkedProjects.length}</strong><p>{t("library.detail.researchProjects")}</p></div>
-              <div><span>{t("library.detail.localAssets")}</span><strong>{assets.length}</strong><p>{t("library.detail.filesCache")}</p></div>
-              <div><span>{t("library.detail.textIndex")}</span><strong>{chunks.length}</strong><p>{t("library.detail.searchableChunks")}</p></div>
-              <div><span>{t("library.detail.researchArtifacts")}</span><strong>{artifacts.length}</strong><p>{t("library.detail.reportsNotes")}</p></div>
-            </section>
-
-            <div className="library-detail-content">
-              <section className="section inbox-content-section library-content-card library-abstract-card">
-                <header className="library-section-heading">
-                  <div><span>{t("library.sections.overview")}</span><h3>{t("library.sections.abstract")}</h3></div>
-                  <em>{paper.year || "—"}</em>
-                </header>
-                <p>{paper.abstract || t("library.noAbstract")}</p>
-              </section>
-
-              <section className="section inbox-content-section library-content-card library-status-card">
-                <header className="library-section-heading">
-                  <div><span>{t("library.sections.readingManagement")}</span><h3>{t("library.sections.paperStatus")}</h3></div>
-                  <em>{statusLabel(paper.library_status, t)}</em>
-                </header>
-                <p>{t("library.statusDescription")}</p>
-                <div className="paper-status-actions library-status-actions" aria-label={t("library.sections.paperStatus")}>
-                  <button disabled={busy || paper.library_status === "saved"} onClick={() => updateStatus("saved")} type="button"><i className="status-dot saved" />{t("library.status.saved")}</button>
-                  <button disabled={busy || paper.library_status === "reading"} onClick={() => updateStatus("reading")} type="button"><i className="status-dot reading" />{t("library.status.reading")}</button>
-                  <button disabled={busy || paper.library_status === "read"} onClick={() => updateStatus("read")} type="button"><i className="status-dot read" />{t("library.status.read")}</button>
-                  <button className="danger" disabled={busy || paper.library_status === "discarded"} onClick={() => updateStatus("discarded")} type="button"><i className="status-dot discarded" />{t("library.status.discardedAction")}</button>
-                </div>
-              </section>
-
-              <div className="library-detail-card-grid">
-                <section className="section inbox-content-section library-content-card">
-                  <header className="library-section-heading">
-                    <div><span>{t("library.sections.researchContext")}</span><h3>{t("library.sections.projectLinks")}</h3></div>
-                    <em>{linkedProjects.length}</em>
-                  </header>
-                  <div className="paper-item-list">
-                    {linkedProjects.length ? linkedProjects.map((project) => (
-                      <a className="paper-info-item paper-info-link" href={`/projects/${encodeURIComponent(String(project.project_id))}`} key={project.project_id}>
-                        <strong>{project.project_name}</strong>
-                        <p>{t(`relation.${project.relation}`, { defaultValue: project.relation })}{project.importance ? ` · ${t("library.importanceBadge", { value: paperImportanceLabel(project.importance, t) })}` : ""} · {project.note || t("library.linked")}</p>
-                      </a>
-                    )) : <p className="muted">{t("library.noProjectLinks")}</p>}
-                  </div>
-                </section>
-                <section className="section inbox-content-section library-content-card">
-                  <header className="library-section-heading">
-                    <div><span>{t("library.sections.researchOutput")}</span><h3>{t("library.sections.paperArtifacts")}</h3></div>
-                    <em>{artifacts.length}</em>
-                  </header>
-                  <div className="paper-item-list">
-                    {artifacts.length ? artifacts.slice(0, 6).map((artifact) => (
-                      <a className="paper-info-item paper-info-link" href={`/artifacts/${artifact.id}`} key={artifact.id}>
-                        <strong>{artifact.title}</strong>
-                        <p>{artifact.artifact_type} · {t(`workflowState.${artifact.status}`, { defaultValue: artifact.status })} · {fmtDate(artifact.updated_at, i18n.resolvedLanguage || i18n.language)}</p>
-                      </a>
-                    )) : <p className="muted">{t("library.noArtifacts")}</p>}
-                  </div>
-                </section>
-                <section className="section inbox-content-section library-content-card">
-                  <header className="library-section-heading">
-                    <div><span>{t("library.sections.dataCompleteness")}</span><h3>{t("library.sections.assetsSources")}</h3></div>
-                    <em>{sources.length + assets.length}</em>
-                  </header>
-                  <div className="paper-item-list">
-                    {sources.map((source) => (
-                      <article className="paper-info-item" key={`source-${source.id}`}>
-                        <strong>{sourceLabel(source.source_type, t)}</strong>
-                        <p>{source.source_identifier || source.source_url || t("common.notRecorded")}</p>
-                      </article>
-                    ))}
-                    {assets.map((asset) => (
-                      <article className="paper-info-item" key={`asset-${asset.id}`}>
-                        <strong>{asset.asset_type} · {t(`library.assetStatus.${asset.status || "unknown"}`, { defaultValue: asset.status || t("library.assetStatus.unknown") })}</strong>
-                        <p>{asset.path || asset.url || asset.error_message || t("library.noPath")}</p>
-                      </article>
-                    ))}
-                    {!(sources.length + assets.length) ? <p className="muted">{t("library.noAssetsSources")}</p> : null}
-                  </div>
-                </section>
-                <section className="section inbox-content-section library-content-card paper-chunk-section">
-                  <header className="library-section-heading">
-                    <div><span>{t("library.sections.fullTextIndex")}</span><h3>{t("library.sections.textChunks")}</h3></div>
-                    <em>{chunks.length}</em>
-                  </header>
-                  <div className="paper-item-list">
-                    {chunks.slice(0, 5).map((chunk) => (
-                      <article className="paper-info-item" key={chunk.id}>
-                        <strong>{t("library.chunkLabel", { index: chunk.chunk_index })}{chunk.page_start ? ` · ${t("library.pageLabel", { page: chunk.page_start })}` : ""}</strong>
-                        <p>{snippet(chunk.text, 260)}</p>
-                      </article>
-                    ))}
-                    {!chunks.length ? <p className="muted">{t("library.noChunks")}</p> : null}
-                  </div>
-                </section>
-              </div>
+            <div aria-label={t("library.tabs.aria")} className="library-detail-tabs" role="tablist">
+              {[
+                ["overview", "01", t("library.tabs.overview"), t("library.tabs.overviewBadge")],
+                ["report", "02", t("library.tabs.report"), t("library.tabs.reportBadge")],
+                ["metadata", "03", t("library.tabs.metadata"), t("library.tabs.metadataBadge")]
+              ].map(([tab, index, label, badge]) => (
+                <button
+                  aria-controls={`library-${tab}-panel`}
+                  aria-selected={activeDetailTab === tab}
+                  className={activeDetailTab === tab ? "active" : ""}
+                  id={`library-${tab}-tab`}
+                  key={tab}
+                  onClick={() => setActiveDetailTab(tab)}
+                  role="tab"
+                  type="button"
+                >
+                  <i aria-hidden="true">{index}</i><span><strong>{label}</strong><small>{badge}</small></span>
+                </button>
+              ))}
             </div>
+
+            {activeDetailTab === "overview" ? (
+              <div aria-labelledby="library-overview-tab" className="library-tab-panel" id="library-overview-panel" role="tabpanel">
+                <section className="library-detail-stat-grid" aria-label={t("library.detail.statsAria")}>
+                  <div><span>{t("library.detail.linkedProjects")}</span><strong>{linkedProjects.length}</strong><p>{t("library.detail.researchProjects")}</p></div>
+                  <div><span>{t("library.detail.localAssets")}</span><strong>{assets.length}</strong><p>{t("library.detail.filesCache")}</p></div>
+                  <div><span>{t("library.detail.textIndex")}</span><strong>{chunks.length}</strong><p>{t("library.detail.searchableChunks")}</p></div>
+                  <div><span>{t("library.detail.researchArtifacts")}</span><strong>{artifacts.length}</strong><p>{t("library.detail.reportsNotes")}</p></div>
+                </section>
+
+                <div className="library-detail-content">
+                  <section className="section inbox-content-section library-content-card library-abstract-card">
+                    <header className="library-section-heading">
+                      <div><span>{t("library.sections.overview")}</span><h3>{t("library.sections.abstract")}</h3></div>
+                      <em>{paper.year || "—"}</em>
+                    </header>
+                    <p>{paper.abstract || t("library.noAbstract")}</p>
+                  </section>
+
+                  <section className="section inbox-content-section library-content-card library-status-card">
+                    <header className="library-section-heading">
+                      <div><span>{t("library.sections.readingManagement")}</span><h3>{t("library.sections.paperStatus")}</h3></div>
+                      <em>{statusLabel(paper.library_status, t)}</em>
+                    </header>
+                    <p>{t("library.statusDescription")}</p>
+                    <div className="paper-status-actions library-status-actions" aria-label={t("library.sections.paperStatus")}>
+                      <button disabled={busy || paper.library_status === "saved"} onClick={() => updateStatus("saved")} type="button"><i className="status-dot saved" />{t("library.status.saved")}</button>
+                      <button disabled={busy || paper.library_status === "reading"} onClick={() => updateStatus("reading")} type="button"><i className="status-dot reading" />{t("library.status.reading")}</button>
+                      <button disabled={busy || paper.library_status === "read"} onClick={() => updateStatus("read")} type="button"><i className="status-dot read" />{t("library.status.read")}</button>
+                      <button className="danger" disabled={busy || paper.library_status === "discarded"} onClick={() => updateStatus("discarded")} type="button"><i className="status-dot discarded" />{t("library.status.discardedAction")}</button>
+                    </div>
+                  </section>
+
+                  <div className="library-detail-card-grid">
+                    <section className="section inbox-content-section library-content-card library-project-card">
+                      <header className="library-section-heading">
+                        <div><span>{t("library.sections.researchContext")}</span><h3>{t("library.sections.projectLinks")}</h3></div>
+                        <em>{linkedProjects.length}</em>
+                      </header>
+                      <div className="library-project-link-control">
+                        <span>{t("reader.projectLink.label")}</span>
+                        <WorkspaceSelect
+                          ariaLabel={t("reader.projectLink.aria")}
+                          className="library-project-link-select"
+                          disabled={!projects.length || Boolean(linkingProjectId)}
+                          onChange={linkPaperToProject}
+                          options={projectLinkOptions}
+                          value=""
+                        />
+                      </div>
+                      <div className="paper-item-list library-project-list">
+                        {linkedProjects.length ? linkedProjects.map((project) => (
+                          <article className="paper-info-item library-project-item" key={project.project_id}>
+                            <a className="paper-info-link library-project-link" href={`/projects/${encodeURIComponent(String(project.project_id))}`}>
+                              <strong>{project.project_name}</strong>
+                              <p>{t(`relation.${project.relation}`, { defaultValue: project.relation })}{project.importance ? ` · ${t("library.importanceBadge", { value: paperImportanceLabel(project.importance, t) })}` : ""} · {project.note || t("reader.projectLink.manualNote")}</p>
+                            </a>
+                            <button className="library-project-unlink" disabled={Boolean(linkingProjectId)} onClick={() => unlinkPaperFromProject(project.project_id)} type="button">
+                              {linkingProjectId === Number(project.project_id) ? t("reader.projectLink.linking") : t("reader.projectLink.unlink")}
+                            </button>
+                          </article>
+                        )) : <p className="muted">{t("library.noProjectLinks")}</p>}
+                      </div>
+                    </section>
+
+                    <section className="section inbox-content-section library-content-card">
+                      <header className="library-section-heading">
+                        <div><span>{t("library.sections.researchOutput")}</span><h3>{t("library.sections.paperArtifacts")}</h3></div>
+                        <em>{artifacts.length}</em>
+                      </header>
+                      <div className="paper-item-list">
+                        {artifacts.length ? artifacts.slice(0, 6).map((artifact) => (
+                          <a className="paper-info-item paper-info-link" href={`/artifacts/${artifact.id}`} key={artifact.id}>
+                            <strong>{artifact.title}</strong>
+                            <p>{artifact.artifact_type} · {t(`workflowState.${artifact.status}`, { defaultValue: artifact.status })} · {fmtDate(artifact.updated_at, i18n.resolvedLanguage || i18n.language)}</p>
+                          </a>
+                        )) : <p className="muted">{t("library.noArtifacts")}</p>}
+                      </div>
+                    </section>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {activeDetailTab === "report" ? (
+              <section aria-labelledby="library-report-tab" className="section inbox-content-section library-content-card library-report-card library-tab-panel" id="library-report-panel" role="tabpanel">
+                <header className="library-section-heading">
+                  <div><span>{t("library.report.eyebrow")}</span><h3>{t("library.report.title")}</h3></div>
+                  <em>{reportStatusLabel(reportStatus, t)}</em>
+                </header>
+                <div className={`library-report-state report-status-${safeToken(reportStatus)}`}>
+                  <div>
+                    <strong>{reportStatusLabel(reportStatus, t)}</strong>
+                    {paperReport?.model ? <p>{paperReport.model_provider_id ? `${paperReport.model_provider_id} · ` : ""}{paperReport.model}</p> : null}
+                    {paperReport?.error_message ? <p className="library-report-error">{paperReport.error_message}</p> : null}
+                    {paperReport?.updated_at ? <p>{t("common.updatedAt", { date: fmtDate(paperReport.updated_at, i18n.resolvedLanguage || i18n.language) })}</p> : null}
+                  </div>
+                  <div className="library-report-controls">
+                    {reportStatus === "missing" ? <button className="primary" disabled={busy} onClick={() => runReportAction("generate")} type="button">{t("library.report.actions.generate")}</button> : null}
+                    {reportStatus === "queued" ? <button disabled={busy} onClick={() => runReportAction("cancel")} type="button">{t("library.report.actions.cancel")}</button> : null}
+                    {["failed", "cancelled"].includes(reportStatus) ? <button className="primary" disabled={busy} onClick={() => runReportAction("retry")} type="button">{t("library.report.actions.retry")}</button> : null}
+                    {reportStatus === "done" ? <button disabled={busy} onClick={() => runReportAction("regenerate")} type="button">{t("library.report.actions.regenerate")}</button> : null}
+                    {paperReport && reportStatus !== "processing" ? <button className="danger" disabled={busy} onClick={() => runReportAction("delete")} type="button">{t("library.report.actions.delete")}</button> : null}
+                  </div>
+                </div>
+                {reportStatus === "processing" || reportStatus === "queued" ? <p className="muted">{t("library.report.processingHint")}</p> : null}
+                {reportStatus === "done" && paperReport?.report_markdown ? (
+                  <div className="library-report-content"><LazyMarkdownReport markdown={paperReport.report_markdown} /></div>
+                ) : reportStatus === "missing" ? <p className="muted">{t("library.report.empty")}</p> : null}
+              </section>
+            ) : null}
+
+            {activeDetailTab === "metadata" ? (
+              <div aria-labelledby="library-metadata-tab" className="library-tab-panel library-metadata-panel" id="library-metadata-panel" role="tabpanel">
+                <section className="section inbox-content-section library-content-card library-metadata-card">
+                  <header className="library-section-heading">
+                    <div><span>{t("reader.meta.eyebrow")}</span><h3>{t("reader.meta.title")}</h3></div>
+                    <em>{t("reader.meta.itemCount", { count: 12 })}</em>
+                  </header>
+                  <div className="library-meta-grid">
+                    <div className="library-meta-item wide">
+                      <div className="library-meta-label-row">
+                        <span>{t("reader.meta.paperTitle")}</span>
+                        {!editingTitle ? (
+                          <button aria-label={t("reader.meta.editTitleAria")} className="library-meta-edit-button" onClick={() => setEditingTitle(true)} title={t("reader.meta.editTitle")} type="button">
+                            <svg aria-hidden="true" fill="none" viewBox="0 0 20 20" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7"><path d="m4 14.8.7-3.3L13 3.2a1.7 1.7 0 0 1 2.4 0l1.4 1.4a1.7 1.7 0 0 1 0 2.4l-8.3 8.3-3.3.7Z" /><path d="m11.8 4.4 3.8 3.8M4.7 11.5l3.8 3.8" /></svg>
+                          </button>
+                        ) : null}
+                      </div>
+                      {editingTitle ? (
+                        <form className="library-title-editor" onSubmit={savePaperTitle}>
+                          <input aria-label={t("reader.meta.paperTitle")} autoFocus disabled={savingTitle} onChange={(event) => setTitleDraft(event.target.value)} value={titleDraft} />
+                          <div>
+                            <button disabled={savingTitle} onClick={() => { setTitleDraft(paper.title || ""); setEditingTitle(false); }} type="button">{t("common.cancel")}</button>
+                            <button className="primary" disabled={savingTitle || !titleDraft.trim()} type="submit">{savingTitle ? t("common.saving") : t("common.save")}</button>
+                          </div>
+                        </form>
+                      ) : <strong>{paper.title || t("common.notRecorded")}</strong>}
+                    </div>
+                    <div className="library-meta-item"><span>arXiv</span><strong>{paper.arxiv_id || t("common.notRecorded")}</strong></div>
+                    <div className="library-meta-item"><span>DOI</span><strong>{paper.doi || t("common.notRecorded")}</strong></div>
+                    <div className="library-meta-item wide"><span>{t("library.metadata.canonicalKey")}</span><strong>{paper.canonical_key || t("common.notRecorded")}</strong></div>
+                    <div className="library-meta-item wide"><span>{t("reader.meta.categories")}</span><strong>{categories.join(", ") || t("common.notRecorded")}</strong></div>
+                    <div className="library-meta-item wide"><span>{t("reader.meta.authors")}</span><strong>{(paper.authors || []).join(", ") || t("common.notRecorded")}</strong></div>
+                    <div className="library-meta-item"><span>{t("library.metadata.venue")}</span><strong>{paper.venue || t("common.notRecorded")}</strong></div>
+                    <div className="library-meta-item"><span>{t("library.metadata.publishedAt")}</span><strong>{paper.published_at ? fmtDate(paper.published_at, i18n.resolvedLanguage || i18n.language) : t("common.notRecorded")}</strong></div>
+                    <div className="library-meta-item"><span>{t("reader.meta.txtStatus")}</span><strong>{textAsset?.status || "pending"}</strong></div>
+                    <div className="library-meta-item"><span>PDF</span><strong>{pdfAsset?.path ? t("reader.meta.cached") : t("reader.meta.notCached")}</strong></div>
+                    <div className="library-meta-item wide"><span>{t("reader.meta.txtPath")}</span><strong className="is-path">{textAsset?.path || t("reader.meta.notGenerated")}</strong></div>
+                    <div className="library-meta-item wide"><span>{t("reader.meta.pdfPath")}</span><strong className="is-path">{pdfAsset?.path || t("reader.meta.notCached")}</strong></div>
+                  </div>
+                </section>
+
+                <div className="library-detail-card-grid library-metadata-records">
+                  <section className="section inbox-content-section library-content-card">
+                    <header className="library-section-heading">
+                      <div><span>{t("library.sections.dataCompleteness")}</span><h3>{t("library.sections.assetsSources")}</h3></div>
+                      <em>{sources.length + assets.length}</em>
+                    </header>
+                    <div className="paper-item-list">
+                      {sources.map((source) => (
+                        <article className="paper-info-item" key={`source-${source.id}`}>
+                          <strong>{sourceLabel(source.source_type, t)}</strong>
+                          <p>{source.source_identifier || source.source_url || t("common.notRecorded")}</p>
+                        </article>
+                      ))}
+                      {assets.map((asset) => (
+                        <article className="paper-info-item" key={`asset-${asset.id}`}>
+                          <strong>{asset.asset_type} · {t(`library.assetStatus.${asset.status || "unknown"}`, { defaultValue: asset.status || t("library.assetStatus.unknown") })}</strong>
+                          <p>{asset.path || asset.url || asset.error_message || t("library.noPath")}</p>
+                        </article>
+                      ))}
+                      {!(sources.length + assets.length) ? <p className="muted">{t("library.noAssetsSources")}</p> : null}
+                    </div>
+                  </section>
+                  <section className="section inbox-content-section library-content-card paper-chunk-section">
+                    <header className="library-section-heading">
+                      <div><span>{t("library.sections.fullTextIndex")}</span><h3>{t("library.sections.textChunks")}</h3></div>
+                      <em>{chunks.length}</em>
+                    </header>
+                    <div className="paper-item-list">
+                      {chunks.slice(0, 5).map((chunk) => (
+                        <article className="paper-info-item" key={chunk.id}>
+                          <strong>{t("library.chunkLabel", { index: chunk.chunk_index })}{chunk.page_start ? ` · ${t("library.pageLabel", { page: chunk.page_start })}` : ""}</strong>
+                          <p>{snippet(chunk.text, 260)}</p>
+                        </article>
+                      ))}
+                      {!chunks.length ? <p className="muted">{t("library.noChunks")}</p> : null}
+                    </div>
+                  </section>
+                </div>
+              </div>
+            ) : null}
             </div>
           </article>
         ) : (
@@ -552,6 +868,15 @@ export function PaperLibraryView({ onOpenReportQueue, onSelectPaper, selectedPap
         )}
         </section>
       </main>
+      <PaperImportDialog
+        onClose={onClosePaperImport}
+        onImported={async (paperId) => {
+          await refreshPaperData();
+          if (paperId) selectLibraryPaper(paperId);
+        }}
+        open={importOpen}
+        setStatusMessage={setStatusMessage}
+      />
     </section>
   );
 }

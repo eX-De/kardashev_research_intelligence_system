@@ -266,6 +266,21 @@
       }
     },
     "concurrency": { "title": "项目摘要并发", "description": "限制同时运行的项目摘要请求数量", "field": "并发请求数" },
-    "prompt": { "eyebrow": "默认指令", "title": "论文解读 Prompt", "description": "用于新建全文解读任务的默认结构化指令。", "field": "Prompt 内容" }
+    "prompt": {
+      "eyebrow": "阅读指令",
+      "title": "论文解读 Prompt",
+      "description": "选择跟随界面语言的内置指令，或保存一份不会被语言切换覆盖的自定义指令。",
+      "mode": {
+        "label": "Prompt 模式",
+        "default": "使用默认",
+        "custom": "自定义",
+        "defaultHint": "新建解读任务会自动使用当前界面语言的内置 Prompt。",
+        "customHint": "新建解读任务会使用下方保存的自定义 Prompt。"
+      },
+      "defaultField": "当前语言的默认 Prompt",
+      "customField": "自定义 Prompt",
+      "languageHint": "当前默认语言：{{language}}。切换界面语言后，默认 Prompt 会同步切换。",
+      "languages": { "zh-CN": "中文", "en": "English" }
+    }
   }
 }

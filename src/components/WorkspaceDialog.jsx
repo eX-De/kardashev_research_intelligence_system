@@ -5,7 +5,7 @@ import "../styles/WorkspaceDialog.css";
 
 const DIALOG_EXIT_MS = 220;
 
-export function WorkspaceDialog({ children, className = "", description, eyebrow, footer, icon = "WS", onClose, open, title }) {
+export function WorkspaceDialog({ children, className = "", description, eyebrow, footer, icon = "WS", initialFocusRef, onClose, open, title }) {
   const { t } = useTranslation("common");
   const titleId = useId();
   const [present, setPresent] = useState(open);
@@ -34,6 +34,14 @@ export function WorkspaceDialog({ children, className = "", description, eyebrow
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [onClose, open]);
+
+  useEffect(() => {
+    if (!open || !present || !initialFocusRef) return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      initialFocusRef.current?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [initialFocusRef, open, present]);
 
   if (!present || typeof document === "undefined") return null;
 

@@ -1,6 +1,6 @@
 import { many, query, ValidationError } from "./db.js";
 
-const VALID_TYPES = new Set(["paper", "artifact", "project"]);
+const VALID_TYPES = new Set(["paper", "conversation", "artifact", "project"]);
 const MAX_LIMIT = 100;
 
 function searchableLibraryPaperClause(alias = "p") {
@@ -50,6 +50,8 @@ function quickResult(row) {
     score: quickScore(row),
     matched_by: [row.match_kind || "keyword"],
     source_type: row.source_type,
+    parent_paper_id: row.parent_paper_id === null || row.parent_paper_id === undefined ? null : Number(row.parent_paper_id),
+    parent_paper_title: row.parent_paper_title || null,
     project_id: row.project_id === null || row.project_id === undefined ? null : Number(row.project_id),
     updated_at: row.updated_at,
     href: row.href
@@ -118,7 +120,12 @@ async function searchLibraryPaperFulltext(searchQuery, filters, limit, db) {
 async function searchLibraryPaperReaderMessages(searchQuery, filters, limit, db) {
   if (filters.project_id) return [];
   const values = [`%${searchQuery}%`];
-  const clauses = [searchableLibraryPaperClause("p"), "m.content ILIKE $1"];
+  const clauses = [
+    searchableLibraryPaperClause("p"),
+    "m.role = 'user'",
+    "m.source = 'chat'",
+    "m.content ILIKE $1"
+  ];
   if (filters.date_from) {
     values.push(filters.date_from);
     clauses.push(`LEFT(m.created_at, 10) >= $${values.length}`);
@@ -129,10 +136,12 @@ async function searchLibraryPaperReaderMessages(searchQuery, filters, limit, db)
   }
   values.push(limit);
   return many(await db.query(
-    `SELECT 'paper' AS entity_type, p.id AS entity_id, p.title, m.content AS snippet,
-            'paper_reader_message' AS source_type, 'library' AS identity_namespace,
+    `SELECT 'conversation' AS entity_type, m.id AS entity_id, m.content AS title,
+            p.title AS snippet, 'reader_user_prompt' AS source_type,
+            'conversation' AS identity_namespace,
+            p.id AS parent_paper_id, p.title AS parent_paper_title,
             NULL::integer AS project_id, m.created_at AS updated_at,
-            '/papers/library/' || p.id AS href,
+            '/papers/chat/' || p.id || '?message=' || m.id AS href,
             4 AS match_rank, 'keyword' AS match_kind
        FROM paper_reader_messages m
        JOIN papers p ON p.id = m.library_paper_id
@@ -316,8 +325,8 @@ export async function quickSearch(params = {}, db = { query }) {
   if (request.types.includes("paper")) {
     calls.push(searchLibraryPapers(request.query, request.filters, request.limit, db));
     calls.push(searchLibraryPaperFulltext(request.query, request.filters, request.limit, db));
-    calls.push(searchLibraryPaperReaderMessages(request.query, request.filters, request.limit, db));
   }
+  if (request.types.includes("conversation")) calls.push(searchLibraryPaperReaderMessages(request.query, request.filters, request.limit, db));
   if (request.types.includes("artifact")) calls.push(searchArtifacts(request.query, request.filters, request.limit, db));
   if (request.types.includes("project")) {
     calls.push(searchProjects(request.query, request.filters, request.limit, db));

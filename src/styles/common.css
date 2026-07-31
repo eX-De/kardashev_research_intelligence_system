@@ -3617,6 +3617,76 @@ html[data-theme="dark"],
   transform: translateY(0);
 }
 
+.paper-detail-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 17px;
+}
+
+.paper-detail-action,
+:root[data-theme="light"] .paper-detail-action,
+:root[data-theme="dark"] .paper-detail-action {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 9px 15px;
+  border: 1px solid rgba(177, 188, 255, 0.34);
+  border-radius: 12px;
+  color: #fff;
+  background: linear-gradient(135deg, #687dd2, #8b69c8);
+  box-shadow: 0 12px 25px rgba(83, 91, 178, 0.24);
+  font-size: 11px;
+  font-weight: 720;
+  line-height: 1;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 180ms ease, background 180ms ease, box-shadow 180ms ease, transform 180ms ease;
+}
+
+.paper-detail-action:hover,
+.paper-detail-action:focus-visible,
+:root[data-theme="light"] .paper-detail-action:hover,
+:root[data-theme="light"] .paper-detail-action:focus-visible,
+:root[data-theme="dark"] .paper-detail-action:hover,
+:root[data-theme="dark"] .paper-detail-action:focus-visible {
+  border-color: rgba(198, 205, 255, 0.52);
+  color: #fff;
+  background: linear-gradient(135deg, #7589dc, #9875d2);
+  box-shadow: 0 15px 30px rgba(83, 91, 178, 0.32);
+  text-decoration: none;
+  transform: translateY(-1px);
+}
+
+.paper-detail-action:active,
+:root[data-theme="light"] .paper-detail-action:active,
+:root[data-theme="dark"] .paper-detail-action:active {
+  box-shadow: 0 8px 18px rgba(83, 91, 178, 0.22);
+  transform: translateY(0);
+}
+
+.paper-detail-action i {
+  font-size: 15px;
+  font-style: normal;
+  line-height: 1;
+}
+
+:root[data-theme="light"] .paper-detail-action {
+  border-color: rgba(80, 99, 185, 0.28);
+  background: linear-gradient(135deg, #6378cf, #8967c2);
+  box-shadow: 0 10px 22px rgba(76, 88, 153, 0.2);
+}
+
+:root[data-theme="light"] .paper-detail-action:hover,
+:root[data-theme="light"] .paper-detail-action:focus-visible {
+  border-color: rgba(80, 99, 185, 0.4);
+  background: linear-gradient(135deg, #6d82d8, #9471cc);
+}
+
 /* Shared animation definitions. */
 
 @keyframes loader-spin {

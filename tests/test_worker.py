@@ -58,6 +58,7 @@ from worker.paper_reports import (
     process_paper_report_queue,
     queue_paper_report,
 )
+from worker.paper_prompts import PAPER_READER_DEFAULT_PROMPTS
 from worker.artifacts import content_hash, upsert_artifact
 from worker.papers import paper_id_for_arxiv_paper_id, promote_arxiv_paper_to_library
 from worker.paper_reader import (
@@ -1591,7 +1592,19 @@ class WorkerTests(unittest.TestCase):
         conn.commit()
         sync_project_paper_recommendations(conn, [int(paper_id)])
 
-        result = ensure_paper_reports_for_recommendations(conn, [int(paper_id)])
+        report_settings = chat_settings(test_settings())
+        report_settings = Settings(
+            **{
+                **report_settings.__dict__,
+                "paper_reader_prompt_mode": "default",
+                "paper_reader_prompt_locale": "en",
+            }
+        )
+        result = ensure_paper_reports_for_recommendations(
+            conn,
+            [int(paper_id)],
+            report_settings,
+        )
 
         self.assertEqual(result["paper_reports_queued"], 1)
         library_paper_id = int(
@@ -1617,13 +1630,13 @@ class WorkerTests(unittest.TestCase):
             )
 
         with patch("worker.paper_reports._call_chat_text", side_effect=fake_chat):
-            process_result = process_paper_report_queue(conn, chat_settings(test_settings()), [library_paper_id])
+            process_result = process_paper_report_queue(conn, report_settings, [library_paper_id])
 
         self.assertEqual(process_result["paper_reports_done"], 1)
         report = paper_report_payload(conn, library_paper_id)
         paper = conn.execute("SELECT title FROM papers WHERE id = ?", (library_paper_id,)).fetchone()
         self.assertEqual(report["status"], "done")
-        self.assertEqual(report["prompt"], PAPER_READER_DEFAULT_PROMPT)
+        self.assertEqual(report["prompt"], PAPER_READER_DEFAULT_PROMPTS["en"])
         self.assertEqual(report["report_markdown"], "# 全文报告\n\n完整报告内容")
         self.assertEqual(paper["title"], "Model Extracted Paper Title")
         self.assertEqual(captured["kwargs"]["provider_id"], "test-chat")
@@ -1633,9 +1646,9 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(queue["items"][0]["title"], "Model Extracted Paper Title")
         messages = captured["messages"]
         self.assertEqual(messages[0]["content"], "You are a research paper reading assistant. Read the supplied full PDF text and answer accurately from it.")
-        self.assertIn("请只返回一个 JSON 对象", messages[1]["content"])
+        self.assertIn("Return only one JSON object", messages[1]["content"])
         self.assertIn("--- page 1 ---\nFull paper body for report.", messages[1]["content"])
-        self.assertTrue(messages[1]["content"].endswith(PAPER_READER_DEFAULT_PROMPT))
+        self.assertTrue(messages[1]["content"].endswith(PAPER_READER_DEFAULT_PROMPTS["en"]))
 
     def test_paper_reader_chat_stream_uses_original_prompt_and_persists_messages(self) -> None:
         conn = connect_test_db()

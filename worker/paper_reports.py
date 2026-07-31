@@ -22,18 +22,9 @@ from .papers import (
     replace_paper_chunks,
     upsert_paper_asset,
 )
+from .paper_prompts import PAPER_READER_DEFAULT_PROMPT, resolve_paper_reader_prompt
 from .project_status import run_daily_project_status_sql
 
-
-PAPER_READER_DEFAULT_PROMPT = """请阅读这份研究文档，输出结构化解读：
-
-1. 研究问题和背景
-2. 方法和实验设计
-3. 主要发现
-4. 局限性
-5. 对后续研究或应用的启发
-
-请尽量使用中文，保留关键英文术语。"""
 
 PAPER_READER_ANALYSIS_SYSTEM = (
     "You are a research document reading assistant. Read the supplied extracted document text and answer accurately from it."
@@ -284,8 +275,10 @@ def _source_projects_for_recommended_papers(
 def ensure_paper_reports_for_recommendations(
     conn: DbConnection,
     paper_ids: list[int] | tuple[int, ...] | set[int] | None = None,
+    settings: Settings | None = None,
 ) -> dict[str, int]:
     projects_by_paper = _source_projects_for_recommended_papers(conn, paper_ids)
+    prompt = resolve_paper_reader_prompt(settings) if settings else PAPER_READER_DEFAULT_PROMPT
     created = 0
     refreshed = 0
     preserved = 0
@@ -297,7 +290,7 @@ def ensure_paper_reports_for_recommendations(
             state.update(
                 {
                     "status": "queued",
-                    "prompt": PAPER_READER_DEFAULT_PROMPT,
+                    "prompt": prompt,
                     "system_prompt": PAPER_READER_ANALYSIS_SYSTEM,
                     "source_project_ids": project_ids,
                     "report_markdown": "",
@@ -310,7 +303,7 @@ def ensure_paper_reports_for_recommendations(
         if state.get("source_project_ids") != project_ids:
             state["source_project_ids"] = project_ids
             if not state.get("prompt"):
-                state["prompt"] = PAPER_READER_DEFAULT_PROMPT
+                state["prompt"] = prompt
             if not state.get("system_prompt"):
                 state["system_prompt"] = PAPER_READER_ANALYSIS_SYSTEM
             _save_paper_report_state(conn, state, commit=False)
@@ -368,8 +361,7 @@ def sync_paper_report_for_recommendation_state(conn: DbConnection, paper_id: int
 
 
 def _settings_report_prompt(settings: Settings) -> str:
-    prompt = clean_unicode(str(settings.paper_reader_default_prompt or "")).strip()
-    return prompt or PAPER_READER_DEFAULT_PROMPT
+    return resolve_paper_reader_prompt(settings)
 
 
 def queue_paper_report(
@@ -586,15 +578,16 @@ def _ensure_full_text(conn: DbConnection, settings: Settings, paper_id: int) -> 
 
 def _analysis_messages(paper_text: str, prompt: str) -> list[dict[str, str]]:
     user_message = (
-        "下面是从来源文档中提取并清洗后的完整正文；PDF 文本可能保留分页，网页文本可能保留 Markdown 结构。"
-        "请基于这份文本完成用户要求；不要声称无法读取正文，除非文本本身确实缺失。\n\n"
-        "请只返回一个 JSON 对象，不要输出 JSON 之外的文字。JSON 字段：\n"
-        "- title: 文档正式标题，使用正文中的标题，去掉换行和多余空格。\n"
-        "- markdown: 完整中文解读报告，使用 Markdown。\n\n"
+        "The following is the complete text extracted and cleaned from the source document. "
+        "PDF text may retain page markers and web text may retain Markdown structure. "
+        "Complete the user's request from this text; do not claim that the document is unavailable unless the text is actually missing.\n\n"
+        "Return only one JSON object and no text outside it. JSON fields:\n"
+        "- title: the document's formal title from the text, without line breaks or redundant whitespace.\n"
+        "- markdown: the complete analysis report in Markdown, using the language requested by the user.\n\n"
         "<paper_text>\n"
         f"{paper_text}\n"
         "</paper_text>\n\n"
-        "用户要求：\n"
+        "User request:\n"
         f"{prompt}"
     )
     return [
@@ -889,7 +882,7 @@ def ensure_report_ready_for_paper(
     settings: Settings,
     paper_id: int,
 ) -> dict[str, object]:
-    queue_paper_report(conn, paper_id)
+    queue_paper_report(conn, paper_id, prompt=_settings_report_prompt(settings))
     report = paper_report_payload(conn, paper_id)
     if report and report.get("status") == "done" and str(report.get("report_markdown") or "").strip():
         mirror_paper_report_artifact(conn, paper_id)

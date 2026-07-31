@@ -78,7 +78,7 @@ function PaperList({ papers, activePaperId, onSelect }) {
   });
 }
 
-function PaperDetail({ detail, onOpenReportQueue, onRecommendation, onGenerateReport }) {
+function PaperDetail({ detail, onOpenLibraryPaper, onRecommendation, onGenerateReport }) {
   const { t } = useTranslation("papers");
   const [selectedProjectIds, setSelectedProjectIds] = useState([]);
   const [importance, setImportance] = useState("");
@@ -182,7 +182,7 @@ function PaperDetail({ detail, onOpenReportQueue, onRecommendation, onGenerateRe
             </div>
             <div className="detail-actions inbox-primary-actions">
               <button className="primary" disabled={!canAccept} onClick={() => onRecommendation({ action: "accept", importance, project_ids: selectedProjectIds })} type="button">{t("inbox.actions.save")}</button>
-              <button onClick={() => onOpenReportQueue?.(paper.id)} title={t("inbox.actions.openReportTitle", { status: reportStatusLabel(report.status, t) })} type="button">{t("inbox.actions.openReport")}</button>
+              <button onClick={() => onOpenLibraryPaper?.(paper.id)} title={t("inbox.actions.openReportTitle", { status: reportStatusLabel(report.status, t) })} type="button">{t("inbox.actions.openReport")}</button>
               <button className="danger" onClick={() => onRecommendation({ action: "discard" })} type="button">{t("inbox.actions.discard")}</button>
             </div>
           </section>
@@ -283,7 +283,7 @@ function PaperDetail({ detail, onOpenReportQueue, onRecommendation, onGenerateRe
   );
 }
 
-export function InboxView({ notify = () => {}, onOpenReportQueue, onSelectPaper, selectedPaperId, setStatusMessage }) {
+export function InboxView({ notify = () => {}, onOpenLibraryPaper, onSelectPaper, selectedPaperId, setStatusMessage }) {
   const { t } = useTranslation("papers");
   const cache = useApiCacheClient();
   const [activePaperId, setActivePaperId] = useState(null);
@@ -456,7 +456,7 @@ export function InboxView({ notify = () => {}, onOpenReportQueue, onSelectPaper,
           />
         ) : (
           <div className="inbox-detail-transition" key={detail?.paper?.id || "empty"}>
-            <PaperDetail detail={detail} onGenerateReport={generateReport} onOpenReportQueue={onOpenReportQueue} onRecommendation={updateRecommendation} />
+            <PaperDetail detail={detail} onGenerateReport={generateReport} onOpenLibraryPaper={onOpenLibraryPaper} onRecommendation={updateRecommendation} />
           </div>
         )}
         </section>

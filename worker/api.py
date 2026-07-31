@@ -38,6 +38,7 @@ from .paper_reports import (
     remove_paper_report_from_queue,
     sync_paper_report_for_recommendation_state,
 )
+from .paper_prompts import resolve_paper_reader_prompt
 from .paper_reader import paper_reader_detail
 from .papers import (
     list_paper_library,
@@ -1520,11 +1521,16 @@ def generate_paper_reading_report(
     payload: dict[str, object] | None = None,
 ) -> dict[str, object]:
     payload = payload or {}
+    prompt = resolve_paper_reader_prompt(
+        settings,
+        locale=payload.get("locale"),
+        prompt=payload.get("prompt"),
+    )
     queue_paper_report(
         conn,
         paper_id,
         force=bool(payload.get("force")),
-        prompt=settings.paper_reader_default_prompt,
+        prompt=prompt,
     )
     result = process_paper_report_queue(conn, settings, [paper_id])
     detail = paper_reader_detail(conn, paper_id)

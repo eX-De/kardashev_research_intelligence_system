@@ -3,7 +3,8 @@ import { homedir } from "node:os";
 import { envBoolean, envValue } from "./env.js";
 import { parseJson, query, toJson, ValidationError, withTransaction } from "./db.js";
 
-export const DEFAULT_PAPER_READER_PROMPT = `请阅读这份研究文档，输出结构化解读：
+export const DEFAULT_PAPER_READER_PROMPTS = Object.freeze({
+  "zh-CN": `请阅读这份研究文档，输出结构化解读：
 
 1. 研究问题和背景
 2. 方法和实验设计
@@ -11,7 +12,64 @@ export const DEFAULT_PAPER_READER_PROMPT = `请阅读这份研究文档，输出
 4. 局限性
 5. 对后续研究或应用的启发
 
-请尽量使用中文，保留关键英文术语。`;
+请尽量使用中文，保留关键英文术语。`,
+  en: `Read this research document and provide a structured analysis:
+
+1. Research question and background
+2. Methods and experimental design
+3. Main findings
+4. Limitations
+5. Implications for future research or applications
+
+Please answer in English while preserving important terms in their original language.`
+});
+
+export const DEFAULT_PAPER_READER_PROMPT_LOCALE = "zh-CN";
+export const DEFAULT_PAPER_READER_PROMPT = DEFAULT_PAPER_READER_PROMPTS[DEFAULT_PAPER_READER_PROMPT_LOCALE];
+const LEGACY_PAPER_READER_DEFAULT_PROMPTS = new Set([`请阅读这篇论文 PDF，输出结构化解读：
+
+1. 研究问题和背景
+2. 方法和实验设计
+3. 主要发现
+4. 局限性
+5. 对后续研究或应用的启发
+
+请尽量使用中文，保留关键英文术语。`]);
+const PAPER_READER_PROMPT_MODES = new Set(["default", "custom"]);
+
+function isBuiltInPaperReaderPrompt(value) {
+  const prompt = String(value || "").trim();
+  return Object.values(DEFAULT_PAPER_READER_PROMPTS).includes(prompt)
+    || LEGACY_PAPER_READER_DEFAULT_PROMPTS.has(prompt);
+}
+
+export function normalizePaperReaderPromptLocale(value) {
+  const locale = String(value || "").trim();
+  if (locale === "en" || locale.toLowerCase().startsWith("en-")) return "en";
+  return DEFAULT_PAPER_READER_PROMPT_LOCALE;
+}
+
+export function defaultPaperReaderPrompt(locale) {
+  return DEFAULT_PAPER_READER_PROMPTS[normalizePaperReaderPromptLocale(locale)];
+}
+
+export function inferPaperReaderPromptMode(value, customPrompt = "") {
+  const explicit = String(value || "").trim().toLowerCase();
+  if (PAPER_READER_PROMPT_MODES.has(explicit)) return explicit;
+  const prompt = String(customPrompt || "").trim();
+  if (!prompt || isBuiltInPaperReaderPrompt(prompt)) return "default";
+  return "custom";
+}
+
+export function resolvePaperReaderPrompt(settings = {}, { locale = "", prompt = "" } = {}) {
+  const explicitPrompt = String(prompt || "").trim();
+  if (explicitPrompt) return explicitPrompt;
+  const promptLocale = normalizePaperReaderPromptLocale(locale || settings.paper_reader_prompt_locale);
+  const customPrompt = String(settings.paper_reader_default_prompt || "").trim();
+  const mode = inferPaperReaderPromptMode(settings.paper_reader_prompt_mode, customPrompt);
+  if (mode === "custom" && customPrompt) return customPrompt;
+  return defaultPaperReaderPrompt(promptLocale);
+}
 
 export const CSV_FIELDS = new Set([
   "obsidian_include_dirs",
@@ -70,6 +128,8 @@ export const STRING_FIELDS = new Set([
   "llm_chat_model",
   "llm_embedding_provider_id",
   "llm_embedding_model",
+  "paper_reader_prompt_mode",
+  "paper_reader_prompt_locale",
   "paper_reader_default_prompt",
   "paper_report_provider_id",
   "paper_report_model",
@@ -150,6 +210,8 @@ const DATACLASS_SETTING_FIELDS = new Set([
   "obsidian_remote_output_prefix",
   "obsidian_remote_append_only",
   "embedding_concurrency",
+  "paper_reader_prompt_mode",
+  "paper_reader_prompt_locale",
   "paper_reader_default_prompt",
   "paper_report_provider_id",
   "paper_report_model",
@@ -336,6 +398,7 @@ function providersFromEnv() {
 
 export function loadBaseSettingsFromEnv() {
   const vault = envValue("OBSIDIAN_VAULT_PATH", "").trim();
+  const paperReaderCustomPrompt = envValue("PAPER_READER_DEFAULT_PROMPT", "");
   return {
     obsidian_vault_path: vault ? expandUserPath(vault) : "",
     obsidian_include_dirs: csvValue(envValue("OBSIDIAN_INCLUDE_DIRS", "Research,Papers")),
@@ -384,7 +447,12 @@ export function loadBaseSettingsFromEnv() {
     ),
     obsidian_remote_append_only: envBoolean("OBSIDIAN_REMOTE_APPEND_ONLY", true),
     embedding_concurrency: positiveInteger(envValue("EMBEDDING_CONCURRENCY", "2"), 2, "embedding_concurrency"),
-    paper_reader_default_prompt: envValue("PAPER_READER_DEFAULT_PROMPT", ""),
+    paper_reader_prompt_mode: inferPaperReaderPromptMode(
+      envValue("PAPER_READER_PROMPT_MODE", ""),
+      paperReaderCustomPrompt
+    ),
+    paper_reader_prompt_locale: normalizePaperReaderPromptLocale(envValue("PAPER_READER_PROMPT_LOCALE", "zh-CN")),
+    paper_reader_default_prompt: paperReaderCustomPrompt,
     paper_report_provider_id: envValue("PAPER_REPORT_PROVIDER_ID", ""),
     paper_report_model: envValue("PAPER_REPORT_MODEL", ""),
     project_chat_profile_provider_id: envValue("PROJECT_CHAT_PROFILE_PROVIDER_ID", ""),
@@ -465,6 +533,24 @@ export function applyStoredSettings(stored, baseSettings = loadBaseSettingsFromE
 
 export function settingsPayloadFromStored(stored = {}) {
   const settings = applyStoredSettings(stored);
+  const paperReaderCustomPrompt = String(
+    storedOr(stored, "paper_reader_default_prompt", settings.paper_reader_default_prompt || "")
+  );
+  const paperReaderPromptModeSource = hasOwn(stored, "paper_reader_prompt_mode")
+    ? stored.paper_reader_prompt_mode
+    : hasOwn(stored, "paper_reader_default_prompt")
+      ? ""
+      : settings.paper_reader_prompt_mode;
+  const paperReaderPromptMode = inferPaperReaderPromptMode(
+    paperReaderPromptModeSource,
+    paperReaderCustomPrompt
+  );
+  const paperReaderPromptLocale = normalizePaperReaderPromptLocale(
+    storedOr(stored, "paper_reader_prompt_locale", settings.paper_reader_prompt_locale)
+  );
+  const paperReaderCustomPromptPayload = paperReaderPromptMode === "default" && isBuiltInPaperReaderPrompt(paperReaderCustomPrompt)
+    ? ""
+    : paperReaderCustomPrompt;
   return {
     obsidian_vault_path: String(settings.obsidian_vault_path || ""),
     obsidian_storage_backend: settings.obsidian_storage_backend,
@@ -510,9 +596,10 @@ export function settingsPayloadFromStored(stored = {}) {
     llm_chat_model: settings.llm_chat_model,
     llm_embedding_provider_id: settings.llm_embedding_provider_id,
     llm_embedding_model: settings.llm_embedding_model,
-    paper_reader_default_prompt: String(
-      storedOr(stored, "paper_reader_default_prompt", settings.paper_reader_default_prompt || DEFAULT_PAPER_READER_PROMPT)
-    ),
+    paper_reader_prompt_mode: paperReaderPromptMode,
+    paper_reader_prompt_locale: paperReaderPromptLocale,
+    paper_reader_default_prompt: paperReaderCustomPromptPayload,
+    paper_reader_prompt_defaults: DEFAULT_PAPER_READER_PROMPTS,
     paper_report_provider_id: String(storedOr(stored, "paper_report_provider_id", settings.paper_report_provider_id || "")),
     paper_report_model: String(storedOr(stored, "paper_report_model", settings.paper_report_model || "")),
     project_chat_profile_provider_id: String(
@@ -643,6 +730,17 @@ export function normalizeSettingsPayload(payload = {}, currentSettings = {}) {
       value = parseFloatValue(rawValue || 0, key);
     } else if (BOOL_FIELDS.has(key)) {
       value = boolValue(rawValue);
+    } else if (key === "paper_reader_prompt_mode") {
+      value = String(rawValue || "").trim().toLowerCase();
+      if (!PAPER_READER_PROMPT_MODES.has(value)) {
+        throw new ValidationError("paper_reader_prompt_mode must be default or custom");
+      }
+    } else if (key === "paper_reader_prompt_locale") {
+      const locale = String(rawValue || "").trim();
+      if (!["zh-CN", "en"].includes(locale)) {
+        throw new ValidationError("paper_reader_prompt_locale must be zh-CN or en");
+      }
+      value = locale;
     } else if (key === "scheduler_run_time") {
       value = String(rawValue || "09:00");
       if (!/^\d{2}:\d{2}$/.test(value)) {

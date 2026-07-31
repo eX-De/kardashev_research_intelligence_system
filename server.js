@@ -50,6 +50,7 @@ import {
   deleteReaderMessage as deleteNodeReaderMessage,
   deleteReaderReport as deleteNodeReaderReport,
   getPaperReportsSummary as getNodePaperReportsSummary,
+  getReaderConversations as getNodeReaderConversations,
   getReaderPaperDetail as getNodeReaderPaperDetail,
   getReaderPaperPdfPath as getNodeReaderPaperPdfPath,
   getReaderPapers as getNodeReaderPapers,
@@ -2163,6 +2164,7 @@ async function routeApi(req, res, url) {
       status: url.searchParams.get("status") || "",
       source: url.searchParams.get("source") || "",
       report_presence: url.searchParams.get("report_presence") || "",
+      report_status: url.searchParams.get("report_status") || "",
       importance: url.searchParams.get("importance") || "",
       sort: url.searchParams.get("sort") || "",
       project_id: url.searchParams.get("project_id") || "",
@@ -2292,6 +2294,16 @@ async function routeApi(req, res, url) {
       date_from: url.searchParams.get("date_from") || "",
       date_to: url.searchParams.get("date_to") || "",
       limit: url.searchParams.get("limit") || "30"
+    });
+    sendJson(res, 200, data);
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/reader/conversations") {
+    const data = await getNodeReaderConversations({
+      limit: url.searchParams.get("limit") || "50",
+      offset: url.searchParams.get("offset") || "0",
+      questions: url.searchParams.get("questions") || "all"
     });
     sendJson(res, 200, data);
     return;
@@ -2521,7 +2533,8 @@ async function routeApi(req, res, url) {
 
   const readerRetryMatch = url.pathname.match(/^\/api\/reader\/papers\/(\d+)\/retry$/);
   if (req.method === "POST" && readerRetryMatch) {
-    const data = await retryNodeReaderReport(readerRetryMatch[1]);
+    const body = await readRequestJson(req);
+    const data = await retryNodeReaderReport(readerRetryMatch[1], body);
     sendJson(res, 200, data);
     await publishDurablePaperReportChanged(SERVER_EVENTS.PAPER_REPORT_UPDATED, data, readerRetryMatch[1], { action: "retry" });
     return;

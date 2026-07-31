@@ -82,6 +82,7 @@ function markPaperChanged(cache, paperId) {
   cache.markStale(["library"]);
   cache.markStale(cacheNamespace("artifact"));
   cache.markStale(cacheNamespace("reader", "papers"));
+  cache.markStale(cacheNamespace("reader", "conversations"));
   cache.markStale(["paper-reports"]);
   cache.markStale(["paper-reports", "summary"]);
   if (paperId) {
@@ -97,6 +98,7 @@ function markPaperChanged(cache, paperId) {
 
 function markReaderPapersChanged(cache, imported = []) {
   cache.markStale(cacheNamespace("reader", "papers"));
+  cache.markStale(cacheNamespace("reader", "conversations"));
   cache.markStale(["library"]);
   cache.markStale(["health"]);
   cache.markStale(["health", "summary"]);
@@ -119,6 +121,7 @@ export function markGlobalStale(cache) {
   cache.markStale(["library"]);
   cache.markStale(cacheNamespace("library", "detail"));
   cache.markStale(cacheNamespace("reader", "papers"));
+  cache.markStale(cacheNamespace("reader", "conversations"));
   cache.markStale(cacheNamespace("reader", "paper"));
   cache.markStale(["projects"]);
   cache.markStale(cacheNamespace("project"));

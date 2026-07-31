@@ -1,5 +1,7 @@
 # Kardashev Research Intelligence System (KRIS)
 
+简体中文 | [English](README_EN.md)
+
 Kardashev Research Intelligence System (KRIS) 是一个面向个人或小团队的科研情报工作台：它把 Obsidian 项目笔记、arXiv 新论文、PDF 全文、LLM 判断和 Markdown 产物串成一条可恢复的每日情报流水线。Dashboard 负责配置、调度、筛选和阅读；可长期保存和人工编辑的内容仍以 Obsidian Markdown、数据库记录和 `artifacts` 产物为主。
 
 KRIS 还可以作为实验进展接收端，与 [eX-De/kris-agent](https://github.com/eX-De/kris-agent) 配合使用。agent 在代码工作区完成实验、重构或评测后，可以把结构化实验报告推送到 KRIS；KRIS 会把报告保存为项目 artifact，并写入项目上下文，让后续论文推荐、项目检索和日报生成能读到真实研发进展。
@@ -75,7 +77,9 @@ Cloudflare Tunnel 的价值是让 `cloudflared` 从服务器向 Cloudflare 建�
 - 论文发现：按配置的 arXiv 分类抓取论文，做摘要级粗筛、PDF/TXT 缓存、正文分块和证据检索。
 - 项目匹配：把论文正文证据与项目上下文匹配，生成项目级候选论文、LLM 判定和推荐状态。
 - 实验进展接收：通过 [kris-agent](https://github.com/eX-De/kris-agent) 或其它脚本上报结构化实验报告，沉淀为项目 artifact 和项目上下文。
-- 论文阅读：支持导入 arXiv URL 或上传 PDF，生成全文报告，与论文上下文对话，保存阅读笔记到 Obsidian。
+- 论文阅读：支持导入 arXiv/PDF 链接、上传本地 PDF 或导入清洗后的网页正文，生成全文报告，与论文上下文对话，保存阅读笔记到 Obsidian。
+- 统一搜索：通过快速关键词搜索或显式选择的深度搜索，检索论文、研究产物、项目和独立用户提问。
+- 双语界面：支持简体中文与英语切换，包括本地化系统通知和随语言切换的默认论文阅读 Prompt。
 - 自动产物：生成日报、论文报告、项目索引、实验进展记录等 Markdown artifact，并可导出到 Obsidian。
 - 调度与恢复：Node 服务管理手动任务、启动时每日任务、定时任务和论文报告队列；worker 记录任务历史并支持每日流程恢复/重试。
 - 部署选择：Docker Compose 默认使用 PostgreSQL 17；源代码部署通过 `DATABASE_URL` 或 `POSTGRES_*` 连接 PostgreSQL；可选 Nginx HTTPS 反向代理。
@@ -97,7 +101,7 @@ Cloudflare Tunnel 的价值是让 `cloudflared` 从服务器向 Cloudflare 建�
 ├── src/                         # React dashboard
 ├── public/                      # 静态资源，包含 research-mark.svg
 ├── worker/                      # Python worker、API 适配、数据库和流水线逻辑
-├── tests/                       # unittest 测试
+├── tests/                       # unittest 与 Node 测试
 ├── deploy/nginx/                # 可选 HTTPS 反向代理模板和证书目录
 ├── secrets/                     # Docker Compose secrets 示例说明，真实 *.txt 不进 Git
 ├── data/                        # PDF/TXT 缓存、远端 vault 镜像等运行数据
@@ -179,12 +183,12 @@ Vite 会把 `/api` 代理到 `http://localhost:3000`。生产模式下 `npm star
 - 首页：每日流程状态、项目/论文/产物/知识上下文指标、提醒和最近更新。
 - 论文：
   - 待判断：查看推荐论文、证据、项目判定，保存或丢弃，触发全文报告。
-  - 仓库：筛选、搜索和维护已保存论文，更新阅读状态。
-  - 报告队列：导入 URL/PDF，生成、取消、重试、删除论文报告，阅读 PDF/Markdown 并聊天。
+  - 论文仓库：筛选、搜索和维护论文，在项目概览、论文报告和元信息之间切换，并管理项目关联、来源、PDF 与报告状态。
+  - Chat：按论文集中查看报告和用户提问，基于全文、参考论文与项目上下文继续对话。
 - 项目：项目列表、新建项目、提醒和项目统计。
 - 项目详情：编辑项目关键词与 Obsidian 路径，关联论文/笔记，查看候选论文、实验进展和项目产物。
 - 产物：按类型、范围和状态筛选 artifact，查看 Markdown 与来源数据，导出到 Obsidian。
-- 任务：运行每日流程、同步 Obsidian、抓取 arXiv、缓存全文、生成报告，查看任务历史和报告队列。
+- 任务：运行每日流程、同步 Obsidian、抓取 arXiv、缓存全文、生成报告，并查看任务历史与后台执行状态。
 - 设置：配置数据库可见状态、Obsidian、arXiv、RAG、LLM provider、模型路由、调度策略和本地路径选择。
 
 ## 每日流水线
@@ -297,7 +301,7 @@ Reader Chat 还支持为当前论文持久化选择最多 3 篇参考论文。�
 - 设置和健康：`/api/settings`、`/api/health`、`/api/local-path/select`
 - 任务：scheduler、startup daily、run/resume/retry daily、单项 worker 任务、任务历史
 - 论文：inbox、library、paper detail、feedback、recommendation、report queue
-- Reader：PDF/URL 导入、PDF 服务、streaming chat、保存 Obsidian、follow-up questions
+- Reader：PDF/URL/网页正文导入、PDF 服务、streaming chat、保存 Obsidian、follow-up questions
 - Artifacts：列表、详情、导出 Obsidian
 - 外部实验报告：`GET /api/projects` 和 `POST /api/experiments/reports`
 
