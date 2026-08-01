@@ -103,6 +103,24 @@
       "detail_one": "{{count}} full-paper report completed",
       "detail_other": "{{count}} full-paper reports completed"
     },
+    "reader_import": {
+      "type": { "url": "URL import", "web": "Web import", "upload": "PDF upload", "unknown": "Paper import" }
+    },
+    "reader_import_completed": {
+      "title": "{{type}} completed",
+      "detail_one": "{{count}} paper imported successfully",
+      "detail_other": "{{count}} papers imported successfully",
+      "partial_one": "{{count}} imported, {{failed}} failed",
+      "partial_other": "{{count}} imported, {{failed}} failed"
+    },
+    "reader_import_failed": {
+      "title": "{{type}} failed",
+      "noMessage": "The import task failed"
+    },
+    "worker_unavailable": {
+      "title": "Background task service unavailable",
+      "detail": "The task remains queued and will continue when the Worker recovers."
+    },
     "experiment_report_arrived": {
       "title": "Experiment report received",
       "project": "Project {{id}}",
@@ -121,7 +139,8 @@
     "invalid_json": "The request data is invalid.",
     "daily_run_recoverable": "A failed daily run can be resumed. Resume it, or confirm that you want to start a new run.",
     "obsidian_not_configured": "Obsidian is optional. Configure it in Settings before using this feature.",
-    "stream_required": "Paper chat requires a streaming connection."
+    "stream_required": "Paper chat requires a streaming connection.",
+    "worker_unavailable": "The background task service is unavailable. Check the Worker status under Settings > Connections & services, then try again."
   },
   "obsidian": {
     "remote": "Remote",

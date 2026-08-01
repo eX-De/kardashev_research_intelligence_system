@@ -19,10 +19,17 @@
     "status": { "discarded": "已遗弃推荐", "saved": "已保存到论文仓库", "reportQueued": "全文报告已加入生成队列" }
   },
   "library": {
-    "title": "论文仓库", "live": { "loading": "读取仓库", "count": "{{count}} 篇论文" },
+    "title": "论文仓库", "recentImport": "刚刚导入", "recentImportTitle": "最近 30 分钟手动导入", "live": { "loading": "读取仓库", "count": "{{count}} 篇论文" },
+    "queue": { "loading": "读取队列", "capacity": "队列 {{active}}/{{capacity}}", "disabled": "队列未启用" },
+    "importStatus": {
+      "aria": "论文导入状态", "queued": "等待导入", "queuedHint": "已进入后台任务队列", "running": "正在导入", "runningHint": "下载、解析并写入仓库", "latest": "最近结果", "noRecent": "最近 30 分钟暂无结果", "latestDetail": "{{type}} · 成功 {{count}} 篇", "latestFailed": "{{type}} · 导入失败",
+      "type": { "url": "URL 导入", "web": "网页导入", "upload": "PDF 上传", "unknown": "论文导入" },
+      "status": { "queued": "排队中", "waiting_for_worker": "等待 Worker", "running": "导入中", "completed": "已完成", "failed": "失败", "cancelled": "已取消", "idle": "暂无" },
+      "unknownTarget": "待识别论文", "job": "任务 #{{id}}", "pendingTitle": "正在进入论文仓库", "extracting": "正在下载、解析并建立论文记录", "waiting": "等待 Worker 开始处理", "submittedAt": "提交于 {{date}}"
+    },
     "status": { "all": "全部", "allStates": "全部状态", "candidate": "候选", "saved": "已保存", "reading": "阅读中", "read": "已读", "archived": "归档", "discarded": "已丢弃", "discardedAction": "丢弃", "unknown": "未知" },
-    "reportPresence": { "all": "全部报告", "with": "有报告", "without": "无报告" }, "sort": { "updated": "工作流状态与更新", "importance": "重要性优先" },
-    "sourceType": { "arxiv": "arXiv", "url": "URL", "upload": "上传", "web": "网页正文", "manual": "手动", "unknown": "来源" },
+    "reportPresence": { "all": "全部报告", "with": "有报告", "without": "无报告" }, "sort": { "updated": "最近更新", "imported": "最近导入", "workflow": "工作流状态", "importance": "重要性优先" },
+    "sourceType": { "arxiv": "arXiv", "url": "URL", "upload": "上传", "web": "网页正文", "daily": "每日任务", "manual": "手动", "unknown": "来源" },
     "assetStatus": { "cached": "已缓存", "done": "完成", "error": "失败", "failed": "失败", "missing": "缺失", "pending": "等待", "ready": "就绪", "unknown": "状态未知" },
     "messages": { "statusUpdated": "论文状态已更新为 {{status}}" },
     "actions": { "openChat": "打开 Chat" },

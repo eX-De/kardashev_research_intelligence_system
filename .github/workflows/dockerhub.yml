@@ -1,11 +1,9 @@
-name: Build Docker image
+name: Publish Docker image
 
 on:
   push:
     branches:
       - main
-    tags:
-      - "v*.*.*"
   pull_request:
   workflow_dispatch:
 
@@ -18,6 +16,7 @@ concurrency:
 
 env:
   IMAGE_NAME: exde1968/kardashev-research-intelligence-system
+  DOCKER_METADATA_SHORT_SHA_LENGTH: 7
 
 jobs:
   docker:
@@ -27,6 +26,33 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Resolve release metadata
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="$(node -p "require('./package.json').version")"
+          commit_subject="$(git log -1 --format=%s)"
+          release_subject="release: v${version}"
+
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid package version: ${version}"
+            exit 1
+          fi
+
+          if [[ "${commit_subject}" == "${release_subject}" ]]; then
+            is_release=true
+          else
+            is_release=false
+          fi
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "major_minor=${version%.*}" >> "${GITHUB_OUTPUT}"
+          echo "is_release=${is_release}" >> "${GITHUB_OUTPUT}"
+          echo "Commit subject: ${commit_subject}"
+          echo "Release commit: ${is_release}"
 
       - name: Extract Docker metadata
         id: meta
@@ -38,10 +64,10 @@ jobs:
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
-            type=ref,event=tag
             type=sha,prefix=sha-
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=v${{ steps.release.outputs.version }},priority=910,enable=${{ steps.release.outputs.is_release == 'true' }}
+            type=raw,value=${{ steps.release.outputs.version }},priority=900,enable=${{ steps.release.outputs.is_release == 'true' }}
+            type=raw,value=${{ steps.release.outputs.major_minor }},priority=800,enable=${{ steps.release.outputs.is_release == 'true' }}
 
       - name: Log in to Docker Hub
         if: github.event_name != 'pull_request'

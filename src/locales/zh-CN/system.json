@@ -103,6 +103,24 @@
       "detail": "{{count}} 篇全文报告完成",
       "detail_other": "{{count}} 篇全文报告完成"
     },
+    "reader_import": {
+      "type": { "url": "URL 导入", "web": "网页导入", "upload": "PDF 上传", "unknown": "论文导入" }
+    },
+    "reader_import_completed": {
+      "title": "{{type}}完成",
+      "detail": "成功导入 {{count}} 篇论文",
+      "detail_other": "成功导入 {{count}} 篇论文",
+      "partial": "成功 {{count}} 篇，失败 {{failed}} 篇",
+      "partial_other": "成功 {{count}} 篇，失败 {{failed}} 篇"
+    },
+    "reader_import_failed": {
+      "title": "{{type}}失败",
+      "noMessage": "导入任务执行失败"
+    },
+    "worker_unavailable": {
+      "title": "后台任务服务不可用",
+      "detail": "任务仍保留在队列中，将在 Worker 恢复后继续执行。"
+    },
     "experiment_report_arrived": {
       "title": "收到实验报告",
       "project": "项目 {{id}}",
@@ -121,7 +139,8 @@
     "invalid_json": "请求数据格式无效。",
     "daily_run_recoverable": "今天已有失败但可恢复的每日流程。请继续上次流程，或确认后重新执行。",
     "obsidian_not_configured": "Obsidian 是可选集成；如需使用相关功能，请先在设置页完成配置。",
-    "stream_required": "论文对话需要使用流式连接。"
+    "stream_required": "论文对话需要使用流式连接。",
+    "worker_unavailable": "后台任务服务当前不可用，请在设置的“连接与服务”中检查 Worker 状态后重试。"
   },
   "obsidian": {
     "remote": "远端",

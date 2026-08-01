@@ -4,6 +4,7 @@ import json
 import os
 import socket
 import sys
+import threading
 import time
 import traceback
 from typing import Any
@@ -15,6 +16,8 @@ from .queue import (
     cleanup_stale_worker_jobs,
     complete_worker_job,
     fail_worker_job,
+    heartbeat_worker,
+    heartbeat_worker_job,
     insert_app_event,
     task_event_payload,
 )
@@ -86,6 +89,12 @@ READER_IMPORT_NOTIFICATION_LABELS = {
     "reader-import-web": "网页导入",
 }
 
+READER_IMPORT_NOTIFICATION_TYPES = {
+    "reader-import-upload": "upload",
+    "reader-import-url": "url",
+    "reader-import-web": "web",
+}
+
 
 def _env_flag(name: str, default: bool = False) -> bool:
     value = os.environ.get(name)
@@ -107,6 +116,77 @@ def _worker_id() -> str:
     if configured:
         return configured
     return f"{socket.gethostname()}:{os.getpid()}"
+
+
+class WorkerHeartbeat:
+    def __init__(self, worker_id: str, interval_seconds: int) -> None:
+        self.worker_id = worker_id
+        self.interval_seconds = max(1, int(interval_seconds))
+        self.started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        self._current_job_id: int | None = None
+        self._state_lock = threading.Lock()
+        self._beat_lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="kris-worker-heartbeat", daemon=True)
+
+    def _snapshot(self) -> int | None:
+        with self._state_lock:
+            return self._current_job_id
+
+    def _beat(self, *, status_override: str = "") -> None:
+        if not self._beat_lock.acquire(blocking=False):
+            return
+        try:
+            current_job_id = self._snapshot()
+            conn = connect()
+            try:
+                heartbeat_worker(
+                    conn,
+                    self.worker_id,
+                    status=status_override or ("running" if current_job_id else "idle"),
+                    started_at=self.started_at,
+                    current_job_id=current_job_id,
+                    pid=os.getpid(),
+                    meta={"service": "worker.service"},
+                    commit=False,
+                )
+                if current_job_id:
+                    heartbeat_worker_job(
+                        conn,
+                        self.worker_id,
+                        current_job_id,
+                        commit=False,
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+        finally:
+            self._beat_lock.release()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            try:
+                self._beat()
+            except Exception as exc:
+                print(f"KRIS worker heartbeat failed: {exc}", file=sys.stderr, flush=True)
+
+    def start(self) -> None:
+        self._beat()
+        self._thread.start()
+
+    def set_current_job(self, worker_job_id: int | None) -> None:
+        with self._state_lock:
+            self._current_job_id = int(worker_job_id) if worker_job_id else None
+        self._beat()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=self.interval_seconds + 1)
+        try:
+            self._beat(status_override="stopped")
+        except Exception:
+            pass
 
 
 def _payload(worker_job: dict[str, Any]) -> dict[str, Any]:
@@ -176,6 +256,12 @@ def _reader_import_notification(
     if not label:
         return None
     worker_job_id = worker_job.get("id") or worker_job.get("worker_job_id") or "unknown"
+    notification_data = {
+        "import_type": READER_IMPORT_NOTIFICATION_TYPES.get(job_type, "unknown"),
+        "imported_count": imported_count,
+        "error_count": error_count,
+        "error_message": clean_unicode(error_message).strip(),
+    }
     if error_message:
         return {
             "id": f"{job_type}-failed-{worker_job_id}",
@@ -183,6 +269,7 @@ def _reader_import_notification(
             "severity": "bad",
             "title": f"{label}失败",
             "detail": clean_unicode(error_message).strip() or "导入任务执行失败",
+            "data": notification_data,
             "channels": ["toast"],
             "requires_action": False,
         }
@@ -195,6 +282,7 @@ def _reader_import_notification(
         "severity": "warn" if error_count else "ok",
         "title": f"{label}完成",
         "detail": detail,
+        "data": notification_data,
         "channels": ["toast"],
         "requires_action": False,
     }
@@ -652,7 +740,7 @@ def dispatch_worker_job(conn: Any, settings: Any, worker_job: dict[str, Any]) ->
     return dispatcher(conn, settings, job_id=job_run_id)
 
 
-def run_once(worker_id: str) -> dict[str, Any]:
+def run_once(worker_id: str, on_job_change=None) -> dict[str, Any]:
     os.environ.setdefault("KRIS_WORKER_OUTBOX_EVENTS", "1")
     base_settings = load_settings()
     conn = connect()
@@ -661,45 +749,52 @@ def run_once(worker_id: str) -> dict[str, Any]:
         if not claimed:
             return {"claimed": False}
         worker_job = claimed["worker_job"]
+        if on_job_change:
+            on_job_change(int(worker_job["id"]))
         insert_app_event(conn, "task.started", task_event_payload(worker_job, "running"))
-        settings = apply_stored_settings(conn, base_settings)
         try:
-            result = dispatch_worker_job(conn, settings, worker_job)
-        except Exception as exc:
-            failed = fail_worker_job(conn, int(worker_job["id"]), str(exc))
-            failed_job = failed["worker_job"] or worker_job
-            failed_payload = task_event_payload(failed_job, "failed", message=str(exc))
-            notification = _reader_import_notification(failed_job, error_message=str(exc))
-            if notification:
-                failed_payload["notification"] = notification
-            insert_app_event(conn, "task.failed", failed_payload)
-            raise
-        completed = complete_worker_job(
-            conn,
-            int(worker_job["id"]),
-            result,
-            message=str(result.get("message") or f"{worker_job['job_type']} completed"),
-        )
-        completed_job = completed["worker_job"] or worker_job
-        insert_app_event(conn, "task.finished", task_event_payload(completed_job, "completed", result=result))
-        _publish_project_domain_events(conn, worker_job, result)
-        _publish_artifact_domain_events(conn, worker_job, result)
-        _publish_reader_domain_events(conn, worker_job, result)
-        _publish_paper_report_domain_events(conn, worker_job, result)
-        _publish_paper_domain_events(conn, worker_job, result)
-        if str(worker_job.get("job_type") or "") == "unified-search":
-            insert_app_event(
+            settings = apply_stored_settings(conn, base_settings)
+            try:
+                result = dispatch_worker_job(conn, settings, worker_job)
+            except Exception as exc:
+                failed = fail_worker_job(conn, int(worker_job["id"]), str(exc), worker_id=worker_id)
+                failed_job = failed["worker_job"] or worker_job
+                failed_payload = task_event_payload(failed_job, "failed", message=str(exc))
+                notification = _reader_import_notification(failed_job, error_message=str(exc))
+                if notification:
+                    failed_payload["notification"] = notification
+                insert_app_event(conn, "task.failed", failed_payload)
+                raise
+            completed = complete_worker_job(
                 conn,
-                "search.completed",
-                {
-                    "worker_job_id": completed_job.get("id"),
-                    "job_id": completed_job.get("job_run_id"),
-                    "query": result.get("query"),
-                    "result_count": len(result.get("results") or []),
-                    "partial": bool((result.get("stats") or {}).get("partial")),
-                },
+                int(worker_job["id"]),
+                result,
+                message=str(result.get("message") or f"{worker_job['job_type']} completed"),
+                worker_id=worker_id,
             )
-        return {"claimed": True, "worker_job": completed_job, "result": result}
+            completed_job = completed["worker_job"] or worker_job
+            insert_app_event(conn, "task.finished", task_event_payload(completed_job, "completed", result=result))
+            _publish_project_domain_events(conn, worker_job, result)
+            _publish_artifact_domain_events(conn, worker_job, result)
+            _publish_reader_domain_events(conn, worker_job, result)
+            _publish_paper_report_domain_events(conn, worker_job, result)
+            _publish_paper_domain_events(conn, worker_job, result)
+            if str(worker_job.get("job_type") or "") == "unified-search":
+                insert_app_event(
+                    conn,
+                    "search.completed",
+                    {
+                        "worker_job_id": completed_job.get("id"),
+                        "job_id": completed_job.get("job_run_id"),
+                        "query": result.get("query"),
+                        "result_count": len(result.get("results") or []),
+                        "partial": bool((result.get("stats") or {}).get("partial")),
+                    },
+                )
+            return {"claimed": True, "worker_job": completed_job, "result": result}
+        finally:
+            if on_job_change:
+                on_job_change(None)
     finally:
         conn.close()
 
@@ -715,29 +810,37 @@ def main() -> int:
             init_db(conn)
             cleanup_stale_worker_jobs(
                 conn,
-                stale_after_seconds=_env_int("KRIS_WORKER_JOB_STALE_AFTER_SECONDS", 30 * 60, minimum=60),
+                stale_after_seconds=_env_int("KRIS_WORKER_JOB_STALE_AFTER_SECONDS", 90, minimum=60),
             )
         finally:
             conn.close()
+    heartbeat = WorkerHeartbeat(
+        worker_id,
+        _env_int("KRIS_WORKER_HEARTBEAT_INTERVAL_SECONDS", 5, minimum=1),
+    )
+    heartbeat.start()
     print(f"KRIS worker service started: {worker_id}", flush=True)
-    while True:
-        try:
-            result = run_once(worker_id)
-            if result.get("claimed"):
-                sys.stdout.write(json.dumps(clean_unicode({
-                    "event": "worker_job.completed",
-                    "worker_id": worker_id,
-                    "worker_job_id": result.get("worker_job", {}).get("id"),
-                    "job_type": result.get("worker_job", {}).get("job_type"),
-                }), ensure_ascii=False) + "\n")
-                sys.stdout.flush()
-            else:
+    try:
+        while True:
+            try:
+                result = run_once(worker_id, heartbeat.set_current_job)
+                if result.get("claimed"):
+                    sys.stdout.write(json.dumps(clean_unicode({
+                        "event": "worker_job.completed",
+                        "worker_id": worker_id,
+                        "worker_job_id": result.get("worker_job", {}).get("id"),
+                        "job_type": result.get("worker_job", {}).get("job_type"),
+                    }), ensure_ascii=False) + "\n")
+                    sys.stdout.flush()
+                else:
+                    time.sleep(poll_interval_ms / 1000)
+            except KeyboardInterrupt:
+                return 0
+            except Exception:
+                traceback.print_exc(file=sys.stderr)
                 time.sleep(poll_interval_ms / 1000)
-        except KeyboardInterrupt:
-            return 0
-        except Exception:
-            traceback.print_exc(file=sys.stderr)
-            time.sleep(poll_interval_ms / 1000)
+    finally:
+        heartbeat.stop()
 
 
 if __name__ == "__main__":

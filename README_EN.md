@@ -239,7 +239,9 @@ Key startup settings:
 - `KRIS_REQUEST_TIMING_LOG`: set to `1` or `true` to emit a `KRIS_REQUEST_TIMING` line for each regular `/api/*` request, including method, path, status, duration, worker command, and response size.
 - `KRIS_WORKER_TIMING_LOG`: set to `1` or `true` to emit Python worker CLI timing for connection, schema initialization, stale cleanup, handler work, and total duration.
 - `KRIS_STALE_JOB_CLEANUP_ENABLED` / `KRIS_STALE_JOB_CLEANUP_INTERVAL_MS`: control Node's stale-job cleanup timer, enabled by default with a 60,000 ms interval.
-- `KRIS_WORKER_JOB_STALE_AFTER_SECONDS`: recovery threshold for `worker_jobs.running`, default 1,800 seconds. A timed-out job is requeued while attempts remain, or failed and synchronized to `job_runs` after exhaustion.
+- `KRIS_WORKER_HEARTBEAT_INTERVAL_SECONDS` / `KRIS_WORKER_HEARTBEAT_TTL_SECONDS`: the Worker writes instance and current-task heartbeats every 5 seconds by default; Node considers it offline after 15 seconds without a heartbeat.
+- `KRIS_WORKER_MONITOR_INTERVAL_MS`: interval for Node to inspect Worker availability and stalled queues, default 5,000 ms.
+- `KRIS_WORKER_JOB_STALE_AFTER_SECONDS`: lease recovery threshold for `worker_jobs.running`, default 90 seconds. The Worker renews the lease while running; after a disconnect, a timed-out job is requeued while attempts remain, or failed and synchronized to `job_runs` after exhaustion.
 - `KRIS_JOB_BACKEND`: job execution backend, default `queue`. Node writes `worker_jobs` for `python -m worker.service`; set it to `cli` only for temporary legacy fallback.
 - `KRIS_OUTBOX_POLLER_ENABLED` / `KRIS_OUTBOX_POLL_INTERVAL_MS`: control Node polling of the `app_events` outbox and forwarding to `/api/events`, enabled by default at 1,000 ms. Node write endpoints and the persistent worker both write cache-invalidation events to `app_events`.
 - `KRIS_WORKER_POLL_INTERVAL_MS` / `KRIS_WORKER_INIT_DB_ON_START`: configure queue polling and schema initialization for the persistent worker.
@@ -399,19 +401,6 @@ KRIS_IMAGE=exde1968/kardashev-research-intelligence-system:sha-abc1234
 Open `http://localhost:3000`, or use the port configured through `APP_HOST_PORT`. An empty `panel_password.txt` enables passwordless mode. An empty `kris_agent_token.txt` disables external experiment-report submission.
 
 To access a local Obsidian vault from a container, mount the vault in `docker-compose.yml` and set `OBSIDIAN_VAULT_PATH` to the in-container path, such as `/vault`.
-
-## Docker Hub Automated Builds
-
-[.github/workflows/dockerhub.yml](.github/workflows/dockerhub.yml) builds the Dockerfile in GitHub Actions and publishes images to Docker Hub. Before first use, add these secrets under the GitHub repository's `Settings` → `Secrets and variables` → `Actions` → `Secrets`:
-
-- `DOCKERHUB_USERNAME`: Docker Hub username.
-- `DOCKERHUB_TOKEN`: Docker Hub access token.
-
-Triggers:
-
-- Push to `main`: publish `latest`, `main`, and `sha-*` tags.
-- Push a `v*.*.*` tag: publish the exact version, `major.minor`, and `sha-*` tags.
-- Pull request: build for validation without publishing.
 
 ## Nginx HTTPS
 

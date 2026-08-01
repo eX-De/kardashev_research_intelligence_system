@@ -125,6 +125,7 @@ test("experiment SSE notifications use semantic data instead of their fallback s
 test("known API error codes translate while unknown errors preserve diagnostics", () => {
   const t = translator("zh-CN");
   assert.equal(formatApiError({ code: "invalid_password", message: "Invalid password" }, t), "密码验证失败。");
+  assert.match(formatApiError({ code: "worker_unavailable", message: "offline" }, t), /连接与服务/);
   assert.equal(formatApiError({ code: "database_timeout", message: "connection timed out" }, t), "connection timed out");
 });
 
@@ -145,6 +146,9 @@ test("every semantic system notification type has a complete English rendering",
     { type: "paper_report_queue_failed", data: { failed: 1 } },
     { type: "paper_report_queue_backlog", data: { queued: 3 } },
     { type: "paper_report_completed", data: { count: 1 } },
+    { type: "reader_import_completed", data: { import_type: "url", imported_count: 1, error_count: 0 } },
+    { type: "reader_import_failed", data: { import_type: "upload", error_message: "Invalid PDF" } },
+    { type: "worker_unavailable", data: { queued: 1, running: 0 } },
     { type: "experiment_report_arrived", data: { project_id: 7, source_agent: "codex", title: "Run 42" } },
     { type: "app_update_available", data: { current_version: "1.0.0", latest_version: "1.1.0" } }
   ];

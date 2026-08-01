@@ -28,6 +28,11 @@
     "providers": "{{count}} 个 Provider",
     "providers_other": "{{count}} 个 Provider",
     "notConfigured": "未配置",
+    "worker": "Worker",
+    "workerOnline": "在线 · {{count}} 个实例",
+    "workerOnline_other": "在线 · {{count}} 个实例",
+    "workerOffline": "离线",
+    "workerNotRequired": "当前模式不需要",
     "ready": "服务就绪",
     "needsConfiguration": "需要配置",
     "syncing": "同步状态"

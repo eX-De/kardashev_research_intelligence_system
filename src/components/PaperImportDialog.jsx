@@ -3,12 +3,13 @@ import { useTranslation } from "react-i18next";
 
 import { cacheNamespace, useApiCacheClient } from "../lib/apiCache.jsx";
 import { api, postJson } from "../lib/dashboard.js";
+import { formatApiError } from "../lib/systemMessages.js";
 import { InlineLoader } from "./Loading.jsx";
 import { WorkspaceDialog } from "./WorkspaceDialog.jsx";
 import "../styles/PaperImportDialog.css";
 
-export function PaperImportDialog({ onClose, onImported, open, setStatusMessage }) {
-  const { t } = useTranslation("papers");
+export function PaperImportDialog({ notify = () => {}, onClose, onImported, onQueued, open, setStatusMessage }) {
+  const { t } = useTranslation(["papers", "system"]);
   const cache = useApiCacheClient();
   const [urls, setUrls] = useState("");
   const [webUrls, setWebUrls] = useState("");
@@ -23,18 +24,33 @@ export function PaperImportDialog({ onClose, onImported, open, setStatusMessage 
     cache.markStale(cacheNamespace("paper-reports"));
   }
 
-  function handleQueued(message) {
+  function handleImportError(error) {
+    const message = formatApiError(error, t);
+    setStatusMessage(message);
+    if (error?.code === "worker_unavailable") {
+      notify(message, { dedupeKey: "worker-unavailable-submit", type: "error" });
+    }
+  }
+
+  async function handleQueued(data, message) {
     cache.markStale(["jobs", "summary"]);
     cache.markStale(["jobs", "history"]);
     invalidatePaperCaches();
     onClose?.();
     setStatusMessage(message);
+    try {
+      await onQueued?.(data);
+    } catch {
+      // The task is already durable. SSE and the next refresh will reconcile
+      // the import projection if this immediate status refresh is interrupted.
+    }
   }
 
   async function completeImport(data, message, firstPaperId) {
     invalidatePaperCaches();
     onClose?.();
     setStatusMessage(message);
+    notify(message, { type: data?.errors?.length ? "warning" : "success" });
     await onImported?.(firstPaperId || null);
   }
 
@@ -46,7 +62,7 @@ export function PaperImportDialog({ onClose, onImported, open, setStatusMessage 
       const data = await postJson("/api/reader/papers/urls", { urls });
       setUrls("");
       if (data?.queued) {
-        handleQueued(t("reader.messages.urlQueued"));
+        await handleQueued(data, t("reader.messages.urlQueued"));
         return;
       }
       await completeImport(
@@ -55,7 +71,7 @@ export function PaperImportDialog({ onClose, onImported, open, setStatusMessage 
         data.imported?.[0]?.paper_id
       );
     } catch (error) {
-      setStatusMessage(error.message);
+      handleImportError(error);
     } finally {
       setBusy(false);
     }
@@ -69,7 +85,7 @@ export function PaperImportDialog({ onClose, onImported, open, setStatusMessage 
       const data = await postJson("/api/reader/papers/web", { urls: webUrls });
       setWebUrls("");
       if (data?.queued) {
-        handleQueued(t("reader.messages.webQueued"));
+        await handleQueued(data, t("reader.messages.webQueued"));
         return;
       }
       await completeImport(
@@ -78,7 +94,7 @@ export function PaperImportDialog({ onClose, onImported, open, setStatusMessage 
         data.imported?.[0]?.paper_id
       );
     } catch (error) {
-      setStatusMessage(error.message);
+      handleImportError(error);
     } finally {
       setBusy(false);
     }
@@ -95,7 +111,7 @@ export function PaperImportDialog({ onClose, onImported, open, setStatusMessage 
       setSelectedFiles([]);
       event.currentTarget.reset();
       if (data?.queued) {
-        handleQueued(t("reader.messages.pdfQueued"));
+        await handleQueued(data, t("reader.messages.pdfQueued"));
         return;
       }
       await completeImport(
@@ -104,7 +120,7 @@ export function PaperImportDialog({ onClose, onImported, open, setStatusMessage 
         data.imported?.[0]?.paper_id || data.last_detail?.paper?.id
       );
     } catch (error) {
-      setStatusMessage(error.message);
+      handleImportError(error);
     } finally {
       setBusy(false);
     }

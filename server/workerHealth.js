@@ -1,0 +1,95 @@
+import { query } from "./db.js";
+
+const DEFAULT_HEARTBEAT_TTL_SECONDS = 15;
+
+function positiveInteger(value, fallback, minimum = 1) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  return Number.isInteger(parsed) && parsed >= minimum ? parsed : fallback;
+}
+
+function numberValue(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function jobBackend() {
+  return String(process.env.KRIS_JOB_BACKEND || "queue").trim().toLowerCase() || "queue";
+}
+
+export function workerHeartbeatTtlSeconds() {
+  return positiveInteger(process.env.KRIS_WORKER_HEARTBEAT_TTL_SECONDS, DEFAULT_HEARTBEAT_TTL_SECONDS, 5);
+}
+
+export async function getWorkerStatus(options = {}, db = { query }) {
+  const ttlSeconds = positiveInteger(options.heartbeatTtlSeconds, workerHeartbeatTtlSeconds(), 1);
+  const required = jobBackend() !== "cli";
+  const [instancesResult, queueResult] = await Promise.all([
+    db.query(
+      `
+        SELECT worker_id, status, started_at, heartbeat_at, current_job_id, pid,
+               (
+                 status <> 'stopped'
+                 AND NULLIF(heartbeat_at, '')::timestamptz >= NOW() - $1::interval
+               ) AS is_live
+        FROM worker_instances
+        ORDER BY NULLIF(heartbeat_at, '')::timestamptz DESC NULLS LAST, worker_id
+      `,
+      [`${ttlSeconds} seconds`]
+    ),
+    db.query(
+      `
+        SELECT
+          COUNT(*) FILTER (WHERE status = 'queued') AS queued,
+          COUNT(*) FILTER (WHERE status = 'running') AS running,
+          MIN(NULLIF(created_at, '')::timestamptz) FILTER (WHERE status = 'queued') AS oldest_queued_at,
+          EXTRACT(EPOCH FROM (
+            NOW() - MIN(NULLIF(created_at, '')::timestamptz) FILTER (WHERE status = 'queued')
+          )) AS oldest_queued_seconds
+        FROM worker_jobs
+      `
+    )
+  ]);
+  const instances = (instancesResult.rows || []).map((row) => ({
+    worker_id: String(row.worker_id || ""),
+    status: String(row.status || ""),
+    started_at: row.started_at || null,
+    heartbeat_at: row.heartbeat_at || null,
+    current_job_id: row.current_job_id === null || row.current_job_id === undefined ? null : Number(row.current_job_id),
+    pid: row.pid === null || row.pid === undefined ? null : Number(row.pid),
+    live: row.is_live === true || row.is_live === "t" || row.is_live === 1
+  }));
+  const liveInstances = instances.filter((item) => item.live);
+  const queueRow = queueResult.rows?.[0] || {};
+  const queued = numberValue(queueRow.queued);
+  const running = numberValue(queueRow.running);
+  const available = !required || liveInstances.length > 0;
+  return {
+    required,
+    available,
+    state: required ? (available ? "online" : "offline") : "not_required",
+    heartbeat_ttl_seconds: ttlSeconds,
+    online_workers: liveInstances.length,
+    registered_workers: instances.length,
+    last_heartbeat_at: instances[0]?.heartbeat_at || null,
+    queue: {
+      queued,
+      running,
+      active: queued + running,
+      oldest_queued_at: queueRow.oldest_queued_at || null,
+      oldest_queued_seconds: Math.max(0, numberValue(queueRow.oldest_queued_seconds))
+    },
+    stalled: required && !available && queued + running > 0
+  };
+}
+
+export async function requireAvailableWorker(options = {}, db = { query }) {
+  const status = await getWorkerStatus(options, db);
+  if (status.available) return status;
+  const error = new Error("Background worker service is unavailable");
+  error.statusCode = 503;
+  error.structuredCode = "worker_unavailable";
+  error.code = "worker_unavailable";
+  error.reason = "worker_unavailable";
+  error.workerStatus = status;
+  throw error;
+}

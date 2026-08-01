@@ -239,7 +239,9 @@ python -m worker.cli generate-paper-reports --limit 10
 - `KRIS_REQUEST_TIMING_LOG`：设为 `1`/`true` 时，Node 为每个普通 `/api/*` 请求输出 `KRIS_REQUEST_TIMING` 日志，包含 method、path、status、duration、worker command 和 response size。
 - `KRIS_WORKER_TIMING_LOG`：设为 `1`/`true` 时，Python worker CLI 输出 `KRIS_WORKER_TIMING` 日志，包含 connect、init_db、stale cleanup、handler 和 total 耗时。
 - `KRIS_STALE_JOB_CLEANUP_ENABLED` / `KRIS_STALE_JOB_CLEANUP_INTERVAL_MS`：控制 Node 启动后执行的 stale job cleanup 定时任务，默认启用且间隔 60000ms。
-- `KRIS_WORKER_JOB_STALE_AFTER_SECONDS`：`worker_jobs.running` 的恢复阈值，默认 1800 秒；超时后 attempts 未耗尽会重排队，耗尽则失败并同步 `job_runs`。
+- `KRIS_WORKER_HEARTBEAT_INTERVAL_SECONDS` / `KRIS_WORKER_HEARTBEAT_TTL_SECONDS`：Worker 默认每 5 秒写入实例及当前任务心跳；Node 在 15 秒无心跳后将其判定为离线。
+- `KRIS_WORKER_MONITOR_INTERVAL_MS`：Node 检查 Worker 和停滞队列的间隔，默认 5000ms。
+- `KRIS_WORKER_JOB_STALE_AFTER_SECONDS`：`worker_jobs.running` 的租约恢复阈值，默认 90 秒；Worker 会持续续期，失联超时后 attempts 未耗尽会重排队，耗尽则失败并同步 `job_runs`。
 - `KRIS_JOB_BACKEND`：任务执行后端，默认 `queue`。Node 会写入 `worker_jobs`，由 `python -m worker.service` 常驻 worker 执行；设为 `cli` 可临时回退旧的 Node spawn CLI 行为。
 - `KRIS_OUTBOX_POLLER_ENABLED` / `KRIS_OUTBOX_POLL_INTERVAL_MS`：控制 Node 轮询 `app_events` outbox 并转发到 `/api/events`，默认启用且间隔 1000ms。Node 写接口和常驻 worker 的缓存失效事件都会写入 `app_events`；关闭 poller 时，Node 写接口会回退到进程内 SSE，worker 侧仍保留旧 stderr progress 兼容路径。
 - `KRIS_WORKER_POLL_INTERVAL_MS` / `KRIS_WORKER_INIT_DB_ON_START`：控制常驻 Python worker 的队列轮询间隔和启动时 schema 初始化。
@@ -399,19 +401,6 @@ KRIS_IMAGE=exde1968/kardashev-research-intelligence-system:sha-abc1234
 访问 `http://localhost:3000`，或按 `.env` 中的 `APP_HOST_PORT` 访问。`panel_password.txt` 为空时保持无密码模式；`kris_agent_token.txt` 为空时关闭外部实验报告上报。
 
 如果容器需要访问本地 Obsidian vault，在 `docker-compose.yml` 中挂载 vault，并把 `OBSIDIAN_VAULT_PATH` 设置为容器内路径，例如 `/vault`。
-
-## Docker Hub 自动构建
-
-仓库内的 [.github/workflows/dockerhub.yml](.github/workflows/dockerhub.yml) 会在 GitHub Actions 中构建 Dockerfile，并把镜像推送到 Docker Hub。首次使用前，在 GitHub 仓库的 `Settings` -> `Secrets and variables` -> `Actions` -> `Secrets` 中添加：
-
-- `DOCKERHUB_USERNAME`：Docker Hub 用户名。
-- `DOCKERHUB_TOKEN`：Docker Hub access token。
-
-触发规则：
-
-- push 到 `main`：构建并推送 `latest`、`main` 和 `sha-*` tag。
-- push `v*.*.*` tag：构建并推送对应版本 tag、`major.minor` tag 和 `sha-*` tag。
-- pull request：只验证镜像能否构建，不推送到 Docker Hub。
 
 ## Nginx HTTPS
 

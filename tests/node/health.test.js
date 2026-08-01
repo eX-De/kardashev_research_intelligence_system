@@ -44,6 +44,20 @@ function createHealthPool({
         if (normalized.includes("COUNT(*) AS COUNT FROM JOB_RUNS WHERE STATUS = 'RUNNING'")) {
           return { rows: [{ count: runningCount }] };
         }
+        if (normalized.includes("FROM WORKER_INSTANCES")) {
+          return { rows: [{
+            worker_id: "worker-test",
+            status: "idle",
+            started_at: "2026-07-06T10:00:00+00:00",
+            heartbeat_at: "2026-07-06T10:00:30+00:00",
+            current_job_id: null,
+            pid: 123,
+            is_live: true
+          }] };
+        }
+        if (normalized.includes("FROM WORKER_JOBS") && normalized.includes("OLDEST_QUEUED_AT")) {
+          return { rows: [{ queued: "0", running: "0", oldest_queued_at: null, oldest_queued_seconds: null }] };
+        }
         for (const [table, count] of Object.entries(tableCounts)) {
           if (normalized === `SELECT COUNT(*) AS COUNT FROM ${table.toUpperCase()}`) {
             return { rows: [{ count }] };
@@ -262,6 +276,8 @@ test("getHealth returns full Node health shape without Python CLI fields leaking
     }]);
     assert.equal(health.llm.chat_provider_id, "openai");
     assert.equal(health.llm.chat_model, "gpt-test");
+    assert.equal(health.worker.available, true);
+    assert.equal(health.worker.online_workers, 1);
     assert.equal(health.counts.paper_texts, 2);
     assert.equal(health.counts.legacy_project_artifacts, 9);
     assert.equal(health.counts.feedback, 22);

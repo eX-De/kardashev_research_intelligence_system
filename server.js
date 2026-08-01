@@ -43,6 +43,7 @@ import {
 import {
   getPaperLibrary as getNodePaperLibrary,
   getPaperLibraryDetail as getNodePaperLibraryDetail,
+  getPaperLibraryImportStatus as getNodePaperLibraryImportStatus,
   updatePaperLibraryStatus as updateNodePaperLibraryStatus
 } from "./server/library.js";
 import {
@@ -74,6 +75,7 @@ import {
   unlinkProjectPaper as unlinkNodeProjectPaper
 } from "./server/projects.js";
 import { cleanupStaleWorkerJobs, countActiveWorkerJobs, enqueueWorkerJob, getWorkerJob } from "./server/workerQueue.js";
+import { getWorkerStatus, requireAvailableWorker } from "./server/workerHealth.js";
 import { normalizeSearchRequest, quickSearch } from "./server/search.js";
 import {
   DEFAULT_READER_UPLOAD_MAX_FILE_BYTES,
@@ -134,7 +136,11 @@ const STALE_JOB_CLEANUP_INTERVAL_MS = Math.max(
 );
 const WORKER_JOB_STALE_AFTER_SECONDS = Math.max(
   60,
-  Number(process.env.KRIS_WORKER_JOB_STALE_AFTER_SECONDS || 30 * 60)
+  Number(process.env.KRIS_WORKER_JOB_STALE_AFTER_SECONDS || 90)
+);
+const WORKER_MONITOR_INTERVAL_MS = Math.max(
+  1000,
+  Number(process.env.KRIS_WORKER_MONITOR_INTERVAL_MS || 5000)
 );
 const READER_FOLLOWUPS_SYNC_FALLBACK_ENABLED = envBoolean("KRIS_READER_FOLLOWUPS_SYNC_FALLBACK_ENABLED", true);
 const READER_UPLOAD_MAX_FILE_BYTES = positiveInteger(
@@ -203,6 +209,15 @@ const outboxRuntime = {
   polling: false,
   lastPollAt: null,
   lastPublishedAt: null,
+  lastError: null
+};
+
+const workerMonitorRuntime = {
+  timer: null,
+  inFlight: null,
+  lastAvailable: null,
+  lastOutageKey: null,
+  lastStatus: null,
   lastError: null
 };
 
@@ -649,6 +664,7 @@ async function enqueueProjectWorkerJob(command, projectId, payload = {}, { sourc
     err.statusCode = 400;
     throw err;
   }
+  await requireAvailableWorker();
   const queued = await enqueueWorkerJob({
     jobType: command,
     payload: {
@@ -682,6 +698,7 @@ async function enqueueProjectWorkerJob(command, projectId, payload = {}, { sourc
 }
 
 async function enqueueActionWorkerJob(command, payload = {}, { source = "action", args = [], priority = null, maxAttempts = 1 } = {}) {
+  await requireAvailableWorker();
   const queued = await enqueueWorkerJob({
     jobType: command,
     payload: {
@@ -954,6 +971,76 @@ function startOutboxPoller() {
     .finally(() => scheduleOutboxPoller());
 }
 
+function workerUnavailableNotification(status) {
+  const outageKey = String(status.last_heartbeat_at || "never").replace(/[^\w.-]/g, "-");
+  return {
+    id: `worker-unavailable-${outageKey}`,
+    type: "worker_unavailable",
+    severity: "bad",
+    title: "后台任务服务不可用",
+    detail: "任务仍保留在队列中，将在 Worker 恢复后继续执行。",
+    data: {
+      queued: Number(status.queue?.queued || 0),
+      running: Number(status.queue?.running || 0),
+      last_heartbeat_at: status.last_heartbeat_at || ""
+    },
+    channels: ["toast"],
+    requires_action: false
+  };
+}
+
+async function pollWorkerStatus() {
+  if (!isQueueJobBackend() || workerMonitorRuntime.inFlight) return workerMonitorRuntime.inFlight;
+  workerMonitorRuntime.inFlight = (async () => {
+    try {
+      const status = await getWorkerStatus();
+      const previousAvailable = workerMonitorRuntime.lastAvailable;
+      workerMonitorRuntime.lastStatus = status;
+      workerMonitorRuntime.lastAvailable = status.available;
+      workerMonitorRuntime.lastError = null;
+
+      if (!status.available) {
+        const outageKey = String(status.last_heartbeat_at || "never");
+        const shouldNotify = status.stalled && workerMonitorRuntime.lastOutageKey !== outageKey;
+        if (previousAvailable === true || shouldNotify) {
+          await publishDurableEvent(SERVER_EVENTS.WORKER_UNAVAILABLE, {
+            worker: status,
+            ...(shouldNotify ? { notification: workerUnavailableNotification(status) } : {})
+          });
+        }
+        if (shouldNotify) workerMonitorRuntime.lastOutageKey = outageKey;
+      } else {
+        if (previousAvailable === false) {
+          await publishDurableEvent(SERVER_EVENTS.WORKER_AVAILABLE, { worker: status });
+        }
+        workerMonitorRuntime.lastOutageKey = null;
+      }
+      return status;
+    } catch (error) {
+      workerMonitorRuntime.lastError = { message: error.message, at: new Date().toISOString() };
+      return null;
+    } finally {
+      workerMonitorRuntime.inFlight = null;
+    }
+  })();
+  return workerMonitorRuntime.inFlight;
+}
+
+function scheduleWorkerMonitor(delayMs = WORKER_MONITOR_INTERVAL_MS) {
+  if (!isQueueJobBackend()) return;
+  if (workerMonitorRuntime.timer) clearTimeout(workerMonitorRuntime.timer);
+  workerMonitorRuntime.timer = setTimeout(() => {
+    workerMonitorRuntime.timer = null;
+    pollWorkerStatus().finally(() => scheduleWorkerMonitor());
+  }, Math.max(1000, Number(delayMs) || WORKER_MONITOR_INTERVAL_MS));
+  workerMonitorRuntime.timer.unref?.();
+}
+
+function startWorkerMonitor() {
+  if (!isQueueJobBackend()) return;
+  pollWorkerStatus().finally(() => scheduleWorkerMonitor());
+}
+
 function jobAgeMs(job) {
   const startedAt = new Date(job?.started_at || 0).getTime();
   return Number.isFinite(startedAt) ? Date.now() - startedAt : Number.POSITIVE_INFINITY;
@@ -1076,6 +1163,7 @@ async function runManagedJob(command, source = "manual", args = []) {
 }
 
 async function enqueueManagedJob(command, source = "manual", args = []) {
+  await requireAvailableWorker();
   const isDailyJob = isDailyJobCommand(command);
   const active = await activeDatabaseJob({
     ignorePaperReportQueueJobs: isDailyJob,
@@ -1288,6 +1376,14 @@ async function runPaperReportQueueOnce() {
   const available = Math.max(0, concurrency - paperReportQueueRuntime.active);
   const launchCount = Math.min(queued, available);
   if (isQueueJobBackend()) {
+    try {
+      await requireAvailableWorker();
+    } catch (error) {
+      paperReportQueueRuntime.lastSkipReason = "worker_unavailable";
+      paperReportQueueRuntime.lastError = { message: error.message, at: new Date().toISOString() };
+      schedulePaperReportQueue();
+      return schedulerStatus();
+    }
     for (let index = 0; index < launchCount; index += 1) {
       const queuedJob = await enqueueWorkerJob({
         jobType: PAPER_REPORT_QUEUE_COMMAND,
@@ -1311,6 +1407,7 @@ async function runPaperReportQueueOnce() {
       }, { status: "queued" });
     }
     paperReportQueueRuntime.active += launchCount;
+    paperReportQueueRuntime.lastError = null;
     paperReportQueueRuntime.lastSkipReason = `queued:${launchCount}`;
     schedulePaperReportQueue(1000);
     return schedulerStatus();
@@ -1676,6 +1773,7 @@ function errorResponseBody(error) {
     body.code = code;
     body.reason = String(error.reason || error.workerPayload?.reason || code);
   }
+  if (error.workerStatus) body.worker = error.workerStatus;
   return body;
 }
 
@@ -1852,8 +1950,9 @@ async function routeApi(req, res, url) {
 
   if (req.method === "POST" && url.pathname === "/api/projects") {
     const body = await readRequestJson(req);
-    const data = await saveNodeProject(body);
     const rawContext = projectContextText(body);
+    if (rawContext && isQueueJobBackend()) await requireAvailableWorker();
+    const data = await saveNodeProject(body);
     if (rawContext && data?.project?.id) {
       data.context_job = await enqueueProjectWorkerJob(
         "project-context",
@@ -1880,8 +1979,9 @@ async function routeApi(req, res, url) {
   if (req.method === "POST" && projectMatch) {
     const body = await readRequestJson(req);
     const payload = { ...body, id: Number(projectMatch[1]) };
-    const data = await saveNodeProject(payload);
     const rawContext = projectContextText(body);
+    if (rawContext && isQueueJobBackend()) await requireAvailableWorker();
+    const data = await saveNodeProject(payload);
     if (rawContext && data?.project?.id) {
       data.context_job = await enqueueProjectWorkerJob(
         "project-context",
@@ -2173,6 +2273,14 @@ async function routeApi(req, res, url) {
       date_to: url.searchParams.get("date_to") || "",
       limit: url.searchParams.get("limit") || "100",
       offset: url.searchParams.get("offset") || "0"
+    });
+    sendJson(res, 200, data);
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/library/imports") {
+    const data = await getNodePaperLibraryImportStatus({
+      limit: url.searchParams.get("limit") || "20"
     });
     sendJson(res, 200, data);
     return;
@@ -2666,6 +2774,7 @@ server.listen(PORT, () => {
   console.log(`Research Intelligence dashboard listening on http://localhost:${PORT}`);
   startStaleJobCleanup();
   startOutboxPoller();
+  startWorkerMonitor();
   schedulePaperReportQueue(1000);
   scheduleUpdateCheck(UPDATE_CHECK_INITIAL_DELAY_MS);
   readAppSettings()

@@ -7,16 +7,69 @@ import {
   toJson,
   withTransaction
 } from "./db.js";
+import { getWorkerStatus } from "./workerHealth.js";
 
 export const VALID_LIBRARY_STATUSES = new Set(["candidate", "saved", "reading", "read", "archived", "discarded"]);
 export const LIBRARY_SOURCE_VALUES = new Set(["daily", "manual"]);
 export const REPORT_PRESENCE_VALUES = new Set(["with", "without"]);
 export const REPORT_STATUS_VALUES = new Set(["missing", "queued", "processing", "done", "failed", "cancelled"]);
 export const IMPORTANCE_VALUES = new Set(["high", "medium", "low"]);
-export const LIBRARY_SORT_VALUES = new Set(["updated", "importance"]);
+export const LIBRARY_SORT_VALUES = new Set(["updated", "imported", "workflow", "importance"]);
+export const LIBRARY_IMPORT_JOB_TYPES = new Set(["reader-import-url", "reader-import-web", "reader-import-upload"]);
 const DEFAULT_HIDDEN_LIBRARY_STATUSES = ["archived", "discarded"];
 const ARCHIVE_PROTECTED_STATUSES = new Set(["saved", "reading", "read"]);
 const PAPER_REPORT_ARTIFACT_TYPE = "paper_report";
+const LIBRARY_IMPORT_RECENT_INTERVAL = "30 minutes";
+
+function manualSourcePredicate(alias) {
+  return `(
+    COALESCE(${alias}.fetched_batch_id, '') = 'reader-import'
+    OR ${alias}.source_type IN ('url', 'upload', 'web', 'manual')
+    OR COALESCE(${alias}.source_identifier, '') LIKE 'reader-upload-%'
+    OR COALESCE(${alias}.source_identifier, '') LIKE 'reader-url-%'
+    OR COALESCE(${alias}.source_identifier, '') LIKE 'reader-web-%'
+  )`;
+}
+
+function manualSourceExistsSql(paperAlias, sourceAlias) {
+  return `EXISTS (
+    SELECT 1
+    FROM paper_sources ${sourceAlias}
+    WHERE ${sourceAlias}.paper_id = ${paperAlias}.id
+      AND ${manualSourcePredicate(sourceAlias)}
+  )`;
+}
+
+function workflowStatusOrderSql(statusExpression) {
+  return `CASE ${statusExpression}
+    WHEN 'reading' THEN 0
+    WHEN 'saved' THEN 1
+    WHEN 'candidate' THEN 2
+    WHEN 'read' THEN 3
+    WHEN 'archived' THEN 4
+    ELSE 5
+  END`;
+}
+
+function libraryOrderSql(sort, {
+  activityExpression,
+  idExpression,
+  importanceExpression,
+  importedExpression,
+  statusExpression
+}) {
+  const activityOrder = `${activityExpression} DESC, ${idExpression} DESC`;
+  if (sort === "imported") {
+    return `${importedExpression} DESC NULLS LAST, ${activityOrder}`;
+  }
+  if (sort === "workflow") {
+    return `${workflowStatusOrderSql(statusExpression)}, ${activityOrder}`;
+  }
+  if (sort === "importance") {
+    return `${importanceExpression}, ${activityOrder}`;
+  }
+  return activityOrder;
+}
 
 function nowIso() {
   return new Date().toISOString();
@@ -67,6 +120,52 @@ function normalizeLibrarySource(value) {
     throw new ValidationError(`Invalid paper source: ${source}`);
   }
   return source;
+}
+
+function importTargets(jobType, payload = {}) {
+  const body = payload?.body && typeof payload.body === "object" ? payload.body : payload;
+  if (jobType === "reader-import-upload") {
+    return (Array.isArray(body?.files) ? body.files : [])
+      .map((file) => text(file?.filename))
+      .filter(Boolean);
+  }
+  const urls = Array.isArray(body?.urls)
+    ? body.urls
+    : String(body?.urls || "").split(/\r?\n/);
+  return urls.map((url) => text(url)).filter(Boolean);
+}
+
+function importJobPayload(row) {
+  const payload = parseJson(row.payload_json, {});
+  const result = parseJson(row.result_json, {});
+  const imported = Array.isArray(result?.imported) ? result.imported : [];
+  const errors = Array.isArray(result?.errors) ? result.errors : [];
+  const storedStatus = text(row.status) || "queued";
+  const status = storedStatus === "completed" && result?.ok === false && !imported.length
+    ? "failed"
+    : storedStatus;
+  return {
+    id: Number(row.id),
+    job_run_id: row.job_run_id === null || row.job_run_id === undefined ? null : Number(row.job_run_id),
+    job_type: row.job_type,
+    import_type: row.job_type === "reader-import-upload"
+      ? "upload"
+      : row.job_type === "reader-import-web" ? "web" : "url",
+    status,
+    targets: importTargets(row.job_type, payload),
+    imported: imported.map((item) => ({
+      paper_id: numberValue(item?.paper_id || item?.id, null),
+      title: text(item?.title),
+      url: text(item?.url || item?.pdf_link)
+    })),
+    imported_count: imported.length,
+    error_count: errors.length,
+    error_message: text(row.error_message) || text(errors[0]?.error),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    started_at: row.started_at ?? null,
+    finished_at: row.finished_at ?? null
+  };
 }
 
 function normalizeReportPresence(value) {
@@ -244,18 +343,7 @@ function buildLibraryFilter(params = {}) {
     clauses.push(`p.library_status NOT IN ($${values.length - 1}, $${values.length})`);
   }
   if (filter.source) {
-    const manualSourceSql = `EXISTS (
-      SELECT 1
-      FROM paper_sources source_filter
-      WHERE source_filter.paper_id = p.id
-        AND (
-          COALESCE(source_filter.fetched_batch_id, '') = 'reader-import'
-          OR source_filter.source_type IN ('url', 'upload', 'web', 'manual')
-          OR COALESCE(source_filter.source_identifier, '') LIKE 'reader-upload-%'
-          OR COALESCE(source_filter.source_identifier, '') LIKE 'reader-url-%'
-          OR COALESCE(source_filter.source_identifier, '') LIKE 'reader-web-%'
-        )
-    )`;
+    const manualSourceSql = manualSourceExistsSql("p", "source_filter");
     clauses.push(filter.source === "manual" ? manualSourceSql : `NOT ${manualSourceSql}`);
   }
   if (filter.report_presence) {
@@ -330,12 +418,95 @@ function buildLibraryFilter(params = {}) {
   };
 }
 
+export async function getPaperLibraryImportStatus(params = {}, db = { query }) {
+  const requestedLimit = optionalInteger(params.limit, "limit", { minimum: 1 }) ?? 20;
+  const limit = Math.min(requestedLimit, 100);
+  const jobTypes = [...LIBRARY_IMPORT_JOB_TYPES];
+  const [itemsResult, statsResult, worker] = await Promise.all([
+    db.query(
+      `
+        SELECT id, job_run_id, job_type, status, payload_json, result_json, error_message,
+               created_at, updated_at, started_at, finished_at
+        FROM worker_jobs
+        WHERE job_type = ANY($1::text[])
+          AND (
+            status IN ('queued', 'running')
+            OR NULLIF(updated_at, '')::timestamptz >= NOW() - $2::interval
+          )
+        ORDER BY
+          CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,
+          NULLIF(updated_at, '')::timestamptz DESC,
+          id DESC
+        LIMIT $3
+      `,
+      [jobTypes, LIBRARY_IMPORT_RECENT_INTERVAL, limit]
+    ),
+    db.query(
+      `
+        SELECT
+          COUNT(*) FILTER (WHERE status = 'queued') AS queued,
+          COUNT(*) FILTER (WHERE status = 'running') AS running,
+          COUNT(*) FILTER (
+            WHERE status = 'completed'
+              AND NULLIF(updated_at, '')::timestamptz >= NOW() - $2::interval
+          ) AS completed,
+          COUNT(*) FILTER (
+            WHERE status = 'failed'
+              AND NULLIF(updated_at, '')::timestamptz >= NOW() - $2::interval
+          ) AS failed
+        FROM worker_jobs
+        WHERE job_type = ANY($1::text[])
+      `,
+      [jobTypes, LIBRARY_IMPORT_RECENT_INTERVAL]
+    ),
+    getWorkerStatus({}, db)
+  ]);
+  const items = itemsResult.rows.map(importJobPayload).map((item) => ({
+    ...item,
+    display_status: item.status === "queued" && !worker.available ? "waiting_for_worker" : item.status
+  }));
+  const statsRow = statsResult.rows?.[0] || {};
+  const queued = numberValue(statsRow.queued);
+  const running = numberValue(statsRow.running);
+  return {
+    items,
+    active_items: items.filter((item) => item.status === "queued" || item.status === "running"),
+    latest: items.find((item) => item.status !== "queued" && item.status !== "running") || null,
+    stats: {
+      queued,
+      running,
+      active: queued + running,
+      completed: numberValue(statsRow.completed),
+      failed: numberValue(statsRow.failed)
+    },
+    worker: {
+      available: worker.available,
+      state: worker.state
+    },
+    recent_window_minutes: 30
+  };
+}
+
 export async function getPaperLibrary(params = {}, db = { query }) {
   const { filter, values, where } = buildLibraryFilter(params);
   const limitParam = values.length + 1;
   const offsetParam = values.length + 2;
-  const innerImportanceOrder = filter.sort === "importance" ? "COALESCE(ai.importance_rank, 3)," : "";
-  const outerImportanceOrder = filter.sort === "importance" ? "f.importance_rank," : "";
+  const innerOrder = libraryOrderSql(filter.sort, {
+    activityExpression: "activity_at",
+    idExpression: "p.id",
+    importanceExpression: "COALESCE(ai.importance_rank, 3)",
+    importedExpression: "last_imported_at",
+    statusExpression: "p.library_status"
+  });
+  const outerOrder = libraryOrderSql(filter.sort, {
+    activityExpression: "f.activity_at",
+    idExpression: "f.id",
+    importanceExpression: "f.importance_rank",
+    importedExpression: "f.last_imported_at",
+    statusExpression: "f.library_status"
+  });
+  const manualSourceSql = manualSourceExistsSql("p", "manual_source_check");
+  const manualSourceActivityPredicate = manualSourcePredicate("manual_source_activity");
   const rowsResult = await db.query(
     `
       WITH accepted_importance AS (
@@ -362,22 +533,45 @@ export async function getPaperLibrary(params = {}, db = { query }) {
             WHEN 2 THEN 'low'
             ELSE ''
           END AS importance,
-          COALESCE(ai.importance_rank, 3) AS importance_rank
+          COALESCE(ai.importance_rank, 3) AS importance_rank,
+          CASE WHEN ${manualSourceSql} THEN 'manual' ELSE 'daily' END AS source,
+          (
+            SELECT latest_source.source_type
+            FROM paper_sources latest_source
+            WHERE latest_source.paper_id = p.id
+            ORDER BY latest_source.updated_at DESC, latest_source.id DESC
+            LIMIT 1
+          ) AS source_type,
+          (
+            SELECT MAX(NULLIF(manual_source_activity.updated_at, '')::timestamptz)
+            FROM paper_sources manual_source_activity
+            WHERE manual_source_activity.paper_id = p.id
+              AND ${manualSourceActivityPredicate}
+          ) AS last_imported_at,
+          GREATEST(
+            COALESCE(NULLIF(p.updated_at, '')::timestamptz, '-infinity'::timestamptz),
+            COALESCE((
+              SELECT MAX(NULLIF(source_activity.updated_at, '')::timestamptz)
+              FROM paper_sources source_activity
+              WHERE source_activity.paper_id = p.id
+            ), '-infinity'::timestamptz),
+            COALESCE((
+              SELECT MAX(NULLIF(asset_activity.updated_at, '')::timestamptz)
+              FROM paper_assets asset_activity
+              WHERE asset_activity.paper_id = p.id
+            ), '-infinity'::timestamptz),
+            COALESCE((
+              SELECT MAX(NULLIF(report_activity.updated_at, '')::timestamptz)
+              FROM artifacts report_activity
+              WHERE report_activity.scope_type = 'paper'
+                AND report_activity.scope_id = p.id
+                AND report_activity.artifact_type = 'paper_report'
+            ), '-infinity'::timestamptz)
+          ) AS activity_at
         FROM papers p
         LEFT JOIN accepted_importance ai ON ai.paper_id = p.id
         ${where}
-        ORDER BY
-          ${innerImportanceOrder}
-          CASE p.library_status
-            WHEN 'reading' THEN 0
-            WHEN 'saved' THEN 1
-            WHEN 'candidate' THEN 2
-            WHEN 'read' THEN 3
-            WHEN 'archived' THEN 4
-            ELSE 5
-          END,
-          p.updated_at DESC,
-          p.published_at DESC
+        ORDER BY ${innerOrder}
         LIMIT $${limitParam} OFFSET $${offsetParam}
       ),
       latest_reports AS (
@@ -426,35 +620,13 @@ export async function getPaperLibrary(params = {}, db = { query }) {
         lr.report_source_json,
         lr.report_created_at,
         lr.report_updated_at,
-        CASE WHEN EXISTS (
-          SELECT 1
-          FROM paper_sources report_source
-          WHERE report_source.paper_id = f.id
-            AND (
-              COALESCE(report_source.fetched_batch_id, '') = 'reader-import'
-              OR report_source.source_type IN ('url', 'upload', 'web', 'manual')
-              OR COALESCE(report_source.source_identifier, '') LIKE 'reader-upload-%'
-              OR COALESCE(report_source.source_identifier, '') LIKE 'reader-url-%'
-              OR COALESCE(report_source.source_identifier, '') LIKE 'reader-web-%'
-            )
-        ) THEN 'manual' ELSE 'daily' END AS report_source
+        f.source AS report_source
       FROM filtered f
       LEFT JOIN asset_counts ac ON ac.paper_id = f.id
       LEFT JOIN chunk_counts cc ON cc.paper_id = f.id
       LEFT JOIN artifact_counts afc ON afc.paper_id = f.id
       LEFT JOIN latest_reports lr ON lr.paper_id = f.id
-      ORDER BY
-        ${outerImportanceOrder}
-        CASE f.library_status
-          WHEN 'reading' THEN 0
-          WHEN 'saved' THEN 1
-          WHEN 'candidate' THEN 2
-          WHEN 'read' THEN 3
-          WHEN 'archived' THEN 4
-          ELSE 5
-        END,
-        f.updated_at DESC,
-        f.published_at DESC
+      ORDER BY ${outerOrder}
     `,
     [...values, filter.limit, filter.offset]
   );
@@ -466,6 +638,10 @@ export async function getPaperLibrary(params = {}, db = { query }) {
       asset_count: numberValue(row.asset_count),
       chunk_count: numberValue(row.chunk_count),
       artifact_count: numberValue(row.artifact_count),
+      source: row.source || "daily",
+      source_type: row.source_type || "",
+      last_imported_at: row.last_imported_at || null,
+      last_activity_at: row.activity_at || row.updated_at || null,
       paper_report: paperReportSummaryPayload(row)
     })),
     total,

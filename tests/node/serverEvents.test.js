@@ -98,7 +98,7 @@ test("reader paper updates invalidate linked project detail caches", () => {
   assert.ok(cache.stale.some((target) => Array.isArray(target) && target.join("/") === "project/9"));
 });
 
-test("task events mark job, report, reader, health, and notification namespaces", () => {
+test("task events mark job, report, library, reader, health, and notification namespaces", () => {
   const cache = createCacheRecorder();
   applyServerEvent(cache, {
     type: SERVER_EVENTS.TASK_STARTED,
@@ -111,11 +111,28 @@ test("task events mark job, report, reader, health, and notification namespaces"
     ["jobs", "history"],
     ["paper-reports", "summary"],
     ["paper-reports"],
+    ["library"],
+    { namespace: "library|detail" },
     { namespace: "reader|papers" },
     { namespace: "reader|paper" },
     ["health"],
     ["health", "summary"],
     ["notifications"]
+  ]);
+});
+
+test("worker availability events refresh service health and import projections", () => {
+  const cache = createCacheRecorder();
+  applyServerEvent(cache, {
+    type: SERVER_EVENTS.WORKER_UNAVAILABLE,
+    data: { worker: { available: false } }
+  });
+
+  assert.deepEqual(cache.stale, [
+    ["health"],
+    ["health", "summary"],
+    ["library", "imports"],
+    ["jobs", "status"]
   ]);
 });
 

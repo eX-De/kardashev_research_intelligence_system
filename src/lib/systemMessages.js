@@ -18,6 +18,13 @@ function translatedJobType(jobType, t) {
   return t(`common:jobType.${type}`, { defaultValue: type });
 }
 
+function translatedReaderImportType(importType, t) {
+  const type = text(importType) || "unknown";
+  return t(`notifications.reader_import.type.${type}`, {
+    defaultValue: t("notifications.reader_import.type.unknown")
+  });
+}
+
 export function dailyStepLabel(stepKey, fallback, t) {
   const key = text(stepKey);
   if (!key) return text(fallback) || t("system:dailySteps.preparing");
@@ -185,6 +192,32 @@ export function formatNotification(notification, t) {
       return {
         title: t("notifications.paper_report_completed.title"),
         detail: t("notifications.paper_report_completed.detail", { count: Number(data.count || 0) })
+      };
+    case "reader_import_completed": {
+      const importType = translatedReaderImportType(data.import_type, t);
+      const imported = Number(data.imported_count || 0);
+      const failed = Number(data.error_count || 0);
+      return {
+        title: t("notifications.reader_import_completed.title", { type: importType }),
+        detail: failed
+          ? t("notifications.reader_import_completed.partial", { count: imported, failed })
+          : t("notifications.reader_import_completed.detail", { count: imported })
+      };
+    }
+    case "reader_import_failed": {
+      const importType = translatedReaderImportType(data.import_type, t);
+      return {
+        title: t("notifications.reader_import_failed.title", { type: importType }),
+        detail: text(data.error_message) || fallbackDetail || t("notifications.reader_import_failed.noMessage")
+      };
+    }
+    case "worker_unavailable":
+      return {
+        title: t("notifications.worker_unavailable.title"),
+        detail: t("notifications.worker_unavailable.detail", {
+          queued: Number(data.queued || 0),
+          running: Number(data.running || 0)
+        })
       };
     case "experiment_report_arrived": {
       const parts = [text(data.title)].filter(Boolean);

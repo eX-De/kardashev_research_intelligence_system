@@ -13,9 +13,9 @@ export function paperSourceFilterLabel(source, t) {
 
 export function isRecentManualPaperImport(item, now = Date.now()) {
   if (item?.source !== "manual") return false;
-  const createdAt = Date.parse(String(item?.created_at || ""));
+  const importedAt = Date.parse(String(item?.last_imported_at || item?.created_at || ""));
   const currentTime = Number(now);
-  if (!Number.isFinite(createdAt) || !Number.isFinite(currentTime)) return false;
-  const age = currentTime - createdAt;
+  if (!Number.isFinite(importedAt) || !Number.isFinite(currentTime)) return false;
+  const age = currentTime - importedAt;
   return age >= 0 && age <= RECENT_MANUAL_IMPORT_WINDOW_MS;
 }

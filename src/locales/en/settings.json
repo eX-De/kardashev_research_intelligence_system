@@ -28,6 +28,11 @@
     "providers_one": "{{count}} provider",
     "providers_other": "{{count}} providers",
     "notConfigured": "Not configured",
+    "worker": "Worker",
+    "workerOnline_one": "Online · {{count}} instance",
+    "workerOnline_other": "Online · {{count}} instances",
+    "workerOffline": "Offline",
+    "workerNotRequired": "Not required",
     "ready": "Services ready",
     "needsConfiguration": "Configuration needed",
     "syncing": "Syncing status"

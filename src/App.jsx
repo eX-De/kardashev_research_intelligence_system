@@ -404,6 +404,7 @@ function AuthenticatedApp() {
   const location = useLocation();
   const navigate = useNavigate();
   const toastIdRef = useRef(0);
+  const toastDedupeRef = useRef(new Set());
 
   const dismissToast = useCallback((toastId) => {
     setToasts((current) => current.filter((toast) => toast.id !== toastId));
@@ -411,6 +412,18 @@ function AuthenticatedApp() {
 
   const notify = useCallback((message, options = {}) => {
     if (!messageHasContent(message)) return null;
+
+    const notificationId = isSystemNotificationDescriptor(message)
+      ? String(message.notification?.id || "").trim()
+      : "";
+    const dedupeKey = String(options.dedupeKey || notificationId).trim();
+    if (dedupeKey && toastDedupeRef.current.has(dedupeKey)) return null;
+    if (dedupeKey) {
+      toastDedupeRef.current.add(dedupeKey);
+      if (toastDedupeRef.current.size > 256) {
+        toastDedupeRef.current.delete(toastDedupeRef.current.values().next().value);
+      }
+    }
 
     const type = TOAST_TYPES.has(options.type) ? options.type : "info";
     const duration = Number.isFinite(options.duration)
@@ -421,7 +434,7 @@ function AuthenticatedApp() {
     const id = `toast-${Date.now()}-${toastIdRef.current + 1}`;
     toastIdRef.current += 1;
 
-    setToasts((current) => [...current, { duration, id, message, type }].slice(-MAX_TOASTS));
+    setToasts((current) => [...current, { dedupeKey, duration, id, message, type }].slice(-MAX_TOASTS));
 
     if (options.statusMessage) {
       setStatusMessage(resolveMessage(t, options.statusMessage));

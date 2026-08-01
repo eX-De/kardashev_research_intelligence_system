@@ -5,6 +5,7 @@ import { setPoolForTesting, ValidationError } from "../../server/db.js";
 import {
   getPaperLibrary,
   getPaperLibraryDetail,
+  getPaperLibraryImportStatus,
   updatePaperLibraryStatus
 } from "../../server/library.js";
 
@@ -29,6 +30,10 @@ function paperRow(overrides = {}) {
     saved_at: "2026-07-06T00:00:00Z",
     last_read_at: null,
     created_at: "2026-07-05T00:00:00Z",
+    source: "daily",
+    source_type: "arxiv",
+    last_imported_at: null,
+    activity_at: "2026-07-06T00:00:00Z",
     asset_count: "0",
     chunk_count: "0",
     artifact_count: "0",
@@ -242,6 +247,10 @@ test("getPaperLibrary hides archived by default and returns counts", async () =>
     assert.equal(data.items[0].asset_count, 1);
     assert.equal(data.items[0].chunk_count, 1);
     assert.equal(data.items[0].artifact_count, 1);
+    assert.equal(data.items[0].source, "daily");
+    assert.equal(data.items[0].source_type, "arxiv");
+    assert.equal(data.items[0].last_imported_at, null);
+    assert.equal(data.items[0].last_activity_at, "2026-07-06T00:00:00Z");
     assert.deepEqual(data.items[0].paper_report, {
       paper_id: 1,
       artifact_id: 40,
@@ -349,12 +358,106 @@ test("getPaperLibrary exposes, filters, and sorts accepted recommendation import
     const data = await getPaperLibrary({ importance: "high", sort: "importance", limit: "25", offset: "0" });
     assert.equal(data.items[0].importance, "high");
     assert.match(fake.calls[0].sql, /importance_recommendation\.importance\s*=\s*\$\d+/i);
-    assert.match(fake.calls[0].sql, /COALESCE\(ai\.importance_rank, 3\)/i);
+    assert.match(fake.calls[0].sql, /ORDER BY COALESCE\(ai\.importance_rank, 3\), activity_at DESC, p\.id DESC/i);
     await assert.rejects(() => getPaperLibrary({ importance: "critical" }), ValidationError);
     await assert.rejects(() => getPaperLibrary({ sort: "score" }), ValidationError);
   } finally {
     setPoolForTesting(null);
   }
+});
+
+test("getPaperLibrary offers explicit stable activity, import, and workflow sort modes", async () => {
+  const fake = createLibraryPool();
+  setPoolForTesting(fake.pool);
+  try {
+    await getPaperLibrary({ sort: "updated", limit: "25", offset: "0" });
+    assert.match(fake.calls[0].sql, /ORDER BY activity_at DESC, p\.id DESC/i);
+    assert.match(fake.calls[0].sql, /ORDER BY f\.activity_at DESC, f\.id DESC/i);
+
+    fake.calls.length = 0;
+    await getPaperLibrary({ sort: "imported", limit: "25", offset: "0" });
+    assert.match(fake.calls[0].sql, /ORDER BY last_imported_at DESC NULLS LAST, activity_at DESC, p\.id DESC/i);
+
+    fake.calls.length = 0;
+    await getPaperLibrary({ sort: "workflow", limit: "25", offset: "0" });
+    assert.match(fake.calls[0].sql, /ORDER BY CASE p\.library_status[\s\S]*activity_at DESC, p\.id DESC/i);
+  } finally {
+    setPoolForTesting(null);
+  }
+});
+
+test("getPaperLibraryImportStatus projects active imports without exposing staged paths", async () => {
+  const calls = [];
+  const db = {
+    async query(sql, params) {
+      calls.push({ sql, params });
+      if (String(sql).includes("FROM worker_instances")) {
+        return { rows: [] };
+      }
+      if (String(sql).includes("oldest_queued_at")) {
+        return { rows: [{ queued: "1", running: "1", oldest_queued_at: "2026-08-01T14:59:00Z", oldest_queued_seconds: "60" }] };
+      }
+      if (String(sql).includes("COUNT(*) FILTER")) {
+        return { rows: [{ queued: "1", running: "1", completed: "2", failed: "1" }] };
+      }
+      return {
+        rows: [
+          {
+            id: "51",
+            job_run_id: "118",
+            job_type: "reader-import-upload",
+            status: "running",
+            payload_json: JSON.stringify({ body: { files: [{ filename: "paper.pdf", staged_path: "D:/private/staging.upload" }] } }),
+            result_json: "{}",
+            error_message: "",
+            created_at: "2026-08-01T15:00:00Z",
+            updated_at: "2026-08-01T15:01:00Z",
+            started_at: "2026-08-01T15:01:00Z",
+            finished_at: null
+          },
+          {
+            id: "50",
+            job_run_id: "117",
+            job_type: "reader-import-url",
+            status: "queued",
+            payload_json: JSON.stringify({ body: { urls: "https://arxiv.org/abs/2301.05217\nhttps://example.test/paper.pdf" } }),
+            result_json: "{}",
+            error_message: "",
+            created_at: "2026-08-01T14:59:00Z",
+            updated_at: "2026-08-01T14:59:00Z",
+            started_at: null,
+            finished_at: null
+          },
+          {
+            id: "49",
+            job_run_id: "116",
+            job_type: "reader-import-web",
+            status: "completed",
+            payload_json: JSON.stringify({ body: { urls: "https://example.test/article" } }),
+            result_json: JSON.stringify({ ok: true, imported: [{ paper_id: 7, title: "Imported paper" }], errors: [] }),
+            error_message: "",
+            created_at: "2026-08-01T14:50:00Z",
+            updated_at: "2026-08-01T14:51:00Z",
+            started_at: "2026-08-01T14:50:01Z",
+            finished_at: "2026-08-01T14:51:00Z"
+          }
+        ]
+      };
+    }
+  };
+
+  const data = await getPaperLibraryImportStatus({ limit: "20" }, db);
+  assert.equal(data.stats.active, 2);
+  assert.equal(data.active_items.length, 2);
+  assert.deepEqual(data.active_items[0].targets, ["paper.pdf"]);
+  assert.deepEqual(data.active_items[1].targets, ["https://arxiv.org/abs/2301.05217", "https://example.test/paper.pdf"]);
+  assert.equal(data.latest.imported_count, 1);
+  assert.equal(data.active_items[1].display_status, "waiting_for_worker");
+  assert.equal(data.worker.available, false);
+  assert.equal(data.latest.imported[0].paper_id, 7);
+  assert.equal(JSON.stringify(data).includes("private/staging"), false);
+  assert.match(calls.find((call) => !String(call.sql).includes("COUNT(*) FILTER")).sql, /status IN \('queued', 'running'\)/i);
+  assert.deepEqual(calls[0].params.slice(0, 2), [["reader-import-url", "reader-import-web", "reader-import-upload"], "30 minutes"]);
 });
 
 test("getPaperLibraryDetail returns nested paper library shape with paper report", async () => {

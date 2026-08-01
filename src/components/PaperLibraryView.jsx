@@ -4,8 +4,9 @@ import { useTranslation } from "react-i18next";
 import { cacheNamespace, useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { api, fmtDate, postJson, snippet } from "../lib/dashboard.js";
 import { paperImportanceLabel, paperImportanceOptions } from "../lib/paperImportance.js";
+import { paperImportNotificationFromJob, paperImportNotificationToastType } from "../lib/paperImportNotifications.js";
 import { commitPaperListSelection, resolvePaperListSelection } from "../lib/paperSelection.js";
-import { paperSourceFilterLabel, paperSourceFilterOptions } from "../lib/paperSource.js";
+import { isRecentManualPaperImport, paperSourceFilterLabel, paperSourceFilterOptions } from "../lib/paperSource.js";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
 import { PaperImportDialog } from "./PaperImportDialog.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
@@ -16,7 +17,7 @@ import "../styles/PaperLibraryView.css";
 
 const STATUS_CODES = ["", "candidate", "saved", "reading", "read", "archived", "discarded"];
 const REPORT_STATUS_CODES = ["", "missing", "queued", "processing", "done", "failed", "cancelled"];
-const LIBRARY_SORT_CODES = ["updated", "importance"];
+const LIBRARY_SORT_CODES = ["updated", "imported", "workflow", "importance"];
 const STATUS_TONES = {
   archived: "slate",
   candidate: "blue",
@@ -75,14 +76,40 @@ function stringList(value) {
 }
 
 function paperListSource(paper) {
+  if (paper?.source_type) return paper.source_type;
   if (paper?.arxiv_id || String(paper?.canonical_key || "").startsWith("arxiv:")) return "arxiv";
   if (String(paper?.canonical_key || "").startsWith("upload:")) return "upload";
   if (String(paper?.canonical_key || "").startsWith("url:")) return "url";
-  return paper?.source_type || "manual";
+  return paper?.source || "manual";
+}
+
+function importTypeLabel(importType, t) {
+  return t(`library.importStatus.type.${importType || "unknown"}`, {
+    defaultValue: importType || t("library.importStatus.type.unknown")
+  });
+}
+
+function importStatusLabel(status, t) {
+  return t(`library.importStatus.status.${status || "queued"}`, {
+    defaultValue: status || t("library.importStatus.status.queued")
+  });
+}
+
+function importTargetTitle(target, t) {
+  const value = String(target || "").trim();
+  if (!value) return t("library.importStatus.unknownTarget");
+  try {
+    const url = new URL(value);
+    const pathPart = url.pathname.split("/").filter(Boolean).at(-1);
+    return decodeURIComponent(pathPart || url.hostname) || value;
+  } catch {
+    return value;
+  }
 }
 
 export function PaperLibraryView({
   importOpen = false,
+  notify = () => {},
   onClosePaperImport,
   onOpenChat,
   onSelectPaper,
@@ -110,7 +137,15 @@ export function PaperLibraryView({
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [savingTitle, setSavingTitle] = useState(false);
+  const [recencyClock, setRecencyClock] = useState(() => Date.now());
+  const [trackedImportJobIds, setTrackedImportJobIds] = useState([]);
   const selectFirstFromNextList = useRef(false);
+  const pendingImportedPaperId = useRef(null);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setRecencyClock(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const queryString = useMemo(() => {
     const offset = (page - 1) * pageSize;
@@ -131,9 +166,64 @@ export function PaperLibraryView({
     () => api(`/api/library?${queryString}`),
     { staleTime: 60000 }
   );
+  const importStatusQuery = useCachedApi(
+    ["library", "imports"],
+    () => api("/api/library/imports?limit=100"),
+    { staleTime: 5000 }
+  );
+  const jobStatusQuery = useCachedApi(
+    ["jobs", "status"],
+    () => api("/api/jobs/status"),
+    { staleTime: 5000 }
+  );
   const listData = listQuery.data || { items: [], total: 0 };
   const items = listData.items || [];
   const total = Number(listData.total || 0);
+  const importStatusData = importStatusQuery.data || {};
+  const importStats = importStatusData.stats || {};
+  const activeImportItems = importStatusData.active_items || [];
+  const latestImport = importStatusData.latest || null;
+  const pendingImportEntries = useMemo(() => activeImportItems.flatMap((item) => {
+    const targets = Array.isArray(item.targets) && item.targets.length
+      ? item.targets
+      : [""];
+    return targets.map((target, index) => ({
+      importType: item.import_type,
+      jobId: item.id,
+      key: `import-${item.id}-${index}`,
+      status: item.display_status || item.status,
+      submittedAt: item.created_at,
+      target,
+      title: importTargetTitle(target, t)
+    }));
+  }), [activeImportItems, t]);
+  const reportQueueStatus = jobStatusQuery.data?.scheduler?.paper_report_queue || {};
+
+  useEffect(() => {
+    if (!trackedImportJobIds.length) return undefined;
+    const timer = window.setInterval(() => {
+      importStatusQuery.refresh({ force: true }).catch(() => {});
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [importStatusQuery.refresh, trackedImportJobIds.length]);
+
+  useEffect(() => {
+    if (!trackedImportJobIds.length || !importStatusQuery.hasData) return;
+    const jobsById = new Map((importStatusData.items || []).map((item) => [Number(item.id), item]));
+    const finishedIds = new Set();
+    for (const jobId of trackedImportJobIds) {
+      const notification = paperImportNotificationFromJob(jobsById.get(Number(jobId)));
+      if (!notification) continue;
+      notify(
+        { kind: "system-notification", notification },
+        { dedupeKey: notification.id, type: paperImportNotificationToastType(notification) }
+      );
+      finishedIds.add(Number(jobId));
+    }
+    if (finishedIds.size) {
+      setTrackedImportJobIds((current) => current.filter((jobId) => !finishedIds.has(Number(jobId))));
+    }
+  }, [importStatusData.items, importStatusQuery.hasData, notify, trackedImportJobIds]);
   const detailQuery = useCachedApi(
     ["library", "detail", String(activeId || "")],
     () => api(`/api/library/${activeId}`),
@@ -149,6 +239,18 @@ export function PaperLibraryView({
 
   useEffect(() => {
     if (!listQuery.hasData) return;
+    const importedPaperId = Number(pendingImportedPaperId.current || 0);
+    if (importedPaperId) {
+      const importedPaperVisible = items.some((item) => Number(item.id) === importedPaperId);
+      if (importedPaperVisible) {
+        pendingImportedPaperId.current = null;
+        setActiveId(importedPaperId);
+        if (Number(selectedPaperId || 0) !== importedPaperId) onSelectPaper?.(importedPaperId, { replace: true });
+        return;
+      }
+      if (listQuery.stale || listQuery.refreshing) return;
+      pendingImportedPaperId.current = null;
+    }
     const shouldFollowNewList = selectFirstFromNextList.current;
     const routePaperId = Number(selectedPaperId || 0);
     const nextId = resolvePaperListSelection({
@@ -164,12 +266,12 @@ export function PaperLibraryView({
     }
     if (Number(activeId) !== Number(nextId)) setActiveId(Number(nextId));
     if (routePaperId !== Number(nextId)) onSelectPaper?.(nextId, { replace: true });
-  }, [activeId, items, listQuery.hasData, onSelectPaper, selectedPaperId]);
+  }, [activeId, items, listQuery.hasData, listQuery.refreshing, listQuery.stale, onSelectPaper, selectedPaperId]);
 
   useEffect(() => {
-    const error = listQuery.error || detailQuery.error || projectsQuery.error;
+    const error = listQuery.error || detailQuery.error || projectsQuery.error || importStatusQuery.error || jobStatusQuery.error;
     if (error) setStatusMessage(error.message);
-  }, [detailQuery.error, listQuery.error, projectsQuery.error, setStatusMessage]);
+  }, [detailQuery.error, importStatusQuery.error, jobStatusQuery.error, listQuery.error, projectsQuery.error, setStatusMessage]);
 
   async function updateStatus(nextStatus) {
     if (!detail?.paper?.id) return;
@@ -210,6 +312,8 @@ export function PaperLibraryView({
     cache.markStale(cacheNamespace("paper-reports"));
     await Promise.all([
       listQuery.refresh({ force: true }),
+      importStatusQuery.refresh({ force: true }),
+      jobStatusQuery.refresh({ force: true }),
       activeId ? detailQuery.refresh({ force: true }) : Promise.resolve()
     ]);
   }
@@ -437,6 +541,8 @@ export function PaperLibraryView({
   async function refresh() {
     await Promise.all([
       listQuery.refresh({ force: true }),
+      importStatusQuery.refresh({ force: true }),
+      jobStatusQuery.refresh({ force: true }),
       activeId ? detailQuery.refresh({ force: true }) : Promise.resolve()
     ]);
   }
@@ -449,10 +555,40 @@ export function PaperLibraryView({
           <h1>{t("library.title")}</h1>
         </div>
         <div className="vision-top-actions">
-          <span className="vision-live-state ready"><i aria-hidden="true" />{loading ? t("library.live.loading") : t("library.live.count", { count: total })}</span>
-          <RefreshButton className="vision-refresh" busy={listQuery.status === "loading"} onClick={() => refresh().catch((error) => setStatusMessage(error.message))} />
+          <span className={`vision-live-state ${Number(reportQueueStatus.active || 0) ? "running" : "ready"}`}>
+            <i aria-hidden="true" />
+            {!jobStatusQuery.hasData
+              ? t("library.queue.loading")
+              : reportQueueStatus.enabled
+                ? t("library.queue.capacity", { active: Number(reportQueueStatus.active || 0), capacity: Number(reportQueueStatus.concurrency || 0) })
+                : t("library.queue.disabled")}
+          </span>
+          <RefreshButton className="vision-refresh" busy={listQuery.status === "loading" || importStatusQuery.status === "loading"} onClick={() => refresh().catch((error) => setStatusMessage(error.message))} />
         </div>
       </header>
+
+      <section aria-label={t("library.importStatus.aria")} className="inbox-summary-strip library-import-summary-strip">
+        <div>
+          <span>{t("library.importStatus.queued")}</span>
+          <strong>{importStatusQuery.hasData ? Number(importStats.queued || 0) : "—"}</strong>
+          <p>{t("library.importStatus.queuedHint")}</p>
+        </div>
+        <div>
+          <span>{t("library.importStatus.running")}</span>
+          <strong>{importStatusQuery.hasData ? Number(importStats.running || 0) : "—"}</strong>
+          <p>{t("library.importStatus.runningHint")}</p>
+        </div>
+        <div>
+          <span>{t("library.importStatus.latest")}</span>
+          <strong>{importStatusQuery.hasData ? importStatusLabel(latestImport?.status || "idle", t) : "—"}</strong>
+          <p>{latestImport
+            ? t(latestImport.status === "failed" ? "library.importStatus.latestFailed" : "library.importStatus.latestDetail", {
+              count: Number(latestImport.imported_count || 0),
+              type: importTypeLabel(latestImport.import_type, t)
+            })
+            : t("library.importStatus.noRecent")}</p>
+        </div>
+      </section>
 
       <main className="library-workspace-grid">
         <section className="library-list-panel paper-library-list-panel">
@@ -550,13 +686,33 @@ export function PaperLibraryView({
           {loading ? (
             <WorkspacePaneLoader rows={6} title={t("library.list.loader")} variant="list" />
           ) : (
-            items.length ? items.map((item) => {
+            <>
+            {pendingImportEntries.map((entry) => (
+              <article aria-busy="true" className={`inbox-paper-row library-paper-row-card library-import-pending-row is-${safeToken(entry.status)}`} key={entry.key}>
+                <div className="inbox-paper-row-head">
+                  <span className={`paper-pill library-import-status-pill is-${safeToken(entry.status)}`}><i aria-hidden="true" />{importStatusLabel(entry.status, t)}</span>
+                  <span className="paper-pill paper-source-pill">{importTypeLabel(entry.importType, t)}</span>
+                  <span className="library-card-asset-state">{t("library.importStatus.job", { id: entry.jobId })}</span>
+                </div>
+                <h2 title={entry.target}>{entry.title}</h2>
+                <div className="inbox-project-match library-card-context">
+                  <strong>{t("library.importStatus.pendingTitle")}</strong>
+                  <div><span>{entry.status === "running" ? t("library.importStatus.extracting") : t("library.importStatus.waiting")}</span></div>
+                </div>
+                <div className="inbox-paper-meta">
+                  <span>{entry.target || t("library.importStatus.unknownTarget")}</span>
+                  <span>{t("library.importStatus.submittedAt", { date: fmtDate(entry.submittedAt, i18n.resolvedLanguage || i18n.language) })}</span>
+                </div>
+              </article>
+            ))}
+            {items.length ? items.map((item) => {
               const itemStatusTone = STATUS_TONES[item.library_status] || "slate";
+              const recentImport = isRecentManualPaperImport(item, recencyClock);
               const authors = Array.isArray(item.authors) ? item.authors.slice(0, 3).join(", ") : "";
               const published = item.published_at ? fmtDate(item.published_at, i18n.resolvedLanguage || i18n.language) : t("library.noPublishedDate");
               return (
                 <article
-                  className={`inbox-paper-row library-paper-row-card ${activeId === item.id ? "active" : ""}`}
+                  className={`inbox-paper-row library-paper-row-card ${activeId === item.id ? "active" : ""} ${recentImport ? "recent-import" : ""}`}
                   key={item.id}
                   onClick={() => selectLibraryPaper(item.id)}
                   onKeyDown={(event) => {
@@ -571,6 +727,7 @@ export function PaperLibraryView({
                     <span className={`paper-pill paper-status-${itemStatusTone}`}>{statusLabel(item.library_status, t)}</span>
                     {item.importance ? <span className={`paper-pill paper-importance-${safeToken(item.importance)}`}>{t("library.importanceBadge", { value: paperImportanceLabel(item.importance, t) })}</span> : null}
                     <span className={`paper-pill report-status-${safeToken(item.paper_report?.status || "missing")}`}>{reportStatusLabel(item.paper_report?.status, t)}</span>
+                    {recentImport ? <span className="library-recent-import-badge" title={t("library.recentImportTitle")}><i aria-hidden="true" />{t("library.recentImport")}</span> : null}
                     <span className="library-card-asset-state">{t("library.chunkCount", { count: item.chunk_count || 0 })}</span>
                   </div>
                   <h2>{item.title}</h2>
@@ -590,12 +747,13 @@ export function PaperLibraryView({
                   </div>
                 </article>
               );
-            }) : (
+            }) : pendingImportEntries.length ? null : (
               <div className="paper-empty-state">
                 <strong>{t("library.empty.title")}</strong>
                 <p>{status || sourceFilter !== "all" || reportStatusFilter || importance || sort !== "updated" || query || dateFrom || dateTo ? t("library.empty.filtered") : t("library.empty.description")}</p>
               </div>
             )
+            }</>
           )}
           </div>
           <WorkspacePagination
@@ -869,10 +1027,35 @@ export function PaperLibraryView({
         </section>
       </main>
       <PaperImportDialog
+        notify={notify}
         onClose={onClosePaperImport}
         onImported={async (paperId) => {
-          await refreshPaperData();
-          if (paperId) selectLibraryPaper(paperId);
+          const importedPaperId = Number(paperId || 0);
+          if (!importedPaperId) {
+            await refreshPaperData();
+            return;
+          }
+          pendingImportedPaperId.current = importedPaperId;
+          cache.markStale(cacheNamespace("library"));
+          cache.markStale(cacheNamespace("reader", "papers"));
+          cache.markStale(cacheNamespace("paper-reports"));
+          if (page !== 1) {
+            setPage(1);
+            return;
+          }
+          await listQuery.refresh({ force: true });
+        }}
+        onQueued={async (data) => {
+          const workerJobId = Number(data?.worker_job_id || data?.worker_job?.id || 0);
+          if (workerJobId) {
+            setTrackedImportJobIds((current) => current.includes(workerJobId) ? current : [...current, workerJobId]);
+          }
+          cache.markStale(["library", "imports"]);
+          cache.markStale(["jobs", "status"]);
+          await Promise.all([
+            importStatusQuery.refresh({ force: true }),
+            jobStatusQuery.refresh({ force: true })
+          ]);
         }}
         open={importOpen}
         setStatusMessage={setStatusMessage}

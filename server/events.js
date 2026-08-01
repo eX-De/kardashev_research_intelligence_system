@@ -28,7 +28,9 @@ export const SERVER_EVENTS = Object.freeze({
   SEARCH_COMPLETED: "search.completed",
   TASK_FAILED: "task.failed",
   TASK_FINISHED: "task.finished",
-  TASK_STARTED: "task.started"
+  TASK_STARTED: "task.started",
+  WORKER_AVAILABLE: "worker.available",
+  WORKER_UNAVAILABLE: "worker.unavailable"
 });
 
 function normalizeEventType(type) {

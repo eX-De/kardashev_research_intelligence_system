@@ -223,7 +223,8 @@ class WorkerServiceDispatchTests(unittest.TestCase):
             patch("worker.service.apply_stored_settings", return_value=object()), \
             patch("worker.service.dispatch_worker_job", return_value={"message": "done"}), \
             patch("worker.service.complete_worker_job", return_value={"worker_job": {**worker_job, "status": "completed"}, "job_run": {}}):
-            result = service.run_once("worker-test")
+            job_changes = []
+            result = service.run_once("worker-test", job_changes.append)
 
         self.assertTrue(result["claimed"])
         self.assertEqual(insert_event.call_args_list[0].args[1], "task.started")
@@ -236,6 +237,7 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         self.assertEqual(finished_payload["task"]["id"], 44)
         self.assertEqual(finished_payload["task"]["worker_job_id"], 9)
         self.assertEqual(finished_payload["task"]["result"], {"message": "done"})
+        self.assertEqual(job_changes, [9, None])
         conn.close.assert_called_once_with()
 
     def test_run_once_toasts_when_reader_import_fails(self) -> None:
@@ -312,11 +314,14 @@ class WorkerServiceDispatchTests(unittest.TestCase):
             patch("worker.service.connect", side_effect=connect), \
             patch("worker.service.init_db"), \
             patch("worker.service.cleanup_stale_worker_jobs"), \
+            patch("worker.service.WorkerHeartbeat") as heartbeat_class, \
             patch("worker.service.run_once", side_effect=KeyboardInterrupt):
             self.assertEqual(service.main(), 0)
 
         self.assertEqual(order, ["load_settings", "connect"])
         conn.close.assert_called_once_with()
+        heartbeat_class.return_value.start.assert_called_once_with()
+        heartbeat_class.return_value.stop.assert_called_once_with()
 
     def test_run_once_publishes_project_domain_events(self) -> None:
         conn = Mock()
@@ -506,6 +511,9 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         self.assertEqual(payload["notification"]["severity"], "warn")
         self.assertEqual(payload["notification"]["title"], "URL 导入完成")
         self.assertEqual(payload["notification"]["detail"], "成功 1 篇，失败 1 篇")
+        self.assertEqual(payload["notification"]["data"]["import_type"], "url")
+        self.assertEqual(payload["notification"]["data"]["imported_count"], 1)
+        self.assertEqual(payload["notification"]["data"]["error_count"], 1)
 
     def test_run_once_publishes_daily_result_domain_events(self) -> None:
         conn = Mock()

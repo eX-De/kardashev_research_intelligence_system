@@ -4,7 +4,13 @@ import json
 import unittest
 from unittest.mock import Mock
 
-from worker.queue import cleanup_stale_worker_jobs, task_event_payload
+from worker.queue import (
+    cleanup_stale_worker_jobs,
+    complete_worker_job,
+    heartbeat_worker,
+    heartbeat_worker_job,
+    task_event_payload,
+)
 
 
 class Cursor:
@@ -45,6 +51,58 @@ def worker_job_row(**overrides):
 
 
 class WorkerQueueTests(unittest.TestCase):
+    def test_worker_heartbeat_upserts_idle_instance(self) -> None:
+        conn = Mock()
+        conn.execute.return_value = Cursor(row={
+            "worker_id": "worker-a",
+            "status": "idle",
+            "started_at": "2026-08-01T10:00:00+00:00",
+            "heartbeat_at": "2026-08-01T10:00:05+00:00",
+            "current_job_id": None,
+            "pid": 123,
+            "meta_json": "{}",
+        })
+
+        result = heartbeat_worker(
+            conn,
+            "worker-a",
+            started_at="2026-08-01T10:00:00+00:00",
+            pid=123,
+            now="2026-08-01T10:00:05+00:00",
+        )
+
+        self.assertEqual(result["worker_id"], "worker-a")
+        self.assertEqual(result["status"], "idle")
+        conn.commit.assert_called_once_with()
+
+    def test_worker_job_heartbeat_renews_lock_and_job_run(self) -> None:
+        conn = Mock()
+        conn.execute.side_effect = [Cursor(row={"job_run_id": 42}), Cursor()]
+
+        renewed = heartbeat_worker_job(
+            conn,
+            "worker-a",
+            7,
+            now="2026-08-01T10:00:05+00:00",
+        )
+
+        self.assertTrue(renewed)
+        self.assertIn("UPDATE worker_jobs", conn.execute.call_args_list[0].args[0])
+        self.assertIn("UPDATE job_runs", conn.execute.call_args_list[1].args[0])
+        conn.commit.assert_called_once_with()
+
+    def test_completion_rejects_a_worker_that_lost_its_lease(self) -> None:
+        conn = Mock()
+        conn.execute.return_value = Cursor(row=None)
+
+        with self.assertRaisesRegex(RuntimeError, "lease lost"):
+            complete_worker_job(conn, 7, {"ok": True}, worker_id="worker-old")
+
+        params = conn.execute.call_args.args[1]
+        self.assertEqual(params[-1], "worker-old")
+        conn.commit.assert_not_called()
+        conn.rollback.assert_called_once_with()
+
     def test_task_event_payload_matches_node_task_contract(self) -> None:
         payload = task_event_payload(
             {

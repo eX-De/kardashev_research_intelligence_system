@@ -30,7 +30,9 @@ export const SERVER_EVENTS = Object.freeze({
   SEARCH_COMPLETED: "search.completed",
   TASK_FAILED: "task.failed",
   TASK_FINISHED: "task.finished",
-  TASK_STARTED: "task.started"
+  TASK_STARTED: "task.started",
+  WORKER_AVAILABLE: "worker.available",
+  WORKER_UNAVAILABLE: "worker.unavailable"
 });
 
 const PROJECT_EVENTS = new Set([SERVER_EVENTS.PROJECT_CREATED, SERVER_EVENTS.PROJECT_UPDATED]);
@@ -221,6 +223,14 @@ export function applyServerEvent(cache, event) {
     return;
   }
 
+  if (type === SERVER_EVENTS.WORKER_AVAILABLE || type === SERVER_EVENTS.WORKER_UNAVAILABLE) {
+    cache.markStale(["health"]);
+    cache.markStale(["health", "summary"]);
+    cache.markStale(["library", "imports"]);
+    cache.markStale(["jobs", "status"]);
+    return;
+  }
+
   if (TASK_EVENTS.has(type)) {
     if (scheduler) cache.setCache(["jobs", "status"], { scheduler });
     else cache.markStale(["jobs", "status"]);
@@ -228,6 +238,8 @@ export function applyServerEvent(cache, event) {
     cache.markStale(["jobs", "history"]);
     cache.markStale(["paper-reports", "summary"]);
     cache.markStale(["paper-reports"]);
+    cache.markStale(["library"]);
+    cache.markStale(cacheNamespace("library", "detail"));
     cache.markStale(cacheNamespace("reader", "papers"));
     cache.markStale(cacheNamespace("reader", "paper"));
     cache.markStale(["health"]);

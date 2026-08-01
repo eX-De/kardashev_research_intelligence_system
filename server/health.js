@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { databaseTarget, query } from "./db.js";
 import { getJobSummary } from "./jobs.js";
 import { applyStoredSettings, readStoredSettings } from "./settings.js";
+import { getWorkerStatus } from "./workerHealth.js";
 
 const PAPER_REPORT_ARTIFACT_TYPE = "paper_report";
 const REMOTE_OBSIDIAN_BACKENDS = new Set(["oss", "s3", "r2"]);
@@ -155,6 +156,7 @@ async function buildHealth({ detailed = false } = {}) {
   const obsidianStatus = remoteEnabled
     ? remoteConfigured ? "remote_configured" : "remote_incomplete"
     : vaultExists ? "ok" : vaultPath ? "missing" : "not_configured";
+  const worker = detailed ? await getWorkerStatus() : null;
   return {
     database: {
       ok: true,
@@ -174,6 +176,7 @@ async function buildHealth({ detailed = false } = {}) {
       } : {})
     },
     ...(detailed ? { llm: llmHealth(settings) } : {}),
+    ...(detailed ? { worker } : {}),
     counts: await healthCounts({ detailed }),
     ...(await getJobSummary())
   };

@@ -96,11 +96,19 @@ function HealthGrid({ health, loading = false, settings }) {
   const { t } = useTranslation("settings");
   const obsidianCapability = obsidianCapabilityFrom({ health, settings, t });
   const llmState = health?.llm?.configured ? "ok" : "warn";
+  const worker = health?.worker || {};
+  const workerState = worker.required === false ? "neutral" : worker.available ? "ok" : "bad";
+  const workerValue = worker.required === false
+    ? t("health.workerNotRequired")
+    : worker.available
+      ? t("health.workerOnline", { count: Number(worker.online_workers || 0) })
+      : t("health.workerOffline");
   return (
     <div className="health-grid">
       <HealthItem label="Database" loading={loading} value={health?.database?.ok ? "OK" : "Error"} state={health?.database?.ok ? "ok" : "bad"} />
       <HealthItem label="Obsidian" loading={loading} value={obsidianCapability.label} state={obsidianCapability.state} />
       <HealthItem label="LLM" loading={loading} value={health?.llm?.configured ? t("health.providers", { count: health.llm.providers?.length || 0 }) : t("health.notConfigured")} state={llmState} />
+      <HealthItem label={t("health.worker")} loading={loading} value={workerValue} state={workerState} />
     </div>
   );
 }
@@ -225,7 +233,11 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
   const dailyRecovery = dailyRecoveryFromHistory(history);
   const tasksLoading = !jobStatusQuery.hasData || !jobsSummaryQuery.hasData;
   const refreshBusy = settingsQuery.refreshing || jobStatusQuery.refreshing || jobsSummaryQuery.refreshing || historyQuery.refreshing || healthQuery.refreshing;
-  const systemHealthy = Boolean(health?.database?.ok && health?.llm?.configured);
+  const systemHealthy = Boolean(
+    health?.database?.ok
+    && health?.llm?.configured
+    && (health?.worker?.required === false || health?.worker?.available)
+  );
 
   settingsRef.current = settings;
   providersRef.current = providers;

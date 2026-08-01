@@ -26,11 +26,18 @@
     "status": { "discarded": "Recommendation discarded", "saved": "Saved to paper library", "reportQueued": "Full report queued for generation" }
   },
   "library": {
-    "title": "Paper library", "live": { "loading": "Loading library", "count": "{{count}} papers" },
+    "title": "Paper library", "recentImport": "Just imported", "recentImportTitle": "Manually imported in the last 30 minutes", "live": { "loading": "Loading library", "count": "{{count}} papers" },
+    "queue": { "loading": "Loading queue", "capacity": "Queue {{active}}/{{capacity}}", "disabled": "Queue disabled" },
+    "importStatus": {
+      "aria": "Paper import status", "queued": "Waiting to import", "queuedHint": "Added to the background task queue", "running": "Importing", "runningHint": "Downloading, parsing, and saving", "latest": "Latest result", "noRecent": "No result in the last 30 minutes", "latestDetail": "{{type}} · {{count}} imported", "latestFailed": "{{type}} · Import failed",
+      "type": { "url": "URL import", "web": "Web import", "upload": "PDF upload", "unknown": "Paper import" },
+      "status": { "queued": "Queued", "waiting_for_worker": "Waiting for Worker", "running": "Importing", "completed": "Completed", "failed": "Failed", "cancelled": "Cancelled", "idle": "None" },
+      "unknownTarget": "Paper awaiting identification", "job": "Task #{{id}}", "pendingTitle": "Entering the paper library", "extracting": "Downloading, parsing, and creating the paper record", "waiting": "Waiting for a worker", "submittedAt": "Submitted {{date}}"
+    },
     "status": { "all": "All", "allStates": "All statuses", "candidate": "Candidate", "saved": "Saved", "reading": "Reading", "read": "Read", "archived": "Archived", "discarded": "Discarded", "discardedAction": "Discard", "unknown": "Unknown" },
     "reportPresence": { "all": "All reports", "with": "With report", "without": "Without report" },
-    "sort": { "updated": "Workflow status and updates", "importance": "Importance first" },
-    "sourceType": { "arxiv": "arXiv", "url": "URL", "upload": "Upload", "web": "Web text", "manual": "Manual", "unknown": "Source" },
+    "sort": { "updated": "Recently updated", "imported": "Recently imported", "workflow": "Workflow status", "importance": "Importance first" },
+    "sourceType": { "arxiv": "arXiv", "url": "URL", "upload": "Upload", "web": "Web text", "daily": "Daily task", "manual": "Manual", "unknown": "Source" },
     "assetStatus": { "cached": "Cached", "done": "Complete", "error": "Failed", "failed": "Failed", "missing": "Missing", "pending": "Pending", "ready": "Ready", "unknown": "Unknown status" },
     "messages": { "statusUpdated": "Paper status updated to {{status}}" },
     "actions": { "openChat": "Open Chat" },
