@@ -182,12 +182,12 @@ Vite proxies `/api` to `http://localhost:3000`. In production mode, `npm start` 
 
 - Home: daily-pipeline state, project/paper/artifact/knowledge-context metrics, notifications, and recent updates.
 - Papers:
-  - Inbox: inspect recommended papers, evidence, and project judgments; save or discard papers and trigger full-paper reports.
-  - Paper Library: filter, search, and maintain papers; switch among Project Overview, Paper Report, and Metadata; manage project associations, sources, PDFs, and report state.
+  - Inbox: inspect recommended papers, evidence, and project judgments; save or discard papers and trigger full-paper reports. The detail header can open the corresponding Paper Library entry or Chat directly.
+  - Paper Library: filter, search, and maintain papers; switch among Project Overview, Paper Report, and Metadata; manage project associations, sources, PDFs, and report state. Links from Inbox, unified search, or external deep links automatically locate the target's list page, and manual pagination immediately loads the first paper on the new page.
   - Chat: browse paper reports and user questions by paper and continue a conversation using full text, reference papers, and project context.
 - Projects: project list, project creation, notifications, and project statistics.
 - Project details: edit keywords and Obsidian paths, associate papers and notes, and inspect candidate papers, experiment progress, and project artifacts.
-- Artifacts: filter artifacts by type, scope, and state; read Markdown and source data; export to Obsidian.
+- Artifacts: filter artifacts by type, scope, and state; read Markdown and source data; export to Obsidian. Unified-search and deep-link navigation synchronizes the list to the target page.
 - Tasks: run the daily pipeline, synchronize Obsidian, fetch arXiv, cache full text, generate reports, and inspect job history and backend execution state.
 - Settings: inspect database status and configure Obsidian, arXiv, RAG, LLM providers, model routing, scheduling, and local path selection.
 

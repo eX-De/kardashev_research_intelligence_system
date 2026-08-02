@@ -38,12 +38,14 @@ import { getNotifications as getNodeNotifications } from "./server/notifications
 import { insertAppEvent, listUnpublishedAppEvents, markAppEventsPublished } from "./server/outbox.js";
 import {
   getArtifactDetail as getNodeArtifactDetail,
-  getArtifacts as getNodeArtifacts
+  getArtifacts as getNodeArtifacts,
+  locateArtifactItem as locateNodeArtifactItem
 } from "./server/artifacts.js";
 import {
   getPaperLibrary as getNodePaperLibrary,
   getPaperLibraryDetail as getNodePaperLibraryDetail,
   getPaperLibraryImportStatus as getNodePaperLibraryImportStatus,
+  locatePaperLibraryItem as locateNodePaperLibraryItem,
   updatePaperLibraryStatus as updateNodePaperLibraryStatus
 } from "./server/library.js";
 import {
@@ -2271,8 +2273,28 @@ async function routeApi(req, res, url) {
       q: url.searchParams.get("q") || "",
       date_from: url.searchParams.get("date_from") || "",
       date_to: url.searchParams.get("date_to") || "",
+      locate_id: url.searchParams.get("locate_id") || "",
       limit: url.searchParams.get("limit") || "100",
       offset: url.searchParams.get("offset") || "0"
+    });
+    sendJson(res, 200, data);
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/library/location") {
+    const data = await locateNodePaperLibraryItem({
+      status: url.searchParams.get("status") || "",
+      source: url.searchParams.get("source") || "",
+      report_presence: url.searchParams.get("report_presence") || "",
+      report_status: url.searchParams.get("report_status") || "",
+      importance: url.searchParams.get("importance") || "",
+      sort: url.searchParams.get("sort") || "updated",
+      project_id: url.searchParams.get("project_id") || "",
+      q: url.searchParams.get("q") || "",
+      date_from: url.searchParams.get("date_from") || "",
+      date_to: url.searchParams.get("date_to") || "",
+      locate_id: url.searchParams.get("locate_id") || "",
+      limit: url.searchParams.get("limit") || "100"
     });
     sendJson(res, 200, data);
     return;
@@ -2310,6 +2332,7 @@ async function routeApi(req, res, url) {
       scope_id: url.searchParams.get("scope_id") || "",
       artifact_type: url.searchParams.get("artifact_type") || "",
       status: url.searchParams.get("status") || "",
+      locate_id: url.searchParams.get("locate_id") || "",
       limit: url.searchParams.get("limit") || "100",
       offset: url.searchParams.get("offset") || "0"
     });
@@ -2402,6 +2425,19 @@ async function routeApi(req, res, url) {
       date_from: url.searchParams.get("date_from") || "",
       date_to: url.searchParams.get("date_to") || "",
       limit: url.searchParams.get("limit") || "30"
+    });
+    sendJson(res, 200, data);
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/artifacts/location") {
+    const data = await locateNodeArtifactItem({
+      scope_type: url.searchParams.get("scope_type") || "",
+      scope_id: url.searchParams.get("scope_id") || "",
+      artifact_type: url.searchParams.get("artifact_type") || "",
+      status: url.searchParams.get("status") || "",
+      locate_id: url.searchParams.get("locate_id") || "",
+      limit: url.searchParams.get("limit") || "100"
     });
     sendJson(res, 200, data);
     return;

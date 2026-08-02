@@ -6,6 +6,7 @@ import {
   getPaperLibrary,
   getPaperLibraryDetail,
   getPaperLibraryImportStatus,
+  locatePaperLibraryItem,
   updatePaperLibraryStatus
 } from "../../server/library.js";
 
@@ -135,9 +136,18 @@ function createLibraryPool() {
       txCalls.push(normalized);
       return { rows: [] };
     }
+    if (normalized.startsWith("WITH ACCEPTED_IMPORTANCE AS") && normalized.includes("ROW_NUMBER() OVER")) {
+      const targetId = Number(params[params.length - 1]);
+      const targetOffset = visiblePapers(params).findIndex((paper) => Number(paper.id) === targetId);
+      return {
+        rows: targetOffset >= 0 ? [{ id: String(targetId), target_offset: String(targetOffset) }] : []
+      };
+    }
     if (normalized.startsWith("WITH FILTERED AS") || normalized.startsWith("WITH ACCEPTED_IMPORTANCE AS")) {
+      const limit = Number(params[params.length - 2]);
+      const offset = Number(params[params.length - 1]);
       const selected = visiblePapers(params)
-        .slice(0, Number(params[params.length - 2]))
+        .slice(offset, offset + limit)
         .map((paper) => ({
           ...paper,
           asset_count: String(assets.filter((asset) => asset.paper_id === paper.id).length),
@@ -270,6 +280,42 @@ test("getPaperLibrary hides archived by default and returns counts", async () =>
   }
 });
 
+test("getPaperLibrary locates a deep-linked paper under the active filters and page size", async () => {
+  const fake = createLibraryPool();
+  for (let id = 3; id <= 27; id += 1) {
+    fake.papers.push(paperRow({
+      id: String(id),
+      canonical_key: `manual:${id}`,
+      title: `Library Paper ${id}`,
+      arxiv_id: ""
+    }));
+  }
+  setPoolForTesting(fake.pool);
+  try {
+    const data = await getPaperLibrary({ locate_id: "27", limit: "10", offset: "0" });
+    assert.deepEqual(data.located, { paper_id: 27, offset: 25, page: 3 });
+    assert.match(fake.calls[2].sql, /ROW_NUMBER\(\) OVER \(ORDER BY f\.activity_at DESC, f\.id DESC\)/i);
+    assert.deepEqual(fake.calls[2].params, ["archived", "discarded", 27]);
+    await assert.rejects(() => getPaperLibrary({ locate_id: "0" }), ValidationError);
+  } finally {
+    setPoolForTesting(null);
+  }
+});
+
+test("locatePaperLibraryItem returns only location metadata", async () => {
+  const fake = createLibraryPool();
+  setPoolForTesting(fake.pool);
+  try {
+    const data = await locatePaperLibraryItem({ locate_id: "1", limit: "10" });
+
+    assert.deepEqual(data, { located: { paper_id: 1, offset: 0, page: 1 } });
+    assert.equal(fake.calls.length, 1);
+    assert.match(fake.calls[0].sql, /ROW_NUMBER\(\) OVER/);
+  } finally {
+    setPoolForTesting(null);
+  }
+});
+
 test("getPaperLibrary returns a stable missing report summary", async () => {
   const fake = createLibraryPool();
   fake.artifacts.length = 0;
@@ -358,7 +404,7 @@ test("getPaperLibrary exposes, filters, and sorts accepted recommendation import
     const data = await getPaperLibrary({ importance: "high", sort: "importance", limit: "25", offset: "0" });
     assert.equal(data.items[0].importance, "high");
     assert.match(fake.calls[0].sql, /importance_recommendation\.importance\s*=\s*\$\d+/i);
-    assert.match(fake.calls[0].sql, /ORDER BY COALESCE\(ai\.importance_rank, 3\), activity_at DESC, p\.id DESC/i);
+    assert.match(fake.calls[0].sql, /ORDER BY f\.importance_rank, f\.activity_at DESC, f\.id DESC/i);
     await assert.rejects(() => getPaperLibrary({ importance: "critical" }), ValidationError);
     await assert.rejects(() => getPaperLibrary({ sort: "score" }), ValidationError);
   } finally {
@@ -371,16 +417,15 @@ test("getPaperLibrary offers explicit stable activity, import, and workflow sort
   setPoolForTesting(fake.pool);
   try {
     await getPaperLibrary({ sort: "updated", limit: "25", offset: "0" });
-    assert.match(fake.calls[0].sql, /ORDER BY activity_at DESC, p\.id DESC/i);
     assert.match(fake.calls[0].sql, /ORDER BY f\.activity_at DESC, f\.id DESC/i);
 
     fake.calls.length = 0;
     await getPaperLibrary({ sort: "imported", limit: "25", offset: "0" });
-    assert.match(fake.calls[0].sql, /ORDER BY last_imported_at DESC NULLS LAST, activity_at DESC, p\.id DESC/i);
+    assert.match(fake.calls[0].sql, /ORDER BY f\.last_imported_at DESC NULLS LAST, f\.activity_at DESC, f\.id DESC/i);
 
     fake.calls.length = 0;
     await getPaperLibrary({ sort: "workflow", limit: "25", offset: "0" });
-    assert.match(fake.calls[0].sql, /ORDER BY CASE p\.library_status[\s\S]*activity_at DESC, p\.id DESC/i);
+    assert.match(fake.calls[0].sql, /ORDER BY CASE f\.library_status[\s\S]*f\.activity_at DESC, f\.id DESC/i);
   } finally {
     setPoolForTesting(null);
   }

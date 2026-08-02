@@ -164,6 +164,7 @@ export function normalizeArtifactsFilter(params = {}) {
     scope_id: optionalPositiveInteger(params.scope_id, "scope_id"),
     artifact_type: text(params.artifact_type),
     status: text(params.status),
+    locate_id: optionalPositiveInteger(params.locate_id, "locate_id"),
     limit: normalizeArtifactLimit(params.limit, 100),
     offset: normalizeArtifactOffset(params.offset, 0)
   };
@@ -192,11 +193,44 @@ export async function getArtifacts(params = {}, db = { query }) {
   }
 
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  async function locateArtifact() {
+    if (filter.locate_id === null) return null;
+    const locateValues = [...values, filter.locate_id];
+    const locatePlaceholder = `$${locateValues.length}`;
+    const locateResult = await db.query(
+      `
+        WITH ranked AS (
+          SELECT id, ROW_NUMBER() OVER (ORDER BY updated_at DESC, id DESC) - 1 AS target_offset
+          FROM artifacts
+          ${where}
+        )
+        SELECT id, target_offset
+        FROM ranked
+        WHERE id = ${locatePlaceholder}
+      `,
+      locateValues
+    );
+    const locatedRow = locateResult.rows[0];
+    if (!locatedRow) return null;
+    const targetOffset = Number(locatedRow.target_offset);
+    return {
+      artifact_id: Number(locatedRow.id),
+      offset: targetOffset,
+      page: Math.floor(targetOffset / filter.limit) + 1
+    };
+  }
+
+  if (params.locate_only) {
+    return { located: await locateArtifact() };
+  }
+
   const countResult = await db.query(
     `SELECT COUNT(*)::int AS total FROM artifacts ${where}`,
     [...values]
   );
   const total = Number(countResult.rows[0]?.total || 0);
+  const located = await locateArtifact();
+
   values.push(filter.limit);
   const limitPlaceholder = `$${values.length}`;
   values.push(filter.offset);
@@ -212,7 +246,11 @@ export async function getArtifacts(params = {}, db = { query }) {
     `,
     values
   );
-  return { items: result.rows.map(artifactPayload), total };
+  return { items: result.rows.map(artifactPayload), total, located };
+}
+
+export async function locateArtifactItem(params = {}, db = { query }) {
+  return getArtifacts({ ...params, locate_only: true }, db);
 }
 
 export async function getArtifactDetail(artifactId, db = { query }) {

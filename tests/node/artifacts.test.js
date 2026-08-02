@@ -5,6 +5,7 @@ import { setPoolForTesting, ValidationError } from "../../server/db.js";
 import {
   getArtifactDetail,
   getArtifacts,
+  locateArtifactItem,
   normalizeArtifactLimit,
   normalizeArtifactOffset,
   normalizeArtifactsFilter
@@ -64,6 +65,15 @@ function createArtifactsPool(rows = [artifactRow()], relatedRows = []) {
         }
         if (normalized.startsWith("SELECT COUNT(*)::INT AS TOTAL FROM ARTIFACTS")) {
           return { rows: [{ total: filteredRows().length }] };
+        }
+        if (normalized.startsWith("WITH RANKED AS")) {
+          const targetId = Number(params[params.length - 1]);
+          const targetOffset = filteredRows().findIndex((row) => Number(row.id) === targetId);
+          return {
+            rows: targetOffset >= 0
+              ? [{ id: String(targetId), target_offset: String(targetOffset) }]
+              : []
+          };
         }
         if (normalized.startsWith("SELECT * FROM ARTIFACTS")) {
           const limit = Number(params[params.length - 2]);
@@ -126,6 +136,43 @@ test("getArtifacts applies filters and validates numeric values", async () => {
     assert.throws(() => normalizeArtifactsFilter({ scope_id: "x" }), ValidationError);
     assert.throws(() => normalizeArtifactLimit("0"), ValidationError);
     assert.throws(() => normalizeArtifactOffset("-1"), ValidationError);
+    assert.throws(() => normalizeArtifactsFilter({ locate_id: "x" }), ValidationError);
+  } finally {
+    setPoolForTesting(null);
+  }
+});
+
+test("getArtifacts locates a deep-linked artifact within the active list ordering", async () => {
+  const fake = createArtifactsPool(Array.from({ length: 12 }, (_, index) => artifactRow({
+    id: String(index + 1),
+    title: `Artifact ${index + 1}`,
+    updated_at: new Date(Date.UTC(2026, 6, 20 - index)).toISOString()
+  })));
+  setPoolForTesting(fake.pool);
+  try {
+    const data = await getArtifacts({ limit: "10", offset: "0", locate_id: "12" });
+
+    assert.deepEqual(data.located, { artifact_id: 12, offset: 11, page: 2 });
+    assert.equal(data.items.length, 10);
+    assert.match(fake.calls[1].sql, /ROW_NUMBER\(\) OVER \(ORDER BY updated_at DESC, id DESC\)/);
+    assert.deepEqual(fake.calls[1].params, [12]);
+  } finally {
+    setPoolForTesting(null);
+  }
+});
+
+test("locateArtifactItem returns metadata without loading the artifact page", async () => {
+  const fake = createArtifactsPool(Array.from({ length: 12 }, (_, index) => artifactRow({
+    id: String(index + 1),
+    updated_at: new Date(Date.UTC(2026, 6, 20 - index)).toISOString()
+  })));
+  setPoolForTesting(fake.pool);
+  try {
+    const data = await locateArtifactItem({ locate_id: "12", limit: "10" });
+
+    assert.deepEqual(data, { located: { artifact_id: 12, offset: 11, page: 2 } });
+    assert.equal(fake.calls.length, 1);
+    assert.match(fake.calls[0].sql, /ROW_NUMBER\(\) OVER/);
   } finally {
     setPoolForTesting(null);
   }

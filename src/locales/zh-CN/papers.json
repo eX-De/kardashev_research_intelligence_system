@@ -13,7 +13,7 @@
     "list": { "eyebrow": "决策队列", "title": "候选论文", "loading": "正在读取待判断论文", "description": "按匹配情况逐篇完成取舍", "loader": "读取待判断论文" },
     "detail": { "selectTitle": "选择一篇论文", "selectDescription": "论文摘要、项目关联和决策操作会显示在这里。", "candidate": "候选论文 · {{id}}", "openArxiv": "打开 arXiv", "fullTextStatus": "全文 {{status}}", "loadingSelected": "正在读取所选论文的摘要、项目判定和全文报告。", "loadingFirst": "正在读取待判断论文列表和首篇论文详情。", "opening": "打开论文详情", "loading": "读取论文详情" },
     "decision": { "eyebrow": "人工决策", "title": "保存到哪些研究项目？", "suggestionCount": "{{count}} 个建议关联", "hint": "先选择重要性，再确认要保存到的项目。" },
-    "actions": { "save": "保存到论文仓库", "openReport": "在论文仓库查看", "openReportTitle": "在论文仓库打开报告：{{status}}", "discard": "遗弃", "generateReport": "生成全文报告", "regenerate": "重新生成" },
+    "actions": { "save": "保存到论文仓库", "openReport": "在论文仓库查看", "openReportTitle": "在论文仓库打开报告：{{status}}", "openChat": "打开 Chat", "discard": "遗弃", "generateReport": "生成全文报告", "regenerate": "重新生成" },
     "sections": { "recommendationEvidence": "推荐依据", "projectLinks": "项目关联", "deepReading": "深度阅读", "fullReport": "全文报告", "modelJudgment": "模型判断", "projectJudgment": "项目判定", "paperContent": "论文内容", "abstract": "摘要", "retrievalClues": "检索线索", "matchEvidence": "匹配证据" },
     "noRecommendationReason": "暂无推荐理由。", "noProjectRecommendations": "暂无项目级推荐。", "evidence": { "paperChunk": "论文片段 {{index}} · 页码 {{pages}}", "matchedNoteChunk": "匹配的笔记片段", "empty": "未找到证据片段。" },
     "status": { "discarded": "已遗弃推荐", "saved": "已保存到论文仓库", "reportQueued": "全文报告已加入生成队列" }

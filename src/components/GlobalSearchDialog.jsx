@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
 import { api, postJson } from "../lib/dashboard.js";
@@ -57,6 +57,7 @@ function SearchIcon() {
 
 export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }) {
   const { t } = useTranslation("papers");
+  const navigate = useNavigate();
   const [isRendered, setIsRendered] = useState(isOpen);
   const [isClosing, setIsClosing] = useState(false);
   const [query, setQuery] = useState("");
@@ -237,6 +238,12 @@ export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }
     await runSearch(value, true);
   }
 
+  function openResult(event, href) {
+    event.preventDefault();
+    navigate(href);
+    onClose();
+  }
+
   if (!isRendered) return null;
 
   const stats = response?.stats || {};
@@ -326,7 +333,12 @@ export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }
 
               <div className="global-search-list">
                 {results.map((result) => (
-                  <Link className="global-search-result" key={`${result.entity_type}-${result.entity_id}`} onClick={onClose} to={result.href}>
+                  <Link
+                    className="global-search-result"
+                    key={`${result.entity_type}-${result.entity_id}`}
+                    onClick={(event) => openResult(event, result.href)}
+                    to={result.href}
+                  >
                     <span className={`global-result-kind kind-${result.entity_type}`}>{t(`search.entity.${result.entity_type}`, { defaultValue: result.entity_type })}</span>
                     <div>
                       <small>{resultMeta(result, t)}</small>

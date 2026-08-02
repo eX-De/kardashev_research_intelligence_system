@@ -5,7 +5,14 @@ import { cacheNamespace, useApiCacheClient, useCachedApi } from "../lib/apiCache
 import { api, fmtDate, postJson, snippet } from "../lib/dashboard.js";
 import { paperImportanceLabel, paperImportanceOptions } from "../lib/paperImportance.js";
 import { paperImportNotificationFromJob, paperImportNotificationToastType } from "../lib/paperImportNotifications.js";
-import { commitPaperListSelection, resolvePaperListSelection } from "../lib/paperSelection.js";
+import {
+  commitPaperListSelection,
+  resolveListDetailId,
+  resolveLocatedListPage,
+  resolvePaperListSelection,
+  shouldLocateListRoute,
+  shouldResetListFiltersForMissingRoute
+} from "../lib/paperSelection.js";
 import { isRecentManualPaperImport, paperSourceFilterLabel, paperSourceFilterOptions } from "../lib/paperSource.js";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
 import { PaperImportDialog } from "./PaperImportDialog.jsx";
@@ -179,6 +186,32 @@ export function PaperLibraryView({
   const listData = listQuery.data || { items: [], total: 0 };
   const items = listData.items || [];
   const total = Number(listData.total || 0);
+  const routePaperId = Number(selectedPaperId || 0);
+  const shouldLocateRoute = shouldLocateListRoute({
+    items,
+    routeEntityId: routePaperId,
+    selectFirst: selectFirstFromNextList.current
+  });
+  const hasRestrictiveFilters = Boolean(
+    status
+    || sourceFilter !== "all"
+    || reportStatusFilter
+    || importance
+    || query.trim()
+    || dateFrom
+    || dateTo
+  );
+  const locationQueryString = useMemo(() => {
+    const params = new URLSearchParams(queryString);
+    params.delete("offset");
+    if (routePaperId) params.set("locate_id", String(routePaperId));
+    return params.toString();
+  }, [queryString, routePaperId]);
+  const locationQuery = useCachedApi(
+    ["library", "location", locationQueryString],
+    () => api(`/api/library/location?${locationQueryString}`),
+    { enabled: shouldLocateRoute, staleTime: 60000 }
+  );
   const importStatusData = importStatusQuery.data || {};
   const importStats = importStatusData.stats || {};
   const activeImportItems = importStatusData.active_items || [];
@@ -224,18 +257,61 @@ export function PaperLibraryView({
       setTrackedImportJobIds((current) => current.filter((jobId) => !finishedIds.has(Number(jobId))));
     }
   }, [importStatusData.items, importStatusQuery.hasData, notify, trackedImportJobIds]);
+  const detailId = resolveListDetailId({
+    activeId,
+    items,
+    routeEntityId: routePaperId
+  });
   const detailQuery = useCachedApi(
-    ["library", "detail", String(activeId || "")],
-    () => api(`/api/library/${activeId}`),
-    { enabled: Boolean(activeId), staleTime: 60000 }
+    ["library", "detail", String(detailId || "")],
+    () => api(`/api/library/${detailId}`),
+    { enabled: Boolean(detailId), staleTime: 60000 }
   );
   const projectsQuery = useCachedApi(["projects"], () => api("/api/projects"), { staleTime: 60000 });
   const detailResult = detailQuery.data || null;
   const detailMatchesActivePaper = Boolean(detailResult?.paper?.id)
-    && Number(detailResult.paper.id) === Number(activeId);
+    && Number(detailResult.paper.id) === Number(detailId);
   const detail = detailMatchesActivePaper ? detailResult : null;
   const loading = !listQuery.hasData;
-  const detailLoading = Boolean(activeId) && (!detailQuery.hasData || !detailMatchesActivePaper);
+  const detailLoading = Boolean(detailId) && (!detailQuery.hasData || !detailMatchesActivePaper);
+
+  useEffect(() => {
+    if (detailId) {
+      setActiveId(Number(detailId));
+      return;
+    }
+    setActiveId(null);
+  }, [detailId]);
+
+  useEffect(() => {
+    const locatedPaperId = locationQuery.data?.located?.paper_id;
+    if (shouldResetListFiltersForMissingRoute({
+      hasLocationData: locationQuery.hasData,
+      hasRestrictiveFilters,
+      locatedEntityId: locatedPaperId,
+      routeEntityId: routePaperId,
+      shouldLocateRoute
+    })) {
+      selectFirstFromNextList.current = false;
+      setStatus("");
+      setSourceFilter("all");
+      setReportStatusFilter("");
+      setImportance("");
+      setQuery("");
+      setDateFrom("");
+      setDateTo("");
+      setPage(1);
+      return;
+    }
+    const nextPage = resolveLocatedListPage({
+      currentPage: page,
+      locatedEntityId: locatedPaperId,
+      locatedPage: locationQuery.data?.located?.page,
+      routeEntityId: routePaperId,
+      selectFirst: selectFirstFromNextList.current
+    });
+    if (nextPage !== page) setPage(nextPage);
+  }, [hasRestrictiveFilters, locationQuery.data, locationQuery.hasData, page, routePaperId, shouldLocateRoute]);
 
   useEffect(() => {
     if (!listQuery.hasData) return;
@@ -255,6 +331,7 @@ export function PaperLibraryView({
     const routePaperId = Number(selectedPaperId || 0);
     const nextId = resolvePaperListSelection({
       activeId,
+      allowRouteOutsideItems: true,
       items,
       routePaperId,
       selectFirst: shouldFollowNewList
@@ -269,9 +346,9 @@ export function PaperLibraryView({
   }, [activeId, items, listQuery.hasData, listQuery.refreshing, listQuery.stale, onSelectPaper, selectedPaperId]);
 
   useEffect(() => {
-    const error = listQuery.error || detailQuery.error || projectsQuery.error || importStatusQuery.error || jobStatusQuery.error;
+    const error = listQuery.error || locationQuery.error || detailQuery.error || projectsQuery.error || importStatusQuery.error || jobStatusQuery.error;
     if (error) setStatusMessage(error.message);
-  }, [detailQuery.error, importStatusQuery.error, jobStatusQuery.error, listQuery.error, projectsQuery.error, setStatusMessage]);
+  }, [detailQuery.error, importStatusQuery.error, jobStatusQuery.error, listQuery.error, locationQuery.error, projectsQuery.error, setStatusMessage]);
 
   async function updateStatus(nextStatus) {
     if (!detail?.paper?.id) return;
@@ -314,7 +391,7 @@ export function PaperLibraryView({
       listQuery.refresh({ force: true }),
       importStatusQuery.refresh({ force: true }),
       jobStatusQuery.refresh({ force: true }),
-      activeId ? detailQuery.refresh({ force: true }) : Promise.resolve()
+      detailId ? detailQuery.refresh({ force: true }) : Promise.resolve()
     ]);
   }
 
@@ -541,9 +618,10 @@ export function PaperLibraryView({
   async function refresh() {
     await Promise.all([
       listQuery.refresh({ force: true }),
+      shouldLocateRoute ? locationQuery.refresh({ force: true }) : Promise.resolve(),
       importStatusQuery.refresh({ force: true }),
       jobStatusQuery.refresh({ force: true }),
-      activeId ? detailQuery.refresh({ force: true }) : Promise.resolve()
+      detailId ? detailQuery.refresh({ force: true }) : Promise.resolve()
     ]);
   }
 

@@ -78,7 +78,7 @@ function PaperList({ papers, activePaperId, onSelect }) {
   });
 }
 
-function PaperDetail({ detail, onOpenLibraryPaper, onRecommendation, onGenerateReport }) {
+function PaperDetail({ detail, onOpenChat, onOpenLibraryPaper, onRecommendation, onGenerateReport }) {
   const { t } = useTranslation("papers");
   const [selectedProjectIds, setSelectedProjectIds] = useState([]);
   const [importance, setImportance] = useState("");
@@ -110,6 +110,7 @@ function PaperDetail({ detail, onOpenLibraryPaper, onRecommendation, onGenerateR
   const report = detail.paper_report || {};
   const reportReady = report.status === "done" && Boolean(String(report.report_markdown || "").trim());
   const reportBusy = report.status === "processing";
+  const libraryPaperId = Number(paper.library_paper_id || paper.id);
   const importanceOptions = [
     ["high", t("importance.high"), t("importance.hint.high")],
     ["medium", t("importance.medium"), t("importance.hint.medium")],
@@ -136,6 +137,19 @@ function PaperDetail({ detail, onOpenLibraryPaper, onRecommendation, onGenerateR
             <a href={paper.link} target="_blank" rel="noreferrer">{t("inbox.detail.openArxiv")} ↗</a>
             <span>{(paper.categories || []).join(" · ") || t("common.uncategorized")}</span>
             <span>{t("inbox.detail.fullTextStatus", { status: paper.text_status || "pending" })}</span>
+          </div>
+          <div className="paper-detail-actions">
+            <button
+              className="paper-detail-action"
+              onClick={() => onOpenLibraryPaper?.(libraryPaperId)}
+              title={t("inbox.actions.openReportTitle", { status: reportStatusLabel(report.status, t) })}
+              type="button"
+            >
+              <span>{t("inbox.actions.openReport")}</span><i aria-hidden="true">→</i>
+            </button>
+            <button className="paper-detail-action" onClick={() => onOpenChat?.(libraryPaperId)} type="button">
+              <span>{t("inbox.actions.openChat")}</span><i aria-hidden="true">→</i>
+            </button>
           </div>
         </header>
 
@@ -182,7 +196,6 @@ function PaperDetail({ detail, onOpenLibraryPaper, onRecommendation, onGenerateR
             </div>
             <div className="detail-actions inbox-primary-actions">
               <button className="primary" disabled={!canAccept} onClick={() => onRecommendation({ action: "accept", importance, project_ids: selectedProjectIds })} type="button">{t("inbox.actions.save")}</button>
-              <button onClick={() => onOpenLibraryPaper?.(paper.id)} title={t("inbox.actions.openReportTitle", { status: reportStatusLabel(report.status, t) })} type="button">{t("inbox.actions.openReport")}</button>
               <button className="danger" onClick={() => onRecommendation({ action: "discard" })} type="button">{t("inbox.actions.discard")}</button>
             </div>
           </section>
@@ -283,7 +296,7 @@ function PaperDetail({ detail, onOpenLibraryPaper, onRecommendation, onGenerateR
   );
 }
 
-export function InboxView({ notify = () => {}, onOpenLibraryPaper, onSelectPaper, selectedPaperId, setStatusMessage }) {
+export function InboxView({ notify = () => {}, onOpenChat, onOpenLibraryPaper, onSelectPaper, selectedPaperId, setStatusMessage }) {
   const { t } = useTranslation("papers");
   const cache = useApiCacheClient();
   const [activePaperId, setActivePaperId] = useState(null);
@@ -456,7 +469,7 @@ export function InboxView({ notify = () => {}, onOpenLibraryPaper, onSelectPaper
           />
         ) : (
           <div className="inbox-detail-transition" key={detail?.paper?.id || "empty"}>
-            <PaperDetail detail={detail} onGenerateReport={generateReport} onOpenLibraryPaper={onOpenLibraryPaper} onRecommendation={updateRecommendation} />
+            <PaperDetail detail={detail} onGenerateReport={generateReport} onOpenChat={onOpenChat} onOpenLibraryPaper={onOpenLibraryPaper} onRecommendation={updateRecommendation} />
           </div>
         )}
         </section>

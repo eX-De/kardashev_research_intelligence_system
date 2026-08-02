@@ -3,12 +3,32 @@ import test from "node:test";
 
 import {
   commitPaperListSelection,
+  resolveListDetailId,
+  resolveLocatedListPage,
   resolvePaperListSelection,
-  resolveReaderQueueSelection
+  resolveReaderQueueSelection,
+  shouldLocateListRoute,
+  shouldResetListFiltersForMissingRoute
 } from "../../src/lib/paperSelection.js";
 
 const pageOne = [{ id: 1 }, { id: 2 }];
 const pageTwo = [{ id: 11 }, { id: 12 }];
+
+test("a newly loaded page derives its first item as the detail target immediately", () => {
+  assert.equal(resolveListDetailId({
+    activeId: 1,
+    items: pageTwo,
+    routeEntityId: null
+  }), 11);
+});
+
+test("an explicit route remains the detail target while its list page is locating", () => {
+  assert.equal(resolveListDetailId({
+    activeId: 1,
+    items: pageOne,
+    routeEntityId: 42
+  }), 42);
+});
 
 test("page change selects the first paper from the newly loaded page", () => {
   assert.equal(resolvePaperListSelection({
@@ -25,6 +45,73 @@ test("a route paper from the previous page cannot override the current page sele
     items: pageTwo,
     routePaperId: 1
   }), 11);
+});
+
+test("an explicit library deep link remains selected outside the current list page", () => {
+  assert.equal(resolvePaperListSelection({
+    activeId: null,
+    allowRouteOutsideItems: true,
+    items: pageOne,
+    routePaperId: 42
+  }), 42);
+});
+
+test("a located library deep link moves the list to the matching page", () => {
+  assert.equal(resolveLocatedListPage({
+    currentPage: 1,
+    locatedEntityId: 42,
+    locatedPage: 3,
+    routeEntityId: 42
+  }), 3);
+});
+
+test("explicit page navigation wins over stale deep-link location metadata", () => {
+  assert.equal(resolveLocatedListPage({
+    currentPage: 2,
+    locatedEntityId: 42,
+    locatedPage: 3,
+    routeEntityId: 42,
+    selectFirst: true
+  }), 2);
+});
+
+test("an artifact deep link uses the same located-list page contract", () => {
+  assert.equal(resolveLocatedListPage({
+    currentPage: 1,
+    locatedEntityId: 18,
+    locatedPage: 2,
+    routeEntityId: 18
+  }), 2);
+});
+
+test("external routes locate only when the target is outside the loaded page", () => {
+  assert.equal(shouldLocateListRoute({ items: pageOne, routeEntityId: 42 }), true);
+  assert.equal(shouldLocateListRoute({ items: pageOne, routeEntityId: 2 }), false);
+});
+
+test("normal pagination does not start a competing route-location request", () => {
+  assert.equal(shouldLocateListRoute({
+    items: [],
+    routeEntityId: 2,
+    selectFirst: true
+  }), false);
+});
+
+test("a deep link clears restrictive filters only after filtered location misses", () => {
+  assert.equal(shouldResetListFiltersForMissingRoute({
+    hasLocationData: true,
+    hasRestrictiveFilters: true,
+    locatedEntityId: null,
+    routeEntityId: 42,
+    shouldLocateRoute: true
+  }), true);
+  assert.equal(shouldResetListFiltersForMissingRoute({
+    hasLocationData: true,
+    hasRestrictiveFilters: true,
+    locatedEntityId: 42,
+    routeEntityId: 42,
+    shouldLocateRoute: true
+  }), false);
 });
 
 test("clicking the first paper on the current page follows its unique id", () => {

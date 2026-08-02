@@ -5,6 +5,12 @@ import { useTranslation } from "react-i18next";
 import { api, fmtDate } from "../lib/dashboard.js";
 import { cacheNamespace, useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { friendlyObsidianMessage, postObsidianJson, useObsidianCapability } from "../lib/obsidianCapability.js";
+import {
+  resolveListDetailId,
+  resolveLocatedListPage,
+  shouldLocateListRoute,
+  shouldResetListFiltersForMissingRoute
+} from "../lib/paperSelection.js";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
 import { WorkspacePaneLoader } from "./WorkspacePaneLoader.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
@@ -68,7 +74,9 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
   const [busy, setBusy] = useState(false);
   const selectFirstFromNextList = useRef(false);
   const cache = useApiCacheClient();
-  const selectedRouteId = Number.isFinite(Number(selectedArtifactId)) ? Number(selectedArtifactId) : null;
+  const selectedRouteId = Number.isFinite(Number(selectedArtifactId)) && Number(selectedArtifactId) > 0
+    ? Number(selectedArtifactId)
+    : null;
   const handleCapabilityError = useCallback((error) => setStatusMessage(error.message), [setStatusMessage]);
   const obsidianCapability = useObsidianCapability({ onError: handleCapabilityError });
 
@@ -90,10 +98,30 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
   const listData = listQuery.data || { items: [], total: 0 };
   const items = listData.items || [];
   const total = Number(listData.total || 0);
+  const shouldLocateRoute = shouldLocateListRoute({
+    items,
+    routeEntityId: selectedRouteId,
+    selectFirst: selectFirstFromNextList.current
+  });
+  const hasRestrictiveFilters = Boolean(artifactType || scopeType);
+  const locationQueryString = useMemo(() => {
+    const params = new URLSearchParams(queryString);
+    params.delete("offset");
+    if (selectedRouteId) params.set("locate_id", String(selectedRouteId));
+    return params.toString();
+  }, [queryString, selectedRouteId]);
+  const locationQuery = useCachedApi(
+    ["artifacts", "location", locationQueryString],
+    () => api(`/api/artifacts/location?${locationQueryString}`),
+    { enabled: shouldLocateRoute, staleTime: 120000 }
+  );
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const currentPage = Math.min(page, pageCount);
-  const activeStillExists = activeId && items.some((item) => Number(item.id) === Number(activeId));
-  const detailId = selectedRouteId || (activeStillExists ? activeId : items[0]?.id);
+  const detailId = resolveListDetailId({
+    activeId,
+    items,
+    routeEntityId: selectedRouteId
+  });
   const detailQuery = useCachedApi(
     ["artifact", String(detailId || "")],
     () => api(`/api/artifacts/${encodeURIComponent(String(detailId))}`),
@@ -126,9 +154,9 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
   ].filter(Boolean);
 
   useEffect(() => {
-    const error = listQuery.error || detailQuery.error;
+    const error = listQuery.error || locationQuery.error || detailQuery.error;
     if (error) setStatusMessage(error.message);
-  }, [detailQuery.error, listQuery.error, setStatusMessage]);
+  }, [detailQuery.error, listQuery.error, locationQuery.error, setStatusMessage]);
 
   useEffect(() => {
     if (detailId) {
@@ -137,6 +165,31 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
     }
     setActiveId(null);
   }, [detailId]);
+
+  useEffect(() => {
+    const locatedArtifactId = locationQuery.data?.located?.artifact_id;
+    if (shouldResetListFiltersForMissingRoute({
+      hasLocationData: locationQuery.hasData,
+      hasRestrictiveFilters,
+      locatedEntityId: locatedArtifactId,
+      routeEntityId: selectedRouteId,
+      shouldLocateRoute
+    })) {
+      selectFirstFromNextList.current = false;
+      setArtifactType("");
+      setScopeType("");
+      setPage(1);
+      return;
+    }
+    const nextPage = resolveLocatedListPage({
+      currentPage: page,
+      locatedEntityId: locatedArtifactId,
+      locatedPage: locationQuery.data?.located?.page,
+      routeEntityId: selectedRouteId,
+      selectFirst: selectFirstFromNextList.current
+    });
+    if (nextPage !== page) setPage(nextPage);
+  }, [hasRestrictiveFilters, locationQuery.data, locationQuery.hasData, page, selectedRouteId, shouldLocateRoute]);
 
   const selectArtifact = useCallback((id) => {
     if (onSelectArtifact) {
@@ -182,6 +235,7 @@ export function ArtifactsView({ onSelectArtifact, selectedArtifactId, setStatusM
     try {
       await Promise.all([
         listQuery.refresh({ force: true }),
+        shouldLocateRoute ? locationQuery.refresh({ force: true }) : Promise.resolve(),
         detailId ? detailQuery.refresh({ force: true }) : Promise.resolve()
       ]);
     } catch (error) {

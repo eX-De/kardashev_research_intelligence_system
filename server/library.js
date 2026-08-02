@@ -329,6 +329,7 @@ function buildLibraryFilter(params = {}) {
     query: text(params.q ?? params.query),
     date_from: text(params.date_from).slice(0, 10),
     date_to: text(params.date_to).slice(0, 10),
+    locate_id: optionalInteger(params.locate_id, "locate_id", { minimum: 1 }),
     limit: normalizeLimit(params.limit, 100),
     offset: normalizeOffset(params.offset)
   };
@@ -491,13 +492,6 @@ export async function getPaperLibrary(params = {}, db = { query }) {
   const { filter, values, where } = buildLibraryFilter(params);
   const limitParam = values.length + 1;
   const offsetParam = values.length + 2;
-  const innerOrder = libraryOrderSql(filter.sort, {
-    activityExpression: "activity_at",
-    idExpression: "p.id",
-    importanceExpression: "COALESCE(ai.importance_rank, 3)",
-    importedExpression: "last_imported_at",
-    statusExpression: "p.library_status"
-  });
   const outerOrder = libraryOrderSql(filter.sort, {
     activityExpression: "f.activity_at",
     idExpression: "f.id",
@@ -507,71 +501,116 @@ export async function getPaperLibrary(params = {}, db = { query }) {
   });
   const manualSourceSql = manualSourceExistsSql("p", "manual_source_check");
   const manualSourceActivityPredicate = manualSourcePredicate("manual_source_activity");
+  const acceptedImportanceSql = `
+    accepted_importance AS (
+      SELECT
+        r.paper_id,
+        MIN(
+          CASE r.importance
+            WHEN 'high' THEN 0
+            WHEN 'medium' THEN 1
+            WHEN 'low' THEN 2
+            ELSE 3
+          END
+        ) AS importance_rank
+      FROM project_paper_recommendations r
+      WHERE r.state = 'accepted'
+      GROUP BY r.paper_id
+    )
+  `;
+  const eligiblePapersSql = `
+    SELECT
+      p.*,
+      CASE ai.importance_rank
+        WHEN 0 THEN 'high'
+        WHEN 1 THEN 'medium'
+        WHEN 2 THEN 'low'
+        ELSE ''
+      END AS importance,
+      COALESCE(ai.importance_rank, 3) AS importance_rank,
+      CASE WHEN ${manualSourceSql} THEN 'manual' ELSE 'daily' END AS source,
+      (
+        SELECT latest_source.source_type
+        FROM paper_sources latest_source
+        WHERE latest_source.paper_id = p.id
+        ORDER BY latest_source.updated_at DESC, latest_source.id DESC
+        LIMIT 1
+      ) AS source_type,
+      (
+        SELECT MAX(NULLIF(manual_source_activity.updated_at, '')::timestamptz)
+        FROM paper_sources manual_source_activity
+        WHERE manual_source_activity.paper_id = p.id
+          AND ${manualSourceActivityPredicate}
+      ) AS last_imported_at,
+      GREATEST(
+        COALESCE(NULLIF(p.updated_at, '')::timestamptz, '-infinity'::timestamptz),
+        COALESCE((
+          SELECT MAX(NULLIF(source_activity.updated_at, '')::timestamptz)
+          FROM paper_sources source_activity
+          WHERE source_activity.paper_id = p.id
+        ), '-infinity'::timestamptz),
+        COALESCE((
+          SELECT MAX(NULLIF(asset_activity.updated_at, '')::timestamptz)
+          FROM paper_assets asset_activity
+          WHERE asset_activity.paper_id = p.id
+        ), '-infinity'::timestamptz),
+        COALESCE((
+          SELECT MAX(NULLIF(report_activity.updated_at, '')::timestamptz)
+          FROM artifacts report_activity
+          WHERE report_activity.scope_type = 'paper'
+            AND report_activity.scope_id = p.id
+            AND report_activity.artifact_type = 'paper_report'
+        ), '-infinity'::timestamptz)
+      ) AS activity_at
+    FROM papers p
+    LEFT JOIN accepted_importance ai ON ai.paper_id = p.id
+    ${where}
+  `;
+  async function locatePaper() {
+    if (!filter.locate_id) return null;
+    const locateIdParam = values.length + 1;
+    const locationResult = await db.query(
+      `
+        WITH ${acceptedImportanceSql},
+        eligible AS (
+          ${eligiblePapersSql}
+        ),
+        ranked AS (
+          SELECT
+            f.id,
+            ROW_NUMBER() OVER (ORDER BY ${outerOrder}) - 1 AS target_offset
+          FROM eligible f
+        )
+        SELECT id, target_offset
+        FROM ranked
+        WHERE id = $${locateIdParam}
+      `,
+      [...values, filter.locate_id]
+    );
+    const location = locationResult.rows?.[0] || null;
+    if (!location) return null;
+    const targetOffset = Number(location.target_offset || 0);
+    return {
+      paper_id: Number(location.id),
+      offset: targetOffset,
+      page: Math.floor(targetOffset / filter.limit) + 1
+    };
+  }
+
+  if (params.locate_only) {
+    return { located: await locatePaper() };
+  }
+
   const rowsResult = await db.query(
     `
-      WITH accepted_importance AS (
-        SELECT
-          r.paper_id,
-          MIN(
-            CASE r.importance
-              WHEN 'high' THEN 0
-              WHEN 'medium' THEN 1
-              WHEN 'low' THEN 2
-              ELSE 3
-            END
-          ) AS importance_rank
-        FROM project_paper_recommendations r
-        WHERE r.state = 'accepted'
-        GROUP BY r.paper_id
+      WITH ${acceptedImportanceSql},
+      eligible AS (
+        ${eligiblePapersSql}
       ),
       filtered AS (
-        SELECT
-          p.*,
-          CASE ai.importance_rank
-            WHEN 0 THEN 'high'
-            WHEN 1 THEN 'medium'
-            WHEN 2 THEN 'low'
-            ELSE ''
-          END AS importance,
-          COALESCE(ai.importance_rank, 3) AS importance_rank,
-          CASE WHEN ${manualSourceSql} THEN 'manual' ELSE 'daily' END AS source,
-          (
-            SELECT latest_source.source_type
-            FROM paper_sources latest_source
-            WHERE latest_source.paper_id = p.id
-            ORDER BY latest_source.updated_at DESC, latest_source.id DESC
-            LIMIT 1
-          ) AS source_type,
-          (
-            SELECT MAX(NULLIF(manual_source_activity.updated_at, '')::timestamptz)
-            FROM paper_sources manual_source_activity
-            WHERE manual_source_activity.paper_id = p.id
-              AND ${manualSourceActivityPredicate}
-          ) AS last_imported_at,
-          GREATEST(
-            COALESCE(NULLIF(p.updated_at, '')::timestamptz, '-infinity'::timestamptz),
-            COALESCE((
-              SELECT MAX(NULLIF(source_activity.updated_at, '')::timestamptz)
-              FROM paper_sources source_activity
-              WHERE source_activity.paper_id = p.id
-            ), '-infinity'::timestamptz),
-            COALESCE((
-              SELECT MAX(NULLIF(asset_activity.updated_at, '')::timestamptz)
-              FROM paper_assets asset_activity
-              WHERE asset_activity.paper_id = p.id
-            ), '-infinity'::timestamptz),
-            COALESCE((
-              SELECT MAX(NULLIF(report_activity.updated_at, '')::timestamptz)
-              FROM artifacts report_activity
-              WHERE report_activity.scope_type = 'paper'
-                AND report_activity.scope_id = p.id
-                AND report_activity.artifact_type = 'paper_report'
-            ), '-infinity'::timestamptz)
-          ) AS activity_at
-        FROM papers p
-        LEFT JOIN accepted_importance ai ON ai.paper_id = p.id
-        ${where}
-        ORDER BY ${innerOrder}
+        SELECT f.*
+        FROM eligible f
+        ORDER BY ${outerOrder}
         LIMIT $${limitParam} OFFSET $${offsetParam}
       ),
       latest_reports AS (
@@ -632,6 +671,7 @@ export async function getPaperLibrary(params = {}, db = { query }) {
   );
   const totalResult = await db.query(`SELECT COUNT(*) AS count FROM papers p ${where}`, values);
   const total = Number(totalResult.rows?.[0]?.count || 0);
+  const located = await locatePaper();
   return {
     items: rowsResult.rows.map((row) => ({
       ...paperPayload(row),
@@ -646,8 +686,13 @@ export async function getPaperLibrary(params = {}, db = { query }) {
     })),
     total,
     limit: filter.limit,
-    offset: filter.offset
+    offset: filter.offset,
+    located
   };
+}
+
+export async function locatePaperLibraryItem(params = {}, db = { query }) {
+  return getPaperLibrary({ ...params, locate_only: true }, db);
 }
 
 async function paperReportPayload(db, libraryPaperId) {
