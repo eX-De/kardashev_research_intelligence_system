@@ -753,16 +753,16 @@
   will-change: opacity, transform, filter;
 }
 
-.paper-chat-view .reader-messages.is-reveal-ready .reader-message:not(.is-scroll-visible) {
+.paper-chat-view .reader-messages.is-reveal-ready .reader-message.is-scroll-observed:not(.is-scroll-visible) {
   opacity: 0;
   filter: blur(2px);
 }
 
-.paper-chat-view .reader-messages.is-reveal-ready .reader-message.reveal-from-bottom:not(.is-scroll-visible) {
+.paper-chat-view .reader-messages.is-reveal-ready .reader-message.is-scroll-observed.reveal-from-bottom:not(.is-scroll-visible) {
   transform: translateY(22px) scale(0.985);
 }
 
-.paper-chat-view .reader-messages.is-reveal-ready .reader-message.reveal-from-top:not(.is-scroll-visible) {
+.paper-chat-view .reader-messages.is-reveal-ready .reader-message.is-scroll-observed.reveal-from-top:not(.is-scroll-visible) {
   transform: translateY(-18px) scale(0.985);
 }
 

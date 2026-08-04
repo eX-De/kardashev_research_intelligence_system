@@ -182,9 +182,9 @@ Vite 会把 `/api` 代理到 `http://localhost:3000`。生产模式下 `npm star
 
 - 首页：每日流程状态、项目/论文/产物/知识上下文指标、提醒和最近更新。
 - 论文：
-  - 待判断：查看推荐论文、证据、项目判定，保存或丢弃，触发全文报告；详情页可直接打开对应论文仓库条目或 Chat。
+  - 待判断：查看推荐论文、证据、项目判定，保存或丢弃，触发全文报告；保存时可在推荐项目之外手动补充任意已有项目，详情页也可直接打开对应论文仓库条目或 Chat。
   - 论文仓库：筛选、搜索和维护论文，在项目概览、论文报告和元信息之间切换，并管理项目关联、来源、PDF 与报告状态；从待判断、统一搜索或外部深链接进入时，列表会自动定位目标所在页，手动翻页后会立即加载新页第一篇论文。
-  - Chat：按论文集中查看报告和用户提问，基于全文、参考论文与项目上下文继续对话。
+  - Chat：按论文集中查看报告和用户提问，基于全文、参考论文与项目上下文继续对话；消息按是否进入滚动区淡入淡出，超长回复和流式消息转为正式记录后仍能稳定显示。
 - 项目：项目列表、新建项目、提醒和项目统计。
 - 项目详情：编辑项目关键词与 Obsidian 路径，关联论文/笔记，查看候选论文、实验进展和项目产物。
 - 产物：按类型、范围和状态筛选 artifact，查看 Markdown 与来源数据，导出到 Obsidian；从统一搜索或深链接进入时，列表会同步定位目标所在页。
@@ -272,7 +272,7 @@ arXiv 与 RAG：
 - `RAG_PREFILTER_*`：摘要级粗筛阈值、top-k、保底数量和上限。
 - 向量能力默认走 PostgreSQL/pgvector 路径，无需单独配置 backend。
 
-LLM provider 使用 OpenAI-compatible 接口配置。建议在 dashboard 设置页维护，也可用 `.env` 初始化默认值：
+LLM provider 支持通用 OpenAI-compatible 接口，并把 OpenRouter 作为独立的官方 Provider。dashboard 的“模型与路由”页分别提供 OpenRouter 工作区和 OpenAI-compatible 接口工作区；OpenRouter 的 reasoning effort、允许的上游 provider，以及价格/吞吐量/延迟排序都按 Chat 模型单独配置。也可用 `.env` 初始化默认值：
 
 ```env
 LLM_PROVIDERS_JSON=[{"id":"provider-id","name":"Provider Name","base_url":"https://example.com/v1","api_key":"replace-me","chat_models":["chat-model-name"],"embedding_models":["embedding-model-name"]}]
@@ -287,6 +287,14 @@ PROJECT_CHAT_PROFILE_MODEL=chat-model-name
 READER_CHAT_PROVIDER_ID=provider-id
 READER_CHAT_MODEL=chat-model-name
 ```
+
+OpenRouter profile 在 `LLM_PROVIDERS_JSON` 中使用 `provider_type: "openrouter"`。`openrouter_model_policies` 以模型标识为键；`reasoning_effort` 留空时沿用该模型默认值，`provider_only` 只限制这个模型的上游 provider，`provider_sort` 支持 `price`、`throughput` 或 `latency`：
+
+```env
+LLM_PROVIDERS_JSON=[{"id":"openrouter","name":"OpenRouter","provider_type":"openrouter","base_url":"https://openrouter.ai/api/v1","api_key":"replace-me","chat_models":["deepseek/deepseek-chat","openai/gpt-5"],"embedding_models":[],"openrouter_model_policies":{"deepseek/deepseek-chat":{"reasoning_effort":"high","provider_only":["deepinfra"],"provider_sort":"price"},"openai/gpt-5":{"reasoning_effort":"medium","provider_only":["openai"],"provider_sort":"throughput"}}}]
+```
+
+OpenRouter 策略属于具体模型，而不是整个 provider profile。混合模型目录中的 GPT、Claude、Gemini 和 DeepSeek 模型分别读取自己的策略，不会互相继承 `provider.only`。通用 OpenAI-compatible provider 不会收到这些 OpenRouter 专属字段。旧版全局字段仅在 profile 只有一个 Chat 模型时安全迁移；多模型 profile 不会迁移全局上游限制。
 
 每日流程会在同步项目上下文后，按输入哈希增量生成完整的项目 Chat 摘要；只有项目资料或模型配置发生变化时才会再次请求模型。论文 Reader Chat 可由用户逐篇选择是否注入项目上下文；注入范围包含正式关联项目及 `pending` / `accepted` 推荐项目的完整摘要，不会另外生成短版 Chat 上下文。存在其中任意一种项目关系时开关即可用，全部不存在时开关保持禁用，后端也不会注入。`PROJECT_CHAT_PROFILE_*` 可指定该步骤使用的 provider 和模型；留空时会回退到默认 `LLM_CHAT_*`，未配置可用模型时该步骤只会跳过，不会阻断论文抓取和匹配。
 

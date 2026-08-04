@@ -9,7 +9,7 @@ import { RefreshButton } from "./RefreshButton.jsx";
 import { useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
 import { api, chooseLocalPath, postJson } from "../lib/dashboard.js";
 import { friendlyObsidianMessage, obsidianCapabilityFrom } from "../lib/obsidianCapability.js";
-import { normalizeProviders, providerPayload } from "../lib/settingsProviders.js";
+import { normalizeProviders, OPENROUTER_BASE_URL, providerPayload, providerType } from "../lib/settingsProviders.js";
 import { dailyStepLabel, formatApiError } from "../lib/systemMessages.js";
 import "../styles/ControlView.css";
 
@@ -379,13 +379,14 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
     };
   }
 
-  function nextProviderId(currentProviders) {
+  function nextProviderId(currentProviders, baseId = "provider") {
     const existing = new Set(currentProviders.map((provider) => provider.id).filter(Boolean));
-    let index = currentProviders.length + 1;
-    let id = `provider_${index}`;
+    if (!existing.has(baseId)) return baseId;
+    let index = 2;
+    let id = `${baseId}_${index}`;
     while (existing.has(id)) {
       index += 1;
-      id = `provider_${index}`;
+      id = `${baseId}_${index}`;
     }
     return id;
   }
@@ -511,11 +512,27 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
     });
   }
 
-  function addProvider() {
+  function addProvider(preset = "generic") {
+    const isOpenRouter = preset === "openrouter";
+    if (isOpenRouter && providers.some((provider) => providerType(provider) === "openrouter")) return;
     queueAutosave({
       delay: QUICK_SAVE_DELAY_MS
     });
-    setProviders((current) => [...current, { id: nextProviderId(current), name: "", base_url: "", api_key: "", chat_models: "", embedding_models: "", clear_api_key: false }]);
+    setProviders((current) => {
+      if (isOpenRouter && current.some((provider) => providerType(provider) === "openrouter")) return current;
+      return [...current, {
+        id: nextProviderId(current, isOpenRouter ? "openrouter" : "provider"),
+        name: isOpenRouter ? "OpenRouter" : "",
+        base_url: isOpenRouter ? OPENROUTER_BASE_URL : "",
+        api_key: "",
+        api_key_configured: false,
+        chat_models: "",
+        embedding_models: "",
+        provider_type: isOpenRouter ? "openrouter" : "openai_compatible",
+        openrouter_model_policies: {},
+        clear_api_key: false
+      }];
+    });
   }
 
   function removeProvider(index) {
@@ -523,8 +540,7 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
       delay: QUICK_SAVE_DELAY_MS
     });
     setProviders((current) => {
-      const next = current.filter((_, providerIndex) => providerIndex !== index);
-      return next.length ? next : [{ id: "default", name: "Default", base_url: "", api_key: "", chat_models: "", embedding_models: "", clear_api_key: false }];
+      return current.filter((_, providerIndex) => providerIndex !== index);
     });
   }
 

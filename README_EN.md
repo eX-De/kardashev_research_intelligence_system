@@ -182,9 +182,9 @@ Vite proxies `/api` to `http://localhost:3000`. In production mode, `npm start` 
 
 - Home: daily-pipeline state, project/paper/artifact/knowledge-context metrics, notifications, and recent updates.
 - Papers:
-  - Inbox: inspect recommended papers, evidence, and project judgments; save or discard papers and trigger full-paper reports. The detail header can open the corresponding Paper Library entry or Chat directly.
+  - Inbox: inspect recommended papers, evidence, and project judgments; save or discard papers and trigger full-paper reports. Saving can add any existing project beyond the recommended set, and the detail header can open the corresponding Paper Library entry or Chat directly.
   - Paper Library: filter, search, and maintain papers; switch among Project Overview, Paper Report, and Metadata; manage project associations, sources, PDFs, and report state. Links from Inbox, unified search, or external deep links automatically locate the target's list page, and manual pagination immediately loads the first paper on the new page.
-  - Chat: browse paper reports and user questions by paper and continue a conversation using full text, reference papers, and project context.
+  - Chat: browse paper reports and user questions by paper and continue a conversation using full text, reference papers, and project context. Messages reveal as they enter the scroll area, while very long replies and streamed messages remain visible after becoming persisted records.
 - Projects: project list, project creation, notifications, and project statistics.
 - Project details: edit keywords and Obsidian paths, associate papers and notes, and inspect candidate papers, experiment progress, and project artifacts.
 - Artifacts: filter artifacts by type, scope, and state; read Markdown and source data; export to Obsidian. Unified-search and deep-link navigation synchronizes the list to the target page.
@@ -272,7 +272,7 @@ arXiv and RAG settings:
 - `RAG_PREFILTER_*`: abstract prefilter threshold, top-k, minimum fallback count, and upper limit.
 - Vector retrieval uses PostgreSQL/pgvector by default and does not require a separate backend setting.
 
-LLM providers use OpenAI-compatible APIs. Configure them in the dashboard or initialize defaults in `.env`:
+LLM providers support generic OpenAI-compatible APIs and treat OpenRouter as a separate, officially supported provider. The dashboard’s Models & routing page has distinct workspaces for OpenRouter and OpenAI-compatible APIs. OpenRouter reasoning effort, allowed upstream providers, and price/throughput/latency sorting are configured independently for each Chat model. Defaults can also be initialized through `.env`:
 
 ```env
 LLM_PROVIDERS_JSON=[{"id":"provider-id","name":"Provider Name","base_url":"https://example.com/v1","api_key":"replace-me","chat_models":["chat-model-name"],"embedding_models":["embedding-model-name"]}]
@@ -287,6 +287,14 @@ PROJECT_CHAT_PROFILE_MODEL=chat-model-name
 READER_CHAT_PROVIDER_ID=provider-id
 READER_CHAT_MODEL=chat-model-name
 ```
+
+An OpenRouter profile uses `provider_type: "openrouter"` in `LLM_PROVIDERS_JSON`. `openrouter_model_policies` is keyed by model ID. Leave `reasoning_effort` empty to use that model’s default, use `provider_only` to restrict upstream providers for that model only, and set `provider_sort` to `price`, `throughput`, or `latency`:
+
+```env
+LLM_PROVIDERS_JSON=[{"id":"openrouter","name":"OpenRouter","provider_type":"openrouter","base_url":"https://openrouter.ai/api/v1","api_key":"replace-me","chat_models":["deepseek/deepseek-chat","openai/gpt-5"],"embedding_models":[],"openrouter_model_policies":{"deepseek/deepseek-chat":{"reasoning_effort":"high","provider_only":["deepinfra"],"provider_sort":"price"},"openai/gpt-5":{"reasoning_effort":"medium","provider_only":["openai"],"provider_sort":"throughput"}}}]
+```
+
+OpenRouter policies belong to individual models, not to the whole provider profile. GPT, Claude, Gemini, and DeepSeek entries in a mixed catalog resolve their own policies and never inherit another model’s `provider.only`. Generic OpenAI-compatible providers never receive these OpenRouter-specific fields. Legacy global fields migrate only when a profile has exactly one Chat model; a mixed catalog does not inherit a global upstream restriction.
 
 After synchronizing project context, the daily pipeline incrementally generates a complete project Chat profile based on an input hash. It calls the model again only when project content or model configuration changes. For each paper, users can choose whether Reader Chat injects project context. The injected set includes formally associated projects and the complete profiles of `pending` or `accepted` project recommendations; it does not generate a separate short Chat profile. The toggle is available when any such relationship exists and remains disabled otherwise. `PROJECT_CHAT_PROFILE_*` selects a provider and model for profile generation and falls back to `LLM_CHAT_*` when empty. If no usable model exists, this stage is skipped without blocking paper fetching or matching.
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Link, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
@@ -479,38 +479,63 @@ function ChatWorkspace({
     return () => cancelAnimationFrame(frame);
   }, [jumpToBottom, latestTransientQuestionKey]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const container = messagesRef.current;
     if (!container || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches || typeof IntersectionObserver === "undefined") return undefined;
-    const messages = [...container.querySelectorAll("[data-reader-message], .reader-message")];
-    if (!messages.length) return undefined;
+    const observedMessages = new Set();
     const revealMidpoint = () => {
       const rect = container.getBoundingClientRect();
       return rect.top + rect.height / 2;
     };
-    messages.forEach((element, index) => {
-      element.style.setProperty("--reader-message-order", String(Math.min(index, 6)));
-      element.classList.add(element.getBoundingClientRect().top < revealMidpoint() ? "reveal-from-top" : "reveal-from-bottom");
-    });
-    container.classList.add("is-reveal-ready");
+    const isWithinRevealBounds = (element) => {
+      const containerRect = container.getBoundingClientRect();
+      const elementRect = element.getBoundingClientRect();
+      const verticalInset = containerRect.height * 0.05;
+      return elementRect.bottom > containerRect.top + verticalInset && elementRect.top < containerRect.bottom - verticalInset;
+    };
+    const setRevealDirection = (element, top = element.getBoundingClientRect().top) => {
+      element.classList.remove("reveal-from-top", "reveal-from-bottom");
+      element.classList.add(top < revealMidpoint() ? "reveal-from-top" : "reveal-from-bottom");
+    };
     const observer = new IntersectionObserver((entries) => {
       entries.forEach((entry) => {
-        if (!entry.isIntersecting) {
-          entry.target.classList.remove("is-scroll-visible");
-          return;
-        }
-        entry.target.classList.remove("reveal-from-top", "reveal-from-bottom");
-        entry.target.classList.add(entry.boundingClientRect.top < revealMidpoint() ? "reveal-from-top" : "reveal-from-bottom");
-        requestAnimationFrame(() => entry.target.classList.add("is-scroll-visible"));
+        if (!observedMessages.has(entry.target) || !container.contains(entry.target)) return;
+        if (entry.isIntersecting) setRevealDirection(entry.target, entry.boundingClientRect.top);
+        entry.target.classList.toggle("is-scroll-visible", entry.isIntersecting);
       });
-    }, { root: container, rootMargin: "-5% 0px -5% 0px", threshold: 0.08 });
-    messages.forEach((element) => observer.observe(element));
+    }, { root: container, rootMargin: "-5% 0px -5% 0px", threshold: 0 });
+    const currentMessages = () => [...container.children].filter((element) => element.classList.contains("reader-message"));
+    const observeMessage = (element, index) => {
+      element.style.setProperty("--reader-message-order", String(Math.min(index, 6)));
+      if (observedMessages.has(element)) return;
+      setRevealDirection(element);
+      element.classList.toggle("is-scroll-visible", isWithinRevealBounds(element));
+      element.classList.add("is-scroll-observed");
+      observedMessages.add(element);
+      observer.observe(element);
+    };
+    const syncObservedMessages = () => {
+      const messages = currentMessages();
+      const currentSet = new Set(messages);
+      observedMessages.forEach((element) => {
+        if (currentSet.has(element)) return;
+        observer.unobserve(element);
+        observedMessages.delete(element);
+        element.classList.remove("is-scroll-observed", "is-scroll-visible", "reveal-from-top", "reveal-from-bottom");
+      });
+      messages.forEach(observeMessage);
+    };
+    syncObservedMessages();
+    container.classList.add("is-reveal-ready");
+    const mutationObserver = new MutationObserver(syncObservedMessages);
+    mutationObserver.observe(container, { childList: true });
     return () => {
+      mutationObserver.disconnect();
       observer.disconnect();
       container.classList.remove("is-reveal-ready");
-      messages.forEach((element) => element.classList.remove("is-scroll-visible", "reveal-from-top", "reveal-from-bottom"));
+      observedMessages.forEach((element) => element.classList.remove("is-scroll-observed", "is-scroll-visible", "reveal-from-top", "reveal-from-bottom"));
     };
-  }, [displayedMessages.length]);
+  }, [paper?.id]);
 
   useEffect(() => {
     const container = messagesRef.current;
@@ -521,13 +546,31 @@ function ChatWorkspace({
     };
     const frame = requestAnimationFrame(syncMessageViewport);
     const resizeObserver = new ResizeObserver(syncMessageViewport);
+    const observedChildren = new Set();
+    const syncObservedChildren = () => {
+      const children = new Set(container.children);
+      observedChildren.forEach((child) => {
+        if (children.has(child)) return;
+        resizeObserver.unobserve(child);
+        observedChildren.delete(child);
+      });
+      children.forEach((child) => {
+        if (observedChildren.has(child)) return;
+        observedChildren.add(child);
+        resizeObserver.observe(child);
+      });
+      syncMessageViewport();
+    };
     resizeObserver.observe(container);
-    [...container.children].forEach((child) => resizeObserver.observe(child));
+    syncObservedChildren();
+    const mutationObserver = new MutationObserver(syncObservedChildren);
+    mutationObserver.observe(container, { childList: true });
     return () => {
       cancelAnimationFrame(frame);
+      mutationObserver.disconnect();
       resizeObserver.disconnect();
     };
-  }, [displayedMessages.length, updateMessageScroll]);
+  }, [paper?.id, updateMessageScroll]);
 
   useEffect(() => {
     if (!selectedText) return undefined;

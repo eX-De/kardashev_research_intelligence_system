@@ -227,6 +227,8 @@
       "count_other": "{{count}} providers",
       "addAria": "Add model service",
       "add": "Add",
+      "addOpenRouter": "Add OpenRouter",
+      "addCompatible": "Add compatible API",
       "unnamed": "Unnamed provider",
       "missingId": "Missing ID",
       "ready": "Ready",
@@ -235,6 +237,8 @@
       "baseUrlMissing": "Base URL not configured",
       "credentialsSaved": "Credentials saved",
       "awaitingCredentials": "Awaiting credentials",
+      "openRouterOfficial": "Official support",
+      "compatible": "Compatible API",
       "remove": "Remove"
     },
     "apiKey": {
@@ -247,12 +251,33 @@
       "title": "Connection",
       "description": "OpenAI-compatible endpoint and access credentials",
       "displayName": "Display name",
+      "providerType": "API type",
+      "types": {
+        "compatible": "Generic OpenAI-compatible",
+        "openrouter": "OpenRouter (official support)"
+      },
       "providerId": "Provider ID",
       "baseUrl": "Base URL",
       "apiKey": "API Key",
       "clearApiKey": "Clear this provider's API key when saving"
     },
     "catalog": { "title": "Model catalog", "description": "Separate multiple model identifiers with commas", "chatModels": "Chat models", "embeddingModels": "Embedding models" },
+    "openrouter": {
+      "title": "OpenRouter request policy",
+      "description": "Configure reasoning effort and upstream routing separately for each OpenRouter Chat model.",
+      "officialBadge": "Official integration",
+      "reasoningEffort": "Reasoning effort",
+      "efforts": { "default": "Use the model default" },
+      "providerSort": "Upstream sorting",
+      "sorts": {
+        "auto": "OpenRouter automatic routing",
+        "price": "Lowest price",
+        "throughput": "Highest throughput",
+        "latency": "Lowest latency"
+      },
+      "providerOnly": "Allowed upstream providers",
+      "providerOnlyHint": "Applies only to this model. Separate OpenRouter provider slugs with commas; leave blank for automatic routing."
+    },
     "defaultRoute": { "eyebrow": "Default route", "title": "Global default models", "description": "Used when a task does not have its own model assignment.", "badge": "Base route", "chatProvider": "Chat provider", "chatModel": "Chat model", "embeddingProvider": "Embedding provider", "embeddingModel": "Embedding model" },
     "taskRoutes": {
       "eyebrow": "Task routes",

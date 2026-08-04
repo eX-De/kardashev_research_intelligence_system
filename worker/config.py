@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .env import env_bool, env_value
@@ -39,6 +39,8 @@ class LLMProvider:
     api_key: str
     chat_models: list[str]
     embedding_models: list[str]
+    provider_type: str = "openai_compatible"
+    openrouter_model_policies: dict[str, dict[str, object]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -124,16 +126,29 @@ def _providers_from_env() -> list[LLMProvider]:
         provider_id = str(item.get("id", "")).strip()
         if not provider_id:
             continue
+        provider_type = normalize_provider_type(
+            str(item.get("provider_type", "")),
+            str(item.get("base_url", "")),
+        )
+        if provider_type == "openrouter" and any(provider.provider_type == "openrouter" for provider in providers):
+            raise RuntimeError("only one OpenRouter provider can be configured")
+        chat_models = [str(model) for model in item.get("chat_models", []) if str(model).strip()]
         providers.append(
             LLMProvider(
                 id=provider_id,
                 name=str(item.get("name") or provider_id),
-                base_url=normalize_provider_base_url(str(item.get("base_url", ""))),
+                base_url=OPENROUTER_BASE_URL if provider_type == "openrouter" else normalize_provider_base_url(str(item.get("base_url", ""))),
                 api_key=str(item.get("api_key", "")),
-                chat_models=[str(model) for model in item.get("chat_models", []) if str(model).strip()],
+                chat_models=chat_models,
                 embedding_models=[
                     str(model) for model in item.get("embedding_models", []) if str(model).strip()
                 ],
+                provider_type=provider_type,
+                openrouter_model_policies=(
+                    normalize_openrouter_model_policies(item.get("openrouter_model_policies"), chat_models, item)
+                    if provider_type == "openrouter"
+                    else {}
+                ),
             )
         )
     return providers
@@ -145,6 +160,60 @@ def normalize_provider_base_url(value: str) -> str:
         if base_url.endswith(suffix):
             base_url = base_url[: -len(suffix)]
     return base_url.rstrip("/")
+
+
+PROVIDER_TYPES = {"openai_compatible", "openrouter"}
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+REASONING_EFFORTS = {"", "none", "minimal", "low", "medium", "high", "xhigh", "max"}
+OPENROUTER_PROVIDER_SORTS = {"", "price", "throughput", "latency"}
+
+
+def normalize_provider_type(value: object, base_url: object = "") -> str:
+    provider_type = str(value or "").strip().lower()
+    if provider_type in PROVIDER_TYPES:
+        return provider_type
+    if "openrouter.ai" in str(base_url or "").strip().lower():
+        return "openrouter"
+    return "openai_compatible"
+
+
+def normalize_reasoning_effort(value: object) -> str:
+    effort = str(value or "").strip().lower()
+    return effort if effort in REASONING_EFFORTS else ""
+
+
+def normalize_openrouter_provider_sort(value: object) -> str:
+    provider_sort = str(value or "").strip().lower()
+    return provider_sort if provider_sort in OPENROUTER_PROVIDER_SORTS else ""
+
+
+def normalize_openrouter_model_policies(
+    value: object,
+    chat_models: list[str],
+    legacy: dict[str, object] | None = None,
+) -> dict[str, dict[str, object]]:
+    source = value if isinstance(value, dict) else {}
+    legacy = legacy or {}
+    legacy_policy = None
+    if len(chat_models) == 1 and not source:
+        legacy_policy = {
+            "reasoning_effort": legacy.get("reasoning_effort", ""),
+            "provider_only": legacy.get("openrouter_provider_only", []),
+            "provider_sort": legacy.get("openrouter_provider_sort", ""),
+        }
+    policies: dict[str, dict[str, object]] = {}
+    for model in chat_models:
+        policy = source.get(model) or legacy_policy
+        if not isinstance(policy, dict):
+            continue
+        raw_provider_only = policy.get("provider_only", [])
+        provider_only = raw_provider_only if isinstance(raw_provider_only, list) else str(raw_provider_only or "").split(",")
+        policies[model] = {
+            "reasoning_effort": normalize_reasoning_effort(policy.get("reasoning_effort", "")),
+            "provider_only": [str(provider).strip().lower() for provider in provider_only if str(provider).strip()],
+            "provider_sort": normalize_openrouter_provider_sort(policy.get("provider_sort", "")),
+        }
+    return policies
 
 
 def _bool(name: str, default: str = "false") -> bool:

@@ -6,6 +6,7 @@ import { api, fmtScore, postJson } from "../lib/dashboard.js";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
 import { WorkspacePaneLoader } from "./WorkspacePaneLoader.jsx";
+import { WorkspaceSelect } from "./WorkspaceSelect.jsx";
 import "../styles/InboxView.css";
 
 function reportStatusLabel(status, t) {
@@ -78,18 +79,19 @@ function PaperList({ papers, activePaperId, onSelect }) {
   });
 }
 
-function PaperDetail({ detail, onOpenChat, onOpenLibraryPaper, onRecommendation, onGenerateReport }) {
+function PaperDetail({ detail, onOpenChat, onOpenLibraryPaper, onRecommendation, onGenerateReport, projects = [], projectsLoading = false }) {
   const { t } = useTranslation("papers");
   const [selectedProjectIds, setSelectedProjectIds] = useState([]);
   const [importance, setImportance] = useState("");
 
   useEffect(() => {
     const recommendations = detail?.project_recommendations || [];
-    setSelectedProjectIds(
+    setSelectedProjectIds(Array.from(new Set(
       recommendations
         .filter((recommendation) => recommendation.state === "pending")
-        .map((recommendation) => recommendation.project_id)
-    );
+        .map((recommendation) => Number(recommendation.project_id))
+        .filter(Boolean)
+    )));
     setImportance("");
   }, [detail?.paper?.id, detail?.project_recommendations]);
 
@@ -105,6 +107,25 @@ function PaperDetail({ detail, onOpenChat, onOpenLibraryPaper, onRecommendation,
   const paper = detail.paper;
   const recommendations = detail.project_recommendations || [];
   const pendingRecommendations = recommendations.filter((recommendation) => recommendation.state === "pending");
+  const pendingRecommendationIds = new Set(pendingRecommendations.map((recommendation) => Number(recommendation.project_id)));
+  const selectedProjectIdSet = new Set(selectedProjectIds.map(Number));
+  const availableProjects = projects.filter((project) => !selectedProjectIdSet.has(Number(project.id)));
+  const manuallySelectedProjects = projects.filter((project) => (
+    selectedProjectIdSet.has(Number(project.id)) && !pendingRecommendationIds.has(Number(project.id))
+  ));
+  const projectSelectOptions = [
+    ["", projectsLoading
+      ? t("inbox.decision.projectsLoading")
+      : availableProjects.length
+        ? t("inbox.decision.projectPlaceholder")
+        : t("inbox.decision.allProjectsSelected")],
+    ...availableProjects.map((project) => ({
+      label: pendingRecommendationIds.has(Number(project.id))
+        ? t("inbox.decision.recommendedProject", { project: project.name })
+        : project.name,
+      value: String(project.id)
+    }))
+  ];
   const judgments = detail.project_judgments || [];
   const evidence = detail.evidence || [];
   const report = detail.paper_report || {};
@@ -119,10 +140,20 @@ function PaperDetail({ detail, onOpenChat, onOpenLibraryPaper, onRecommendation,
   const canAccept = Boolean(importance) && selectedProjectIds.length > 0 && pendingRecommendations.length > 0;
 
   function toggleProject(projectId) {
+    const numericProjectId = Number(projectId);
+    if (!numericProjectId) return;
     setSelectedProjectIds((current) => (
-      current.includes(projectId)
-        ? current.filter((id) => id !== projectId)
-        : [...current, projectId]
+      current.includes(numericProjectId)
+        ? current.filter((id) => id !== numericProjectId)
+        : [...current, numericProjectId]
+    ));
+  }
+
+  function selectProject(projectId) {
+    const numericProjectId = Number(projectId);
+    if (!numericProjectId) return;
+    setSelectedProjectIds((current) => (
+      current.includes(numericProjectId) ? current : [...current, numericProjectId]
     ));
   }
 
@@ -172,14 +203,29 @@ function PaperDetail({ detail, onOpenChat, onOpenLibraryPaper, onRecommendation,
                 </button>
               ))}
             </div>
+            <div className="inbox-project-picker">
+              <div>
+                <strong>{t("inbox.decision.projectPicker")}</strong>
+                <small>{t("inbox.decision.projectPickerHint")}</small>
+              </div>
+              <WorkspaceSelect
+                ariaLabel={t("inbox.decision.projectPickerAria")}
+                className="inbox-project-select"
+                disabled={projectsLoading || !availableProjects.length}
+                onChange={selectProject}
+                options={projectSelectOptions}
+                value=""
+              />
+            </div>
             <div className="project-checkbox-list">
               {pendingRecommendations.map((recommendation) => {
-                const selected = selectedProjectIds.includes(recommendation.project_id);
+                const projectId = Number(recommendation.project_id);
+                const selected = selectedProjectIdSet.has(projectId);
                 return (
-                <label className={`checkbox-line project-checkbox ${selected ? "selected" : ""}`} key={recommendation.project_id}>
+                <label className={`checkbox-line project-checkbox ${selected ? "selected" : ""}`} key={projectId}>
                   <input
                     checked={selected}
-                    onChange={() => toggleProject(recommendation.project_id)}
+                    onChange={() => toggleProject(projectId)}
                     type="checkbox"
                   />
                   <span className="project-checkmark" aria-hidden="true"><span>✓</span></span>
@@ -193,6 +239,16 @@ function PaperDetail({ detail, onOpenChat, onOpenLibraryPaper, onRecommendation,
                 </label>
                 );
               })}
+              {manuallySelectedProjects.map((project) => (
+                <label className="checkbox-line project-checkbox selected" key={project.id}>
+                  <input checked onChange={() => toggleProject(project.id)} type="checkbox" />
+                  <span className="project-checkmark" aria-hidden="true"><span>✓</span></span>
+                  <span className="project-checkbox-copy">
+                    <strong>{project.name}</strong>
+                    <small><span>{t("inbox.decision.manualProject")}</span></small>
+                  </span>
+                </label>
+              ))}
             </div>
             <div className="detail-actions inbox-primary-actions">
               <button className="primary" disabled={!canAccept} onClick={() => onRecommendation({ action: "accept", importance, project_ids: selectedProjectIds })} type="button">{t("inbox.actions.save")}</button>
@@ -302,7 +358,9 @@ export function InboxView({ notify = () => {}, onOpenChat, onOpenLibraryPaper, o
   const [activePaperId, setActivePaperId] = useState(null);
 
   const inboxQuery = useCachedApi(["inbox"], () => api("/api/inbox"), { staleTime: 30000 });
+  const projectsQuery = useCachedApi(["projects"], () => api("/api/projects"), { staleTime: 60000 });
   const papers = inboxQuery.data?.items || [];
+  const projects = projectsQuery.data?.items || [];
   const detailQuery = useCachedApi(
     ["paper", "detail", String(activePaperId || "")],
     () => api(`/api/papers/${activePaperId}`),
@@ -317,7 +375,7 @@ export function InboxView({ notify = () => {}, onOpenChat, onOpenLibraryPaper, o
     detailQuery.hasData && !detailMatchesActivePaper
   );
   const detailPanelLoading = inboxLoading || detailLoading;
-  const refreshBusy = inboxQuery.loading || inboxQuery.refreshing || detailQuery.refreshing;
+  const refreshBusy = inboxQuery.loading || inboxQuery.refreshing || detailQuery.refreshing || projectsQuery.refreshing;
   const reportReadyCount = papers.filter((paper) => paper.report_status === "done").length;
   const linkedProjectCount = new Set(papers.flatMap((paper) => (
     Array.isArray(paper.project_names) ? paper.project_names : [paper.project_name]
@@ -338,13 +396,14 @@ export function InboxView({ notify = () => {}, onOpenChat, onOpenLibraryPaper, o
   }, [activePaperId, inboxQuery.hasData, onSelectPaper, papers, selectedPaperId]);
 
   useEffect(() => {
-    const error = inboxQuery.error || detailQuery.error;
+    const error = inboxQuery.error || detailQuery.error || projectsQuery.error;
     if (error) setStatusMessage(error.message);
-  }, [detailQuery.error, inboxQuery.error, setStatusMessage]);
+  }, [detailQuery.error, inboxQuery.error, projectsQuery.error, setStatusMessage]);
 
   async function refresh() {
     await Promise.all([
       inboxQuery.refresh({ force: true }),
+      projectsQuery.refresh({ force: true }),
       activePaperId ? detailQuery.refresh({ force: true }) : Promise.resolve()
     ]);
   }
@@ -360,6 +419,9 @@ export function InboxView({ notify = () => {}, onOpenChat, onOpenLibraryPaper, o
       }));
       cache.markStale(["library", "list"]);
       cache.markStale(["projects"]);
+      for (const projectId of payload.project_ids || []) {
+        cache.markStale(["project", String(projectId)]);
+      }
       cache.markStale(cacheNamespace("artifact"));
       const successMessage = payload.action === "discard" ? t("inbox.status.discarded") : t("inbox.status.saved");
       setStatusMessage(successMessage);
@@ -469,7 +531,15 @@ export function InboxView({ notify = () => {}, onOpenChat, onOpenLibraryPaper, o
           />
         ) : (
           <div className="inbox-detail-transition" key={detail?.paper?.id || "empty"}>
-            <PaperDetail detail={detail} onGenerateReport={generateReport} onOpenChat={onOpenChat} onOpenLibraryPaper={onOpenLibraryPaper} onRecommendation={updateRecommendation} />
+            <PaperDetail
+              detail={detail}
+              onGenerateReport={generateReport}
+              onOpenChat={onOpenChat}
+              onOpenLibraryPaper={onOpenLibraryPaper}
+              onRecommendation={updateRecommendation}
+              projects={projects}
+              projectsLoading={!projectsQuery.hasData}
+            />
           </div>
         )}
         </section>

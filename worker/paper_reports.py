@@ -8,6 +8,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from .chat_requests import build_chat_payload
 from .arxiv_text import (
     chunk_text,
     download_pdf,
@@ -640,11 +641,14 @@ def _call_chat_text(
     provider = settings.provider(provider_id)
     if not provider or not provider.api_key or not provider.base_url or not model:
         raise RuntimeError(f"{purpose} provider is not fully configured")
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": 0.1,
-    }
+    payload = build_chat_payload(
+        provider,
+        {
+            "model": model,
+            "messages": messages,
+            "temperature": 0.1,
+        },
+    )
     if response_format:
         payload["response_format"] = response_format
     request = urllib.request.Request(
@@ -685,12 +689,15 @@ def _iter_chat_text_chunks(
     provider = settings.provider(provider_id)
     if not provider or not provider.api_key or not provider.base_url or not model:
         raise RuntimeError(f"{purpose} provider is not fully configured")
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": 0.1,
-        "stream": True,
-    }
+    payload = build_chat_payload(
+        provider,
+        {
+            "model": model,
+            "messages": messages,
+            "temperature": 0.1,
+            "stream": True,
+        },
+    )
     if response_format:
         payload["response_format"] = response_format
     request = urllib.request.Request(

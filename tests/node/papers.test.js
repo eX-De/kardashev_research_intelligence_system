@@ -4,6 +4,7 @@ import test from "node:test";
 import { setPoolForTesting } from "../../server/db.js";
 import { DEFAULT_PAPER_READER_PROMPTS } from "../../server/settings.js";
 import {
+  acceptRecommendationsForPaper,
   ensurePaperReportsForRecommendations,
   savePaperFeedback,
   syncProjectPaperRecommendations,
@@ -103,6 +104,11 @@ function createPapersFake(initialSettings = {}) {
     }
   ];
   const projectPapers = [];
+  const researchProjects = [
+    { id: "7", name: "Accepted Project" },
+    { id: "8", name: "Recommended Project" },
+    { id: "9", name: "Manual Project" }
+  ];
   const calls = [];
   const appSettings = new Map(Object.entries(initialSettings));
 
@@ -295,6 +301,31 @@ function createPapersFake(initialSettings = {}) {
           })
       };
     }
+    if (normalized.startsWith("SELECT ID FROM RESEARCH_PROJECTS WHERE ID = ANY")) {
+      const selectedIds = Array.isArray(params[0]) ? params[0].map(Number) : [];
+      return { rows: researchProjects.filter((row) => selectedIds.includes(Number(row.id))) };
+    }
+    if (normalized.startsWith("INSERT INTO PROJECT_PAPER_RECOMMENDATIONS") && normalized.includes("FROM UNNEST($4::BIGINT[])")) {
+      const selectedIds = Array.isArray(params[3]) ? params[3].map(Number) : [];
+      for (const projectId of selectedIds) {
+        let rec = recommendations.find((row) => Number(row.project_id) === projectId && Number(row.paper_id) === Number(params[0]));
+        if (!rec) {
+          rec = {
+            project_id: String(projectId),
+            paper_id: String(params[0]),
+            relation_type: "possible",
+            reason: "",
+            source_judgment_hash: "",
+            created_at: params[2]
+          };
+          recommendations.push(rec);
+        }
+        rec.state = "accepted";
+        rec.importance = params[1];
+        rec.updated_at = params[2];
+      }
+      return { rows: [], rowCount: selectedIds.length };
+    }
     if (normalized.startsWith("INSERT INTO PROJECT_PAPER_RECOMMENDATIONS")) {
       let rec = recommendations.find((row) => Number(row.project_id) === Number(params[0]) && Number(row.paper_id) === Number(params[1]));
       if (!rec) {
@@ -356,9 +387,9 @@ function createPapersFake(initialSettings = {}) {
         project_id: String(params[0]),
         paper_id: String(params[1]),
         relation: "reading",
-        note: "accepted_from_recommendation",
-        created_at: params[2],
-        updated_at: params[2]
+        note: params[2],
+        created_at: params[3],
+        updated_at: params[3]
       });
       return { rows: [], rowCount: 1 };
     }
@@ -411,6 +442,7 @@ function createPapersFake(initialSettings = {}) {
     judgments,
     recommendations,
     projectPapers,
+    researchProjects,
     calls,
     txCalls,
     pool: {
@@ -496,6 +528,46 @@ test("ensurePaperReportsForRecommendations creates queued report artifacts", asy
   } finally {
     setPoolForTesting(null);
   }
+});
+
+test("acceptRecommendationsForPaper links both recommended and manually selected projects", async () => {
+  const fake = createPapersFake();
+  fake.recommendations.push({
+    project_id: "8",
+    paper_id: "201",
+    source_arxiv_paper_id: "101",
+    state: "pending",
+    importance: "",
+    relation_type: "indirect",
+    reason: "New reason",
+    source_judgment_hash: "hash-new",
+    created_at: T0,
+    updated_at: T0
+  });
+
+  await acceptRecommendationsForPaper(fake.pool, 201, [8, 9], "medium");
+
+  const recommended = fake.recommendations.find((row) => row.project_id === "8");
+  const manual = fake.recommendations.find((row) => row.project_id === "9");
+  assert.equal(recommended.state, "accepted");
+  assert.equal(recommended.importance, "medium");
+  assert.equal(recommended.reason, "New reason");
+  assert.equal(manual.state, "accepted");
+  assert.equal(manual.importance, "medium");
+  assert.equal(manual.relation_type, "possible");
+  assert.deepEqual(fake.projectPapers.map((row) => [row.project_id, row.note]), [
+    ["8", "accepted_from_recommendation"],
+    ["9", "accepted_from_inbox_manual_selection"]
+  ]);
+});
+
+test("acceptRecommendationsForPaper rejects project ids that do not exist", async () => {
+  const fake = createPapersFake();
+  await assert.rejects(
+    acceptRecommendationsForPaper(fake.pool, 201, [99], "medium"),
+    /Project not found: 99/
+  );
+  assert.equal(fake.projectPapers.length, 0);
 });
 
 test("updatePaperRecommendation discards pending recommendations and updates library status in Node", async () => {

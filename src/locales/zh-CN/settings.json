@@ -227,6 +227,8 @@
       "count_other": "{{count}} 个 Provider",
       "addAria": "添加模型服务",
       "add": "添加",
+      "addOpenRouter": "添加 OpenRouter",
+      "addCompatible": "添加兼容接口",
       "unnamed": "未命名 Provider",
       "missingId": "缺少 ID",
       "ready": "就绪",
@@ -235,6 +237,8 @@
       "baseUrlMissing": "Base URL 未配置",
       "credentialsSaved": "凭据已保存",
       "awaitingCredentials": "等待凭据",
+      "openRouterOfficial": "官方支持",
+      "compatible": "兼容接口",
       "remove": "移除"
     },
     "apiKey": {
@@ -247,12 +251,33 @@
       "title": "连接信息",
       "description": "OpenAI 兼容接口地址与访问凭据",
       "displayName": "显示名称",
+      "providerType": "接口类型",
+      "types": {
+        "compatible": "通用 OpenAI-compatible",
+        "openrouter": "OpenRouter（官方支持）"
+      },
       "providerId": "Provider ID",
       "baseUrl": "基础 URL",
       "apiKey": "API Key",
       "clearApiKey": "保存时清除这个 Provider 的 API Key"
     },
     "catalog": { "title": "模型目录", "description": "使用英文逗号分隔多个模型标识", "chatModels": "Chat 模型", "embeddingModels": "Embedding 模型" },
+    "openrouter": {
+      "title": "OpenRouter 请求策略",
+      "description": "为每个 OpenRouter Chat 模型分别配置推理强度和上游路由。",
+      "officialBadge": "官方集成",
+      "reasoningEffort": "Reasoning effort",
+      "efforts": { "default": "使用模型默认值" },
+      "providerSort": "上游排序",
+      "sorts": {
+        "auto": "OpenRouter 自动路由",
+        "price": "价格优先",
+        "throughput": "吞吐量优先",
+        "latency": "延迟优先"
+      },
+      "providerOnly": "允许的上游 Provider",
+      "providerOnlyHint": "仅作用于当前模型。使用英文逗号分隔 OpenRouter provider slug；留空允许自动路由。"
+    },
     "defaultRoute": { "eyebrow": "默认路由", "title": "全局默认模型", "description": "未单独指定任务模型时使用这组配置。", "badge": "基础路由", "chatProvider": "Chat Provider", "chatModel": "Chat 模型", "embeddingProvider": "Embedding Provider", "embeddingModel": "Embedding 模型" },
     "taskRoutes": {
       "eyebrow": "任务路由",

@@ -223,6 +223,40 @@
   background: linear-gradient(135deg, #687dd2, #8b69c8);
 }
 
+.vision-inbox .inbox-project-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 0.8fr);
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 14px;
+  padding: 12px 13px;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 16px;
+  background: rgba(7, 8, 22, 0.16);
+}
+
+.vision-inbox .inbox-project-picker > div:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.vision-inbox .inbox-project-picker strong {
+  color: var(--vision-ink);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.vision-inbox .inbox-project-picker small {
+  color: var(--vision-muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.vision-inbox .inbox-project-select {
+  width: 100%;
+}
+
 .vision-inbox .project-checkbox-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -570,6 +604,11 @@
     padding-inline: 8px;
   }
 
+  .vision-inbox .inbox-project-picker {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
   .vision-inbox .project-checkbox-list {
     grid-template-columns: 1fr;
   }
@@ -607,6 +646,14 @@
 :root[data-theme="light"] .vision-inbox .inbox-decision-card {
   background: linear-gradient(135deg, rgba(232, 228, 249, 0.82), rgba(255, 255, 255, 0.72));
 }
+
+:root[data-theme="light"] .vision-inbox .inbox-project-picker {
+  border-color: rgba(48, 57, 84, 0.08);
+  background: rgba(255, 255, 255, 0.5);
+}
+
+:root[data-theme="light"] .vision-inbox .inbox-project-picker strong { color: #222c46; }
+:root[data-theme="light"] .vision-inbox .inbox-project-picker small { color: #69738a; }
 
 :root[data-theme="light"] .vision-inbox .project-checkbox,
 :root[data-theme="light"] .vision-inbox .paper-report {

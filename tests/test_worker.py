@@ -3193,6 +3193,14 @@ class WorkerTests(unittest.TestCase):
                         "api_key": "secret",
                         "chat_models": ["qwen-plus"],
                         "embedding_models": ["text-embedding-v4"],
+                        "provider_type": "openrouter",
+                        "openrouter_model_policies": {
+                            "qwen-plus": {
+                                "reasoning_effort": "high",
+                                "provider_only": ["Alibaba", "DeepSeek"],
+                                "provider_sort": "latency",
+                            }
+                        },
                     }
                 ],
                 "llm_chat_provider_id": "qwen",
@@ -3206,6 +3214,15 @@ class WorkerTests(unittest.TestCase):
         payload = get_app_settings(conn, applied)["settings"]
         self.assertNotIn("api_key", payload["llm_providers"][0])
         self.assertTrue(payload["llm_providers"][0]["api_key_configured"])
+        self.assertEqual(payload["llm_providers"][0]["provider_type"], "openrouter")
+        self.assertEqual(
+            payload["llm_providers"][0]["openrouter_model_policies"]["qwen-plus"],
+            {
+                "reasoning_effort": "high",
+                "provider_only": ["alibaba", "deepseek"],
+                "provider_sort": "latency",
+            },
+        )
 
         save_app_settings(
             conn,
@@ -3223,6 +3240,20 @@ class WorkerTests(unittest.TestCase):
         )
         applied = apply_stored_settings(conn, test_settings())
         self.assertEqual(applied.chat_provider().api_key, "secret")
+
+    def test_llm_provider_settings_reject_multiple_openrouter_instances(self) -> None:
+        conn = connect_test_db()
+        init_db(conn)
+        with self.assertRaisesRegex(RuntimeError, "only one OpenRouter provider"):
+            save_app_settings(
+                conn,
+                {
+                    "llm_providers": [
+                        {"id": "openrouter", "provider_type": "openrouter"},
+                        {"id": "openrouter-backup", "provider_type": "openrouter"},
+                    ]
+                },
+            )
 
     def test_run_daily_startup_mode_is_mutually_exclusive_with_scheduler(self) -> None:
         conn = connect_test_db()

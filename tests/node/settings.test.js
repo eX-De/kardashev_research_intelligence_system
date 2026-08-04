@@ -167,7 +167,9 @@ test("getAppSettings hides secrets and preserves settings response shape", async
         base_url: "https://api.openai.com/v1",
         api_key_configured: true,
         chat_models: ["gpt-4.1"],
-        embedding_models: ["text-embedding-3-small"]
+        embedding_models: ["text-embedding-3-small"],
+        provider_type: "openai_compatible",
+        openrouter_model_policies: {}
       }]);
     } finally {
       setPoolForTesting(null);
@@ -287,6 +289,40 @@ test("normalizeSettingsPayload matches csv tags, validation, and provider URL ru
   assert.equal(normalizeProviderBaseUrl("https://example.test/v1/chat/completions/"), "https://example.test/v1");
   assert.deepEqual(
     normalizeSettingsPayload({
+      llm_providers: [{
+        id: "openrouter",
+        name: "OpenRouter",
+        base_url: "https://openrouter.ai/api/v1/chat/completions",
+        provider_type: "openrouter",
+        chat_models: ["deepseek/deepseek-chat"],
+        openrouter_model_policies: {
+          "deepseek/deepseek-chat": {
+            reasoning_effort: "HIGH",
+            provider_only: "DeepInfra, Fireworks",
+            provider_sort: "price"
+          }
+        }
+      }]
+    }).llm_providers[0],
+    {
+      id: "openrouter",
+      name: "OpenRouter",
+      base_url: "https://openrouter.ai/api/v1",
+      api_key: "",
+      chat_models: ["deepseek/deepseek-chat"],
+      embedding_models: [],
+      provider_type: "openrouter",
+      openrouter_model_policies: {
+        "deepseek/deepseek-chat": {
+          reasoning_effort: "high",
+          provider_only: ["deepinfra", "fireworks"],
+          provider_sort: "price"
+        }
+      }
+    }
+  );
+  assert.deepEqual(
+    normalizeSettingsPayload({
       obsidian_include_tags: "#AI, #Paper",
       unknown_configured: true,
       scheduler_run_time: "09:30"
@@ -320,6 +356,47 @@ test("normalizeSettingsPayload matches csv tags, validation, and provider URL ru
     () => normalizeSettingsPayload({ paper_reader_prompt_locale: "fr" }),
     ValidationError
   );
+  assert.throws(
+    () => normalizeSettingsPayload({
+      llm_providers: [
+        { id: "openrouter", provider_type: "openrouter" },
+        { id: "openrouter-backup", provider_type: "openrouter" }
+      ]
+    }),
+    ValidationError
+  );
+});
+
+test("legacy OpenRouter policy migrates only for a single-model catalog", () => {
+  const single = normalizeSettingsPayload({
+    llm_providers: [{
+      id: "openrouter",
+      provider_type: "openrouter",
+      chat_models: ["deepseek/deepseek-chat"],
+      reasoning_effort: "high",
+      openrouter_provider_only: ["DeepInfra"],
+      openrouter_provider_sort: "price"
+    }]
+  }).llm_providers[0];
+  assert.deepEqual(single.openrouter_model_policies, {
+    "deepseek/deepseek-chat": {
+      reasoning_effort: "high",
+      provider_only: ["deepinfra"],
+      provider_sort: "price"
+    }
+  });
+
+  const mixed = normalizeSettingsPayload({
+    llm_providers: [{
+      id: "openrouter",
+      provider_type: "openrouter",
+      chat_models: ["deepseek/deepseek-chat", "openai/gpt-5"],
+      reasoning_effort: "high",
+      openrouter_provider_only: ["DeepInfra"],
+      openrouter_provider_sort: "price"
+    }]
+  }).llm_providers[0];
+  assert.deepEqual(mixed.openrouter_model_policies, {});
 });
 
 test("paper reading prompt mode resolves localized defaults without overwriting custom text", () => {

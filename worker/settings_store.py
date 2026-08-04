@@ -5,7 +5,14 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from .config import LLMProvider, Settings, normalize_provider_base_url
+from .config import (
+    LLMProvider,
+    Settings,
+    OPENROUTER_BASE_URL,
+    normalize_openrouter_model_policies,
+    normalize_provider_base_url,
+    normalize_provider_type,
+)
 from .db import from_json, to_json, utc_now
 from .env import env_value
 from .paper_prompts import (
@@ -138,6 +145,8 @@ def _provider_to_payload(provider: LLMProvider) -> dict[str, Any]:
         "api_key_configured": bool(provider.api_key),
         "chat_models": provider.chat_models,
         "embedding_models": provider.embedding_models,
+        "provider_type": provider.provider_type,
+        "openrouter_model_policies": provider.openrouter_model_policies,
     }
 
 
@@ -149,6 +158,8 @@ def _provider_to_store(provider: LLMProvider) -> dict[str, Any]:
         "api_key": provider.api_key,
         "chat_models": provider.chat_models,
         "embedding_models": provider.embedding_models,
+        "provider_type": provider.provider_type,
+        "openrouter_model_policies": provider.openrouter_model_policies,
     }
 
 
@@ -167,14 +178,27 @@ def _providers_from_value(value: Any, existing: dict[str, LLMProvider] | None = 
             api_key = ""
         elif not api_key and previous:
             api_key = previous.api_key
+        provider_type = normalize_provider_type(
+            item.get("provider_type", ""),
+            item.get("base_url", ""),
+        )
+        if provider_type == "openrouter" and any(provider.provider_type == "openrouter" for provider in providers):
+            raise RuntimeError("only one OpenRouter provider can be configured")
+        chat_models = _csv(item.get("chat_models", []))
         providers.append(
             LLMProvider(
                 id=provider_id,
                 name=str(item.get("name") or provider_id).strip(),
-                base_url=normalize_provider_base_url(str(item.get("base_url", ""))),
+                base_url=OPENROUTER_BASE_URL if provider_type == "openrouter" else normalize_provider_base_url(str(item.get("base_url", ""))),
                 api_key=api_key,
-                chat_models=_csv(item.get("chat_models", [])),
+                chat_models=chat_models,
                 embedding_models=_csv(item.get("embedding_models", [])),
+                provider_type=provider_type,
+                openrouter_model_policies=(
+                    normalize_openrouter_model_policies(item.get("openrouter_model_policies"), chat_models, item)
+                    if provider_type == "openrouter"
+                    else {}
+                ),
             )
         )
     return providers

@@ -339,6 +339,52 @@ export function normalizeProviderBaseUrl(value) {
   return baseUrl.replace(/\/+$/, "");
 }
 
+export const PROVIDER_TYPES = new Set(["openai_compatible", "openrouter"]);
+export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+export const REASONING_EFFORTS = new Set(["", "none", "minimal", "low", "medium", "high", "xhigh", "max"]);
+export const OPENROUTER_PROVIDER_SORTS = new Set(["", "price", "throughput", "latency"]);
+
+export function normalizeProviderType(value, baseUrl = "") {
+  const providerType = String(value || "").trim().toLowerCase();
+  if (PROVIDER_TYPES.has(providerType)) return providerType;
+  return String(baseUrl || "").trim().toLowerCase().includes("openrouter.ai")
+    ? "openrouter"
+    : "openai_compatible";
+}
+
+export function normalizeReasoningEffort(value) {
+  const effort = String(value || "").trim().toLowerCase();
+  return REASONING_EFFORTS.has(effort) ? effort : "";
+}
+
+export function normalizeOpenRouterProviderSort(value) {
+  const providerSort = String(value || "").trim().toLowerCase();
+  return OPENROUTER_PROVIDER_SORTS.has(providerSort) ? providerSort : "";
+}
+
+export function normalizeOpenRouterModelPolicies(value, chatModels = [], legacy = {}) {
+  const models = csvValue(chatModels);
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const legacyPolicy = models.length === 1 && !Object.keys(source).length
+    ? {
+        reasoning_effort: legacy.reasoning_effort,
+        provider_only: legacy.openrouter_provider_only,
+        provider_sort: legacy.openrouter_provider_sort
+      }
+    : null;
+  const policies = {};
+  for (const model of models) {
+    const policy = source[model] || legacyPolicy;
+    if (!policy || typeof policy !== "object" || Array.isArray(policy)) continue;
+    policies[model] = {
+      reasoning_effort: normalizeReasoningEffort(policy.reasoning_effort),
+      provider_only: csvValue(policy.provider_only || []).map((provider) => provider.toLowerCase()),
+      provider_sort: normalizeOpenRouterProviderSort(policy.provider_sort)
+    };
+  }
+  return policies;
+}
+
 function providerToPayload(provider) {
   return {
     id: provider.id,
@@ -346,7 +392,9 @@ function providerToPayload(provider) {
     base_url: provider.base_url,
     api_key_configured: Boolean(provider.api_key),
     chat_models: provider.chat_models,
-    embedding_models: provider.embedding_models
+    embedding_models: provider.embedding_models,
+    provider_type: provider.provider_type,
+    openrouter_model_policies: provider.openrouter_model_policies
   };
 }
 
@@ -357,7 +405,9 @@ function providerToStore(provider) {
     base_url: provider.base_url,
     api_key: provider.api_key,
     chat_models: provider.chat_models,
-    embedding_models: provider.embedding_models
+    embedding_models: provider.embedding_models,
+    provider_type: provider.provider_type,
+    openrouter_model_policies: provider.openrouter_model_policies
   };
 }
 
@@ -374,13 +424,22 @@ export function providersFromValue(value, existing = new Map()) {
     } else if (!apiKey && previous) {
       apiKey = previous.api_key;
     }
+    const providerType = normalizeProviderType(item.provider_type, item.base_url);
+    if (providerType === "openrouter" && providers.some((provider) => provider.provider_type === "openrouter")) {
+      throw new ValidationError("Only one OpenRouter provider can be configured");
+    }
+    const chatModels = csvValue(item.chat_models || []);
     providers.push({
       id: providerId,
       name: stringOrEmpty(item.name) || providerId,
-      base_url: normalizeProviderBaseUrl(item.base_url),
+      base_url: providerType === "openrouter" ? OPENROUTER_BASE_URL : normalizeProviderBaseUrl(item.base_url),
       api_key: apiKey,
-      chat_models: csvValue(item.chat_models || []),
-      embedding_models: csvValue(item.embedding_models || [])
+      chat_models: chatModels,
+      embedding_models: csvValue(item.embedding_models || []),
+      provider_type: providerType,
+      openrouter_model_policies: providerType === "openrouter"
+        ? normalizeOpenRouterModelPolicies(item.openrouter_model_policies, chatModels, item)
+        : {}
     });
   }
   return providers;

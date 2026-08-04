@@ -219,11 +219,18 @@ async function setPaperLibraryStatus(db, paperId, status) {
   return { ok: true, paper_id: Number(paperId), library_status: status, reading_state: readingState };
 }
 
-async function acceptRecommendationsForPaper(db, paperId, projectIds, importance) {
+export async function acceptRecommendationsForPaper(db, paperId, projectIds, importance) {
   if (!VALID_IMPORTANCE.has(importance)) throw new ValidationError("importance must be high, medium, or low");
   const selectedIds = parseIntegerList(projectIds);
   if (!selectedIds.length) throw new ValidationError("At least one project must be selected");
   await canonicalPaper(db, paperId);
+  const projects = await db.query(
+    "SELECT id FROM research_projects WHERE id = ANY($1::bigint[])",
+    [selectedIds]
+  );
+  const projectIdSet = new Set((projects.rows || []).map((row) => Number(row.id)));
+  const missingProjectIds = selectedIds.filter((projectId) => !projectIdSet.has(projectId));
+  if (missingProjectIds.length) throw new ValidationError(`Project not found: ${missingProjectIds.join(", ")}`);
   const found = await db.query(
     `
       SELECT project_id
@@ -234,20 +241,22 @@ async function acceptRecommendationsForPaper(db, paperId, projectIds, importance
     `,
     [Number(paperId), selectedIds]
   );
-  const foundIds = new Set((found.rows || []).map((row) => Number(row.project_id)));
-  const missing = selectedIds.filter((projectId) => !foundIds.has(projectId));
-  if (missing.length) throw new ValidationError(`Recommendation not found for project(s): ${missing.join(", ")}`);
+  const recommendedIds = new Set((found.rows || []).map((row) => Number(row.project_id)));
   const now = nowIso();
   await db.query(
     `
-      UPDATE project_paper_recommendations
-      SET state = 'accepted',
-          importance = $1,
-          updated_at = $2
-      WHERE paper_id = $3
-        AND project_id = ANY($4::bigint[])
+      INSERT INTO project_paper_recommendations(
+        project_id, paper_id, state, importance, relation_type, reason,
+        source_judgment_hash, created_at, updated_at
+      )
+      SELECT selected.project_id, $1, 'accepted', $2, 'possible', '', '', $3, $3
+      FROM unnest($4::bigint[]) AS selected(project_id)
+      ON CONFLICT(project_id, paper_id) DO UPDATE SET
+        state = excluded.state,
+        importance = excluded.importance,
+        updated_at = excluded.updated_at
     `,
-    [importance, now, Number(paperId), selectedIds]
+    [Number(paperId), importance, now, selectedIds]
   );
   await db.query(
     `
@@ -261,10 +270,13 @@ async function acceptRecommendationsForPaper(db, paperId, projectIds, importance
     [now, Number(paperId), selectedIds]
   );
   for (const projectId of selectedIds) {
+    const linkNote = recommendedIds.has(projectId)
+      ? "accepted_from_recommendation"
+      : "accepted_from_inbox_manual_selection";
     await db.query(
       `
         INSERT INTO project_papers(project_id, paper_id, relation, note, created_at, updated_at)
-        VALUES ($1, $2, 'reading', 'accepted_from_recommendation', $3, $3)
+        VALUES ($1, $2, 'reading', $3, $4, $4)
         ON CONFLICT(project_id, paper_id) DO UPDATE SET
           relation = CASE
             WHEN project_papers.relation = 'candidate' THEN excluded.relation
@@ -276,7 +288,7 @@ async function acceptRecommendationsForPaper(db, paperId, projectIds, importance
           END,
           updated_at = excluded.updated_at
       `,
-      [projectId, Number(paperId), now]
+      [projectId, Number(paperId), linkNote, now]
     );
   }
 }

@@ -8,6 +8,7 @@ import urllib.request
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
+from .chat_requests import build_chat_payload
 from .config import Settings
 from .db import clean_unicode, from_json, to_json, utc_now
 from .db_types import DbConnection, DbRow
@@ -107,15 +108,18 @@ def call_chat_json(
     provider = settings.provider(selected_provider_id)
     if not provider or not provider.api_key or not provider.base_url or not selected_model:
         return fail("chat provider is not fully configured")
-    payload = {
-        "model": selected_model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.1,
-        "response_format": response_format or {"type": "json_object"},
-    }
+    payload = build_chat_payload(
+        provider,
+        {
+            "model": selected_model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+            "response_format": response_format or {"type": "json_object"},
+        },
+    )
     request = urllib.request.Request(
         f"{provider.base_url}/chat/completions",
         data=json.dumps(payload).encode("utf-8"),

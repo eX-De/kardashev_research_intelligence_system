@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ from unittest.mock import patch
 
 from worker.db import database_url_from_env
 from worker.env import env_value
+from worker.config import _providers_from_env
 
 
 class EnvFileTests(unittest.TestCase):
@@ -45,6 +47,15 @@ class EnvFileTests(unittest.TestCase):
                     database_url_from_env(),
                     "postgresql://research_app:p%40ss%20word@db:5432/research_intelligence",
                 )
+
+    def test_provider_env_rejects_multiple_openrouter_instances(self) -> None:
+        providers = [
+            {"id": "openrouter", "provider_type": "openrouter"},
+            {"id": "openrouter-backup", "provider_type": "openrouter"},
+        ]
+        with patch.dict(os.environ, {"LLM_PROVIDERS_JSON": json.dumps(providers)}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "only one OpenRouter provider"):
+                _providers_from_env()
 
 
 if __name__ == "__main__":
