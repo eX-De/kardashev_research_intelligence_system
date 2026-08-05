@@ -9,6 +9,7 @@ from urllib.parse import unquote, urljoin, urlparse
 import re
 
 from .config import Settings
+from .compute_contract import ComputeRequestCancelled
 from .artifacts import create_artifact, export_artifact_to_obsidian
 from .arxiv_text import chunk_text, download_pdf, extract_pdf_text_to_file
 from .db import clean_unicode, from_json, to_json, utc_now
@@ -60,6 +61,11 @@ READER_MESSAGE_COLUMNS = (
     "created_at",
 )
 READER_MESSAGE_PROJECTION = ", ".join(READER_MESSAGE_COLUMNS)
+
+
+def _raise_if_compute_cancelled(cancelled) -> None:
+    if cancelled and cancelled():
+        raise ComputeRequestCancelled()
 
 
 def _reader_message_payload(row: DbRow) -> dict[str, object]:
@@ -916,7 +922,10 @@ def paper_reader_chat_stream(
     paper_id: int,
     payload: dict[str, object],
     emit,
+    *,
+    cancelled=None,
 ) -> None:
+    _raise_if_compute_cancelled(cancelled)
     message = clean_unicode(str(payload.get("message") or "")).strip()
     if not message:
         raise RuntimeError("Chat message is required")
@@ -931,6 +940,19 @@ def paper_reader_chat_stream(
         raise RuntimeError("Full paper text is missing")
     reference_papers = _reference_paper_contexts(conn, settings, paper_id)
     reference_paper_ids = [int(reference["paper_id"]) for reference in reference_papers]
+    provider_id, model = _reader_chat_model(settings)
+    include_project_context = payload.get("include_project_context") is True
+    model_messages = _build_chat_messages(
+        paper_text,
+        history,
+        message,
+        report_seed_messages=_report_seed_messages(conn, paper_id),
+        project_profiles=(
+            project_chat_profiles_for_paper(conn, paper_id) if include_project_context else []
+        ),
+        reference_papers=reference_papers,
+    )
+    _raise_if_compute_cancelled(cancelled)
     now = utc_now()
     conn.execute(
         """
@@ -943,31 +965,28 @@ def paper_reader_chat_stream(
     )
     conn.commit()
 
-    provider_id, model = _reader_chat_model(settings)
+    _raise_if_compute_cancelled(cancelled)
     emit("start", {"model": {"provider_id": provider_id, "model": model}})
-    include_project_context = payload.get("include_project_context") is True
-    model_messages = _build_chat_messages(
-        paper_text,
-        history,
-        message,
-        report_seed_messages=_report_seed_messages(conn, paper_id),
-        project_profiles=(
-            project_chat_profiles_for_paper(conn, paper_id) if include_project_context else []
-        ),
-        reference_papers=reference_papers,
-    )
+    _raise_if_compute_cancelled(cancelled)
     answer_parts: list[str] = []
-    for chunk in _iter_chat_text_chunks(
+    chunks = _iter_chat_text_chunks(
         settings,
         model_messages,
         provider_id=provider_id,
         model=model,
         purpose="Paper reader chat stream",
-    ):
-        if not chunk:
-            continue
-        answer_parts.append(chunk)
-        emit("chunk", {"text": chunk})
+    )
+    try:
+        for chunk in chunks:
+            _raise_if_compute_cancelled(cancelled)
+            if not chunk:
+                continue
+            answer_parts.append(chunk)
+            emit("chunk", {"text": chunk})
+    finally:
+        close_chunks = getattr(chunks, "close", None)
+        if callable(close_chunks):
+            close_chunks()
     answer = clean_unicode("".join(answer_parts)).strip()
     if not answer:
         raise RuntimeError("Paper reader chat stream returned an empty response")
@@ -1257,7 +1276,10 @@ def generate_reader_followup_questions(
     settings: Settings,
     paper_id: int,
     payload: dict[str, object],
+    *,
+    cancelled=None,
 ) -> dict[str, object]:
+    _raise_if_compute_cancelled(cancelled)
     selected_text = clean_unicode(str(payload.get("selected_text") or payload.get("selectedText") or "")).strip()
     if not selected_text:
         raise RuntimeError("Selected text is required")
@@ -1288,7 +1310,9 @@ def generate_reader_followup_questions(
         or anchor_payload.get("content")
         or ""
     )
+    _raise_if_compute_cancelled(cancelled)
     provider_id, model = _reader_question_model(settings)
+    _raise_if_compute_cancelled(cancelled)
     text = _call_chat_text(
         settings,
         _build_question_messages(paper, selected_text, anchor_payload),

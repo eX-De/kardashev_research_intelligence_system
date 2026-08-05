@@ -1,8 +1,9 @@
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
+import { randomBytes } from "node:crypto";
 
-import { loadDotEnv } from "../server/env.js";
+import { envValue, loadDotEnv } from "../server/env.js";
 
 const ROOT_DIR = resolve(fileURLToPath(new URL("..", import.meta.url)));
 loadDotEnv(join(ROOT_DIR, ".env"));
@@ -87,6 +88,15 @@ export function initializeSchema({ run = spawnSync } = {}) {
   }
 }
 
+export function ensureComputeIdentity() {
+  if (String(process.env.KRIS_COMPUTE_BACKEND || "service").trim().toLowerCase() === "legacy") return false;
+  if (!envValue("KRIS_COMPUTE_TOKEN", "")) {
+    delete process.env.KRIS_COMPUTE_TOKEN_FILE;
+    process.env.KRIS_COMPUTE_TOKEN = randomBytes(32).toString("base64url");
+  }
+  return true;
+}
+
 function installSignalHandlers() {
   process.on("SIGINT", () => shutdown(130));
   process.on("SIGTERM", () => shutdown(143));
@@ -95,6 +105,7 @@ function installSignalHandlers() {
 export function main({ initialize = initializeSchema, launch = startProcess, installSignals = installSignalHandlers } = {}) {
   installSignals();
   initialize();
+  if (ensureComputeIdentity()) launch("compute", PYTHON_BIN, ["-m", "worker.compute_service"]);
   launch("api", process.execPath, ["server.js"]);
   launch("worker", PYTHON_BIN, ["-m", "worker.service"]);
 }

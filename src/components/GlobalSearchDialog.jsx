@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 
-import { api, postJson } from "../lib/dashboard.js";
+import { api } from "../lib/dashboard.js";
 import "../styles/GlobalSearchDialog.css";
 
 const MODE_KEY = "kris.unified-search.mode";
@@ -66,9 +66,8 @@ export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }
   const [response, setResponse] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [job, setJob] = useState(null);
   const inputRef = useRef(null);
-  const pollTimer = useRef(null);
+  const abortController = useRef(null);
   const requestToken = useRef(0);
   const returnFocusTarget = useRef(null);
 
@@ -77,33 +76,9 @@ export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }
     return activeType === "all" ? items : items.filter((item) => item.entity_type === activeType);
   }, [activeType, response]);
 
-  const pollDeepJob = useCallback(async (workerJobId, token) => {
-    if (pollTimer.current) clearTimeout(pollTimer.current);
-    try {
-      const data = await api(`/api/search/jobs/${encodeURIComponent(String(workerJobId))}`);
-      if (token !== requestToken.current) return;
-      setJob((current) => ({ ...current, ...data, requestToken: token }));
-      if (data.status === "completed") {
-        setResponse(data.result || { mode: "deep", results: [], stats: {} });
-        setBusy(false);
-        setStatusMessage?.(t("search.status.deepComplete"));
-        return;
-      }
-      if (data.status === "failed") {
-        throw new Error(data.error || t("search.status.deepFailed"));
-      }
-      pollTimer.current = setTimeout(() => pollDeepJob(workerJobId, token), 800);
-    } catch (nextError) {
-      if (token !== requestToken.current) return;
-      setBusy(false);
-      setError(nextError.message);
-      setStatusMessage?.(nextError.message);
-    }
-  }, [setStatusMessage, t]);
-
   useEffect(() => () => {
     requestToken.current += 1;
-    if (pollTimer.current) clearTimeout(pollTimer.current);
+    abortController.current?.abort();
   }, []);
 
   useEffect(() => {
@@ -113,6 +88,11 @@ export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }
       return undefined;
     }
     if (!isRendered) return undefined;
+
+    requestToken.current += 1;
+    abortController.current?.abort();
+    abortController.current = null;
+    setBusy(false);
 
     setIsClosing(true);
     const timer = window.setTimeout(() => {
@@ -155,27 +135,6 @@ export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }
     };
   }, [isOpen, isRendered]);
 
-  useEffect(() => {
-    const workerJobId = job?.worker_job_id;
-    const token = job?.requestToken;
-    if (!workerJobId || !token || ["completed", "failed"].includes(job?.status) || typeof window.EventSource !== "function") return undefined;
-    const source = new window.EventSource("/api/events");
-    const handle = (event) => {
-      try {
-        const envelope = JSON.parse(event.data);
-        const data = envelope?.data || {};
-        if (Number(data.worker_job_id || data.task?.worker_job_id) === Number(workerJobId)) {
-          pollDeepJob(workerJobId, token);
-        }
-      } catch {
-        // Timed polling remains the fallback for malformed or unrelated events.
-      }
-    };
-    source.addEventListener("search.completed", handle);
-    source.addEventListener("task.failed", handle);
-    return () => source.close();
-  }, [job?.requestToken, job?.status, job?.worker_job_id, pollDeepJob]);
-
   function toggleDeepSearch() {
     const nextValue = !deepSearch;
     setDeepSearch(nextValue);
@@ -191,11 +150,11 @@ export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }
 
     const token = requestToken.current + 1;
     requestToken.current = token;
-    if (pollTimer.current) clearTimeout(pollTimer.current);
+    abortController.current?.abort();
+    abortController.current = new AbortController();
     setBusy(true);
     setError("");
     setResponse(null);
-    setJob(null);
     setActiveType("all");
 
     try {
@@ -208,16 +167,20 @@ export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }
         return;
       }
 
-      const queued = await postJson("/api/search", {
-        mode: "deep",
-        query: value,
-        types: ["paper", "conversation", "artifact", "project"],
-        limit: 50
+      const data = await api("/api/search", {
+        method: "POST",
+        body: JSON.stringify({
+          mode: "deep",
+          query: value,
+          types: ["paper", "conversation", "artifact", "project"],
+          limit: 50
+        }),
+        signal: abortController.current.signal
       });
       if (token !== requestToken.current) return;
-      setJob({ ...queued, requestToken: token });
-      setStatusMessage?.(t("search.status.deepQueued"));
-      await pollDeepJob(queued.worker_job_id, token);
+      setResponse(data);
+      setBusy(false);
+      setStatusMessage?.(t("search.status.deepComplete"));
     } catch (nextError) {
       if (token !== requestToken.current) return;
       setBusy(false);
@@ -298,7 +261,7 @@ export function GlobalSearchDialog({ isOpen, onClose, onOpen, setStatusMessage }
               <i aria-hidden="true" />
               <div>
                 <strong>{deepSearch ? t("search.progress.deepTitle") : t("search.progress.quickTitle")}</strong>
-                <span>{deepSearch ? t("search.progress.deepDetail", { job: job?.worker_job_id || t("search.progress.queued") }) : t("search.progress.quickDetail")}</span>
+                <span>{deepSearch ? t("search.progress.deepDetail", { job: t("search.progress.queued") }) : t("search.progress.quickDetail")}</span>
               </div>
             </section>
           ) : null}

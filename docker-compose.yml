@@ -44,6 +44,9 @@ services:
       PANEL_COOKIE_SECURE: ${PANEL_COOKIE_SECURE:-}
       KRIS_AGENT_TOKEN_FILE: /run/secrets/kris_agent_token
       KRIS_JOB_BACKEND: ${KRIS_JOB_BACKEND:-queue}
+      KRIS_COMPUTE_BACKEND: ${KRIS_COMPUTE_BACKEND:-service}
+      KRIS_COMPUTE_URL: http://compute:8765
+      KRIS_COMPUTE_TOKEN_FILE: /run/secrets/compute_token
       KRIS_OUTBOX_POLLER_ENABLED: ${KRIS_OUTBOX_POLLER_ENABLED:-true}
       KRIS_OUTBOX_POLL_INTERVAL_MS: ${KRIS_OUTBOX_POLL_INTERVAL_MS:-1000}
       KRIS_WORKER_JOB_STALE_AFTER_SECONDS: ${KRIS_WORKER_JOB_STALE_AFTER_SECONDS:-90}
@@ -60,12 +63,48 @@ services:
       - panel_password
       - panel_session_secret
       - kris_agent_token
+      - compute_token
     volumes:
       - ./data:/data
       # Mount your Obsidian vault when needed, then set OBSIDIAN_VAULT_PATH=/vault.
       # - D:/path/to/YourVault:/vault
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  compute:
+    image: ${KRIS_IMAGE:-exde1968/kardashev-research-intelligence-system:latest}
+    command: ["python", "-m", "worker.compute_service"]
+    init: true
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONUTF8: "1"
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-research_intelligence}
+      POSTGRES_USER: ${POSTGRES_USER:-research_app}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      KRIS_COMPUTE_HOST: 0.0.0.0
+      KRIS_COMPUTE_PORT: "8765"
+      KRIS_COMPUTE_TOKEN_FILE: /run/secrets/compute_token
+      ARXIV_PDF_DIR: /data/arxiv_pdfs
+      ARXIV_TEXT_DIR: /data/arxiv_text
+    secrets:
+      - postgres_password
+      - compute_token
+    volumes:
+      - ./data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=3).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     restart: unless-stopped
 
   worker:
@@ -135,3 +174,5 @@ secrets:
     file: ${PANEL_SESSION_SECRET_FILE:-./secrets/panel_session_secret.txt}
   kris_agent_token:
     file: ${KRIS_AGENT_TOKEN_FILE:-./secrets/kris_agent_token.txt}
+  compute_token:
+    file: ${KRIS_COMPUTE_TOKEN_FILE:-./secrets/compute_token.txt}

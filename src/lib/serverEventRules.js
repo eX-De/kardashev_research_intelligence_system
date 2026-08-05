@@ -27,7 +27,6 @@ export const SERVER_EVENTS = Object.freeze({
   READER_PAPER_UPDATED: "reader.paper.updated",
   READER_PAPERS_IMPORTED: "reader.papers.imported",
   SETTINGS_CHANGED: "settings.changed",
-  SEARCH_COMPLETED: "search.completed",
   TASK_CANCEL_REQUESTED: "task.cancel_requested",
   TASK_CANCELLED: "task.cancelled",
   TASK_FAILED: "task.failed",
@@ -219,11 +218,6 @@ export function applyServerEvent(cache, event) {
     cache.markStale(["health", "summary"]);
     if (scheduler) cache.setCache(["jobs", "status"], { scheduler });
     else cache.markStale(["jobs", "status"]);
-    return;
-  }
-
-  if (type === SERVER_EVENTS.SEARCH_COMPLETED) {
-    cache.markStale(["search", "job", asStringId(data?.worker_job_id)]);
     return;
   }
 

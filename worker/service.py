@@ -38,7 +38,6 @@ from .knowledge import save_manual_project_context
 from .paper_reader import import_reader_pdfs, import_reader_urls, import_reader_webpages, save_reader_note_to_obsidian
 from .artifact_index import index_artifact, remove_artifact_index
 from .search_backfill import backfill_search_indexes
-from .unified_search import deep_search
 from .experiment_reports import index_experiment_report
 from .library_search_index import index_library_paper
 from .job_inventory import worker_job_concurrency_group
@@ -96,7 +95,6 @@ EXPLICIT_WORKER_JOB_TYPES = {
     "artifact-index",
     "artifact-index-backfill",
     "experiment-report-index",
-    "unified-search",
     "library-paper-index",
     "generate-paper-reports",
     "run-daily",
@@ -769,9 +767,6 @@ def dispatch_worker_job(conn: Any, settings: Any, worker_job: dict[str, Any]) ->
         artifact_id = _required_int(payload.get("artifact_id"), "artifact_id")
         return index_experiment_report(conn, settings, artifact_id)
 
-    if job_type == "unified-search":
-        return deep_search(conn, settings, payload)
-
     if job_type == "library-paper-index":
         paper_id = _required_int(payload.get("paper_id"), "paper_id")
         return index_library_paper(conn, settings, paper_id)
@@ -913,18 +908,6 @@ def run_once(worker_id: str, on_job_change=None) -> dict[str, Any]:
             _publish_reader_domain_events(conn, worker_job, result)
             _publish_paper_report_domain_events(conn, worker_job, result)
             _publish_paper_domain_events(conn, worker_job, result)
-            if str(worker_job.get("job_type") or "") == "unified-search":
-                insert_app_event(
-                    conn,
-                    "search.completed",
-                    {
-                        "worker_job_id": completed_job.get("id"),
-                        "job_id": completed_job.get("job_run_id"),
-                        "query": result.get("query"),
-                        "result_count": len(result.get("results") or []),
-                        "partial": bool((result.get("stats") or {}).get("partial")),
-                    },
-                )
             _log_job_observation(
                 "worker_job.completed",
                 completed_job,

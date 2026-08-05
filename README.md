@@ -143,7 +143,7 @@ http://localhost:3000
 
 `server.js` 不会在每个 API 请求里重复初始化 schema；源代码模式首次启动或 schema 更新后，先运行 `npm run init-db`。Docker 镜像启动命令仍会先执行 `python -m worker.cli init-db`，再启动 Node 服务。
 
-`KRIS_JOB_BACKEND=queue` 是默认任务后端。源代码模式下，Node 负责把每日流程、同步、抓取、报告生成等重任务写入 `worker_jobs`，`npm start` 会在构建后同时启动 Node API/static 服务和常驻 Python worker。
+`KRIS_JOB_BACKEND=queue` 是默认任务后端。源代码模式下，Node 负责把每日流程、同步、抓取、报告生成等重任务写入 `worker_jobs`，`npm start` 会在构建后同时启动 Node API/static 服务、常驻 Python worker 和交互式 compute service。未显式配置时，启动器会为本次进程生成共享 compute token。
 
 如需单独调试 worker，可另开终端运行：
 
@@ -157,7 +157,7 @@ npm run worker
 
 ## 开发模式
 
-开发时启动三个终端：
+开发时启动四个终端；先在 `.env` 中设置一个随机的 `KRIS_COMPUTE_TOKEN`，API 与 compute service 会读取同一个值：
 
 ```powershell
 # 终端 1：API 和 worker 代理
@@ -166,7 +166,10 @@ npm run start:api
 # 终端 2：常驻 Python worker
 npm run worker
 
-# 终端 3：Vite dev server
+# 终端 3：交互式 compute service
+npm run compute
+
+# 终端 4：Vite dev server
 npm run dev
 ```
 
@@ -176,7 +179,7 @@ npm run dev
 http://localhost:5173
 ```
 
-Vite 会把 `/api` 代理到 `http://localhost:3000`。生产模式下 `npm start` 会先构建前端到 `dist/`，再同时启动 `server.js` 和 `python -m worker.service`；如果 `dist/` 不存在，Node 会回退服务 `public/`。
+Vite 会把 `/api` 代理到 `http://localhost:3000`。生产模式下 `npm start` 会先构建前端到 `dist/`，再同时启动 `server.js`、`python -m worker.service` 和 `python -m worker.compute_service`；如果 `dist/` 不存在，Node 会回退服务 `public/`。
 
 ## Dashboard 导航
 
@@ -243,10 +246,12 @@ python -m worker.cli generate-paper-reports --limit 10
 - `KRIS_WORKER_MONITOR_INTERVAL_MS`：Node 检查 Worker 和停滞队列的间隔，默认 5000ms。
 - `KRIS_WORKER_JOB_STALE_AFTER_SECONDS`：`worker_jobs.running` 的租约恢复阈值，默认 90 秒；Worker 会持续续期，失联超时后 attempts 未耗尽会重排队，耗尽则失败并同步 `job_runs`。
 - `KRIS_JOB_BACKEND`：任务执行后端，默认 `queue`。Node 会写入 `worker_jobs`，由 `python -m worker.service` 常驻 worker 执行；设为 `cli` 可临时回退旧的 Node spawn CLI 行为。
+- `KRIS_COMPUTE_BACKEND`：交互计算后端，默认 `service`。deep search、Reader Chat 和追问建议直接调用常驻 compute service，不写入 `worker_jobs` / `job_runs`；设为 `legacy` 可在一个发布周期内回退旧队列/CLI 路径。
+- `KRIS_COMPUTE_URL`、`KRIS_COMPUTE_TOKEN` / `KRIS_COMPUTE_TOKEN_FILE`、`KRIS_COMPUTE_TIMEOUT_MS`：Node 到 compute 的内部地址、服务身份和请求超时。Compose 使用不暴露宿主端口的 `compute` 服务，并要求 `secrets/compute_token.txt` 为非空随机值。
 - `KRIS_OUTBOX_POLLER_ENABLED` / `KRIS_OUTBOX_POLL_INTERVAL_MS`：控制 Node 轮询 `app_events` outbox 并转发到 `/api/events`，默认启用且间隔 1000ms。Node 写接口和常驻 worker 的缓存失效事件都会写入 `app_events`；关闭 poller 时，Node 写接口会回退到进程内 SSE，worker 侧仍保留旧 stderr progress 兼容路径。
 - `KRIS_WORKER_POLL_INTERVAL_MS` / `KRIS_WORKER_INIT_DB_ON_START`：控制常驻 Python worker 的队列轮询间隔和启动时 schema 初始化。
-- `KRIS_READER_FOLLOWUPS_SYNC_FALLBACK_ENABLED`：控制 Reader 选中文本 follow-up questions 的同步交互式 CLI fallback，默认启用；设为 `false` 时该接口返回 `reader_followups_sync_fallback_disabled`，直到前端有异步建议结果流。
-- Node 固定负责在线读写 API：settings、jobs summary/history、health summary、notifications、projects、artifacts、library、inbox、paper detail/feedback/recommendation、Reader 列表/详情/报告控制。Python worker 负责 heavy job 和 action job：daily pipeline、同步/抓取/排序、artifact export、Reader 导入/保存、报告生成、LLM/Obsidian 文件操作。Reader streaming chat 和可开关的 follow-up questions 仍是交互式 CLI fallback，不属于普通 CRUD/read 数据面。
+- `KRIS_READER_FOLLOWUPS_SYNC_FALLBACK_ENABLED`：仅在 `KRIS_COMPUTE_BACKEND=legacy` 时控制 Reader 追问建议的同步 CLI fallback。
+- Node 固定负责在线读写 API 和浏览器 SSE 适配；Python worker 负责持久后台任务；独立 compute service 负责 deep search、Reader streaming chat 和 follow-up questions。交互请求拥有 request ID、timeout 和浏览器断开取消传播，不占后台 job slot。
 - `KRIS_PG_POOL_MAX`、`KRIS_PG_IDLE_TIMEOUT_MS`、`KRIS_PG_CONNECTION_TIMEOUT_MS`：Node 侧 PostgreSQL 连接池参数。当前 schema 初始化仍由 `npm run init-db` / Python worker schema owner 负责。
 - `PANEL_PASSWORD` / `PANEL_PASSWORD_FILE`：单密码保护；为空时无密码模式。
 - `PANEL_SESSION_SECRET` / `PANEL_SESSION_SECRET_FILE`：session 签名密钥；长期部署应固定。
@@ -442,7 +447,8 @@ docker compose --profile nginx up -d
 | `npm run dev` | 启动 Vite dev server |
 | `npm run build` | 构建前端到 `dist/` |
 | `npm run preview` | 预览构建产物 |
-| `npm start` | 构建前端并启动 Node 服务和常驻 Python worker |
+| `npm start` | 构建前端并启动 Node、常驻 Python worker 和 compute service |
+| `npm run compute` | 单独启动交互式 Python compute service |
 | `npm run start:api` | 只启动 Node API/static 服务 |
 | `npm run init-db` | 初始化或迁移当前数据库 schema |
 | `npm run sync-obsidian` | 同步 Obsidian/项目上下文 |

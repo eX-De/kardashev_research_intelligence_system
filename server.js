@@ -78,11 +78,11 @@ import {
 import {
   countActiveWorkerJobs,
   enqueueWorkerJob,
-  getWorkerJob,
   requestWorkerJobCancellation
 } from "./server/workerQueue.js";
 import { getWorkerStatus, requireAvailableWorker } from "./server/workerHealth.js";
 import { normalizeSearchRequest, quickSearch } from "./server/search.js";
+import { createComputeClient } from "./server/computeClient.js";
 import {
   DEFAULT_READER_UPLOAD_MAX_FILE_BYTES,
   DEFAULT_READER_UPLOAD_MAX_FILES,
@@ -130,6 +130,7 @@ const UPDATE_CHECK_INTERVAL_MS = Math.max(
 const REQUEST_TIMING_LOG_ENABLED = envBoolean("KRIS_REQUEST_TIMING_LOG", false);
 const WORKER_TIMING_LOG_ENABLED = envBoolean("KRIS_WORKER_TIMING_LOG", false);
 const JOB_BACKEND = String(envValue("KRIS_JOB_BACKEND", "queue") || "queue").trim().toLowerCase();
+const COMPUTE_BACKEND = String(envValue("KRIS_COMPUTE_BACKEND", "service") || "service").trim().toLowerCase();
 const OUTBOX_POLLER_ENABLED = envBoolean("KRIS_OUTBOX_POLLER_ENABLED", true);
 const OUTBOX_POLL_INTERVAL_MS = Math.max(
   250,
@@ -149,6 +150,30 @@ const WORKER_PROGRESS_EVENT_PREFIX = "KRIS_PROGRESS_EVENT ";
 const DAILY_JOB_COMMANDS = new Set(["run-daily", "resume-daily", "retry-daily"]);
 const PAPER_REPORT_QUEUE_COMMAND = "generate-paper-reports";
 const requestTimingStorage = new AsyncLocalStorage();
+
+if (!["service", "legacy"].includes(COMPUTE_BACKEND)) {
+  throw new Error("KRIS_COMPUTE_BACKEND must be service or legacy");
+}
+
+function abortOnClientDisconnect(req, res) {
+  const controller = new AbortController();
+  const abort = () => controller.abort(new Error("Client disconnected"));
+  req.once("aborted", abort);
+  res.once("close", abort);
+  return {
+    signal: controller.signal,
+    cleanup() {
+      req.off("aborted", abort);
+      res.off("close", abort);
+    }
+  };
+}
+
+function writeSseEvent(res, event, data) {
+  if (res.writableEnded || res.destroyed) return;
+  res.write(`event: ${event || "message"}\n`);
+  res.write(`data: ${JSON.stringify(data || {})}\n\n`);
+}
 
 const jobRuntime = {
   currentJob: null,
@@ -2389,39 +2414,28 @@ async function routeApi(req, res, url) {
       sendJson(res, 200, await quickSearch(request));
       return;
     }
-    const data = await enqueueActionWorkerJob(
-      "unified-search",
-      {
-        query: request.query,
-        types: request.types,
-        limit: request.limit,
-        project_id: request.filters.project_id,
-        artifact_types: request.filters.artifact_types,
-        date_from: request.filters.date_from,
-        date_to: request.filters.date_to
-      },
-      { source: "unified-search", priority: 12, maxAttempts: 1 }
-    );
-    sendJson(res, 202, data);
-    return;
-  }
-
-  const searchJobMatch = url.pathname.match(/^\/api\/search\/jobs\/(\d+)$/);
-  if (req.method === "GET" && searchJobMatch) {
-    const workerJob = await getWorkerJob(searchJobMatch[1]);
-    if (!workerJob || workerJob.job_type !== "unified-search") {
-      sendJson(res, 404, { ok: false, error: "Search job not found" });
+    const computePayload = {
+      query: request.query,
+      types: request.types,
+      limit: request.limit,
+      project_id: request.filters.project_id,
+      artifact_types: request.filters.artifact_types,
+      date_from: request.filters.date_from,
+      date_to: request.filters.date_to
+    };
+    if (COMPUTE_BACKEND === "legacy") {
+      const data = await jsonFromWorker(["api-unified-search"], JSON.stringify(computePayload));
+      sendJson(res, 200, data);
       return;
     }
-    sendJson(res, 200, {
-      ok: workerJob.status !== "failed",
-      worker_job_id: workerJob.id,
-      job_run_id: workerJob.job_run_id,
-      job_id: workerJob.job_run_id || workerJob.id,
-      status: workerJob.status,
-      result: workerJob.status === "completed" ? workerJob.result : null,
-      error: workerJob.status === "failed" ? workerJob.error_message : ""
-    });
+    const disconnect = abortOnClientDisconnect(req, res);
+    try {
+      const data = await createComputeClient().deepSearch(computePayload, { signal: disconnect.signal });
+      disconnect.cleanup();
+      sendJson(res, 200, data);
+    } finally {
+      disconnect.cleanup();
+    }
     return;
   }
 
@@ -2536,11 +2550,29 @@ async function routeApi(req, res, url) {
       res.setHeader("connection", "keep-alive");
       res.setHeader("x-accel-buffering", "no");
       res.flushHeaders?.();
-      await streamWorkerEvents([
-        "api-reader-chat-stream",
-        readerChatMatch[1]
-      ], JSON.stringify(body), res);
-      await publishDurablePaperChanged(SERVER_EVENTS.READER_MESSAGE_UPDATED, {}, readerChatMatch[1], { action: "chat_stream" });
+      if (COMPUTE_BACKEND === "legacy") {
+        await streamWorkerEvents([
+          "api-reader-chat-stream",
+          readerChatMatch[1]
+        ], JSON.stringify(body), res);
+        await publishDurablePaperChanged(SERVER_EVENTS.READER_MESSAGE_UPDATED, {}, readerChatMatch[1], { action: "chat_stream" });
+        return;
+      }
+      const disconnect = abortOnClientDisconnect(req, res);
+      try {
+        await createComputeClient().streamReaderChat(
+          readerChatMatch[1],
+          body,
+          ({ event, data }) => writeSseEvent(res, event, data),
+          { signal: disconnect.signal }
+        );
+      } catch (error) {
+        if (error.code !== "compute_cancelled") writeSseEvent(res, "error", { error: error.message, code: error.code });
+      } finally {
+        disconnect.cleanup();
+        await publishDurablePaperChanged(SERVER_EVENTS.READER_MESSAGE_UPDATED, {}, readerChatMatch[1], { action: "chat_stream" });
+        if (!res.writableEnded) res.end();
+      }
       return;
     }
     sendJson(res, 400, {
@@ -2570,20 +2602,29 @@ async function routeApi(req, res, url) {
   const readerFollowupsMatch = url.pathname.match(/^\/api\/reader\/papers\/(\d+)\/follow-up-questions$/);
   if (req.method === "POST" && readerFollowupsMatch) {
     const body = await readRequestJson(req);
-    if (!READER_FOLLOWUPS_SYNC_FALLBACK_ENABLED) {
+    if (COMPUTE_BACKEND === "legacy" && !READER_FOLLOWUPS_SYNC_FALLBACK_ENABLED) {
       sendJson(res, 501, {
         error: "Reader follow-up questions require the synchronous interactive fallback until async suggestions are implemented.",
         code: "reader_followups_sync_fallback_disabled"
       });
       return;
     }
-    // TODO: replace this with an async suggestion flow backed by worker_jobs result polling.
-    // Interactive generation must return question suggestions to the current selection UI.
-    const data = await jsonFromWorker([
-      "api-reader-followups",
-      readerFollowupsMatch[1]
-    ], JSON.stringify(body));
-    sendJson(res, 200, data);
+    if (COMPUTE_BACKEND === "legacy") {
+      const data = await jsonFromWorker([
+        "api-reader-followups",
+        readerFollowupsMatch[1]
+      ], JSON.stringify(body));
+      sendJson(res, 200, data);
+      return;
+    }
+    const disconnect = abortOnClientDisconnect(req, res);
+    try {
+      const data = await createComputeClient().readerFollowups(readerFollowupsMatch[1], body, { signal: disconnect.signal });
+      disconnect.cleanup();
+      sendJson(res, 200, data);
+    } finally {
+      disconnect.cleanup();
+    }
     return;
   }
 
@@ -2719,7 +2760,12 @@ async function handleHttpRequest(req, res, url) {
     }
     await serveStatic(req, res);
   } catch (error) {
+    if (res.destroyed || (error.code === "compute_cancelled" && req.aborted)) return;
     console.error(error.stack || error.message || error);
+    if (res.headersSent) {
+      if (!res.writableEnded) res.end();
+      return;
+    }
     const statusCode = error.statusCode || (
       error.structuredCode === OBSIDIAN_NOT_CONFIGURED_CODE ? 409 : 500
     );

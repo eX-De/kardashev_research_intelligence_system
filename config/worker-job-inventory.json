@@ -9,7 +9,6 @@
     { "type": "artifact-index", "label": "产物索引", "concurrency_group": "embedding" },
     { "type": "artifact-index-backfill", "label": "产物索引回填", "concurrency_group": "embedding" },
     { "type": "experiment-report-index", "label": "实验报告索引", "concurrency_group": "embedding" },
-    { "type": "unified-search", "label": "统一搜索", "concurrency_group": "interactive" },
     { "type": "library-paper-index", "label": "论文库索引", "concurrency_group": "embedding" },
     { "type": "generate-paper-reports", "label": "全文报告生成", "concurrency_group": "llm" },
     { "type": "run-daily", "label": "每日流程", "concurrency_group": "daily" },

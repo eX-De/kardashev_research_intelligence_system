@@ -143,7 +143,7 @@ Source mode requires PostgreSQL. Set `DATABASE_URL` / `DATABASE_URL_FILE`, or pr
 
 `server.js` does not initialize the schema on every API request. Before the first source-mode start, or after a schema update, run `npm run init-db`. The Docker image entry command still runs `python -m worker.cli init-db` before starting the Node service.
 
-`KRIS_JOB_BACKEND=queue` is the default job backend. Node writes daily pipelines, synchronization, fetching, and report jobs to `worker_jobs`. After building the frontend, `npm start` starts both the Node API/static service and the persistent Python worker.
+`KRIS_JOB_BACKEND=queue` is the default job backend. Node writes daily pipelines, synchronization, fetching, and report jobs to `worker_jobs`. After building the frontend, `npm start` starts the Node API/static service, persistent Python worker, and interactive compute service. The launcher generates a shared compute token for that process when none is configured.
 
 To debug the worker separately, open another terminal and run:
 
@@ -157,7 +157,7 @@ On first entry, use onboarding to configure Obsidian or create the first in-syst
 
 ## Development Mode
 
-Start three terminals during development:
+Start four terminals during development. First set a random `KRIS_COMPUTE_TOKEN` in `.env`; the API and compute service read the same value:
 
 ```powershell
 # Terminal 1: API and worker proxy
@@ -166,7 +166,10 @@ npm run start:api
 # Terminal 2: persistent Python worker
 npm run worker
 
-# Terminal 3: Vite development server
+# Terminal 3: interactive compute service
+npm run compute
+
+# Terminal 4: Vite development server
 npm run dev
 ```
 
@@ -176,7 +179,7 @@ Open:
 http://localhost:5173
 ```
 
-Vite proxies `/api` to `http://localhost:3000`. In production mode, `npm start` first builds the frontend into `dist/`, then starts `server.js` and `python -m worker.service`. If `dist/` does not exist, Node falls back to serving `public/`.
+Vite proxies `/api` to `http://localhost:3000`. In production mode, `npm start` first builds the frontend into `dist/`, then starts `server.js`, `python -m worker.service`, and `python -m worker.compute_service`. If `dist/` does not exist, Node falls back to serving `public/`.
 
 ## Dashboard Navigation
 
@@ -243,10 +246,12 @@ Key startup settings:
 - `KRIS_WORKER_MONITOR_INTERVAL_MS`: interval for Node to inspect Worker availability and stalled queues, default 5,000 ms.
 - `KRIS_WORKER_JOB_STALE_AFTER_SECONDS`: lease recovery threshold for `worker_jobs.running`, default 90 seconds. The Worker renews the lease while running; after a disconnect, a timed-out job is requeued while attempts remain, or failed and synchronized to `job_runs` after exhaustion.
 - `KRIS_JOB_BACKEND`: job execution backend, default `queue`. Node writes `worker_jobs` for `python -m worker.service`; set it to `cli` only for temporary legacy fallback.
+- `KRIS_COMPUTE_BACKEND`: interactive compute backend, default `service`. Deep search, Reader Chat, and follow-up suggestions call the persistent compute service directly and do not write `worker_jobs` / `job_runs`; use `legacy` only as a one-release rollback path to the old queue/CLI behavior.
+- `KRIS_COMPUTE_URL`, `KRIS_COMPUTE_TOKEN` / `KRIS_COMPUTE_TOKEN_FILE`, and `KRIS_COMPUTE_TIMEOUT_MS`: internal compute address, service identity, and request timeout. Compose runs `compute` without publishing a host port and requires a non-empty random `secrets/compute_token.txt`.
 - `KRIS_OUTBOX_POLLER_ENABLED` / `KRIS_OUTBOX_POLL_INTERVAL_MS`: control Node polling of the `app_events` outbox and forwarding to `/api/events`, enabled by default at 1,000 ms. Node write endpoints and the persistent worker both write cache-invalidation events to `app_events`.
 - `KRIS_WORKER_POLL_INTERVAL_MS` / `KRIS_WORKER_INIT_DB_ON_START`: configure queue polling and schema initialization for the persistent worker.
-- `KRIS_READER_FOLLOWUPS_SYNC_FALLBACK_ENABLED`: controls the synchronous interactive CLI fallback for selected-text follow-up questions. When `false`, the endpoint returns `reader_followups_sync_fallback_disabled` until an asynchronous suggestion result flow is available.
-- Node owns online settings, job summary/history, health, notifications, projects, artifacts, library, inbox, paper details, feedback, recommendations, reader list/detail, and report-control APIs. Python owns heavy/action jobs such as the daily pipeline, synchronization, fetching, ranking, artifact export, reader imports/saves, report generation, LLM operations, and Obsidian file work. Reader streaming chat and optional follow-up questions remain interactive CLI fallbacks rather than regular CRUD/read operations.
+- `KRIS_READER_FOLLOWUPS_SYNC_FALLBACK_ENABLED`: controls the synchronous Reader follow-up CLI fallback only when `KRIS_COMPUTE_BACKEND=legacy`.
+- Node owns online APIs and browser SSE adaptation; the Python worker owns persistent background jobs; the separate compute service owns deep search, Reader streaming chat, and follow-up questions. Interactive requests carry request IDs, timeouts, and browser-disconnect cancellation without occupying background job slots.
 - `KRIS_PG_POOL_MAX`, `KRIS_PG_IDLE_TIMEOUT_MS`, `KRIS_PG_CONNECTION_TIMEOUT_MS`: Node PostgreSQL connection-pool settings. Schema ownership remains with `npm run init-db` and the Python worker.
 - `PANEL_PASSWORD` / `PANEL_PASSWORD_FILE`: single-password protection. An empty value enables passwordless mode.
 - `PANEL_SESSION_SECRET` / `PANEL_SESSION_SECRET_FILE`: session-signing secret. Use a stable value in long-running deployments.
@@ -442,7 +447,8 @@ docker compose --profile nginx up -d
 | `npm run dev` | Start the Vite development server |
 | `npm run build` | Build the frontend into `dist/` |
 | `npm run preview` | Preview the frontend build |
-| `npm start` | Build the frontend and start the Node service plus persistent Python worker |
+| `npm start` | Build the frontend and start Node, the persistent Python worker, and compute service |
+| `npm run compute` | Start only the interactive Python compute service |
 | `npm run start:api` | Start only the Node API/static service |
 | `npm run init-db` | Initialize or migrate the current PostgreSQL schema |
 | `npm run sync-obsidian` | Synchronize Obsidian and project context |

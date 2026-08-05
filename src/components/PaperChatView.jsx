@@ -354,6 +354,7 @@ function ChatWorkspace({
   const latestTransientQuestionRef = useRef(null);
   const highlightedAnchorRef = useRef(null);
   const stickToBottomRef = useRef(true);
+  const followupAbortRef = useRef(null);
   const paper = detail?.paper;
   const linkedProjects = detail?.linked_projects || [];
   const recommendations = (detail?.project_recommendations || []).filter((item) => ["pending", "accepted"].includes(item.state));
@@ -426,6 +427,9 @@ function ChatWorkspace({
   }, []);
 
   const clearSelection = useCallback(() => {
+    followupAbortRef.current?.abort();
+    followupAbortRef.current = null;
+    setGeneratingQuestions(false);
     setSelectedText("");
     setSelectionAnchor(null);
     setFollowUpPosition(null);
@@ -433,6 +437,14 @@ function ChatWorkspace({
     setQuestionError("");
     window.getSelection?.().removeAllRanges?.();
   }, []);
+
+  useEffect(() => {
+    setGeneratingQuestions(false);
+    return () => {
+      followupAbortRef.current?.abort();
+      followupAbortRef.current = null;
+    };
+  }, [paper?.id]);
 
   useEffect(() => {
     if (!paper?.id) return;
@@ -623,17 +635,27 @@ function ChatWorkspace({
     if (!selectedText || !selectionAnchor?.messageId) return;
     setGeneratingQuestions(true);
     setQuestionError("");
+    followupAbortRef.current?.abort();
+    const controller = new AbortController();
+    followupAbortRef.current = controller;
     try {
-      const data = await postJson(`/api/reader/papers/${paper.id}/follow-up-questions`, {
-        selected_text: selectedText,
-        anchor_message_id: selectionAnchor.messageId,
-        context_text: selectionAnchor.contextText
+      const data = await api(`/api/reader/papers/${paper.id}/follow-up-questions`, {
+        method: "POST",
+        signal: controller.signal,
+        body: JSON.stringify({
+          selected_text: selectedText,
+          anchor_message_id: selectionAnchor.messageId,
+          context_text: selectionAnchor.contextText
+        })
       });
       setQuestions(data.questions || []);
     } catch (error) {
-      setQuestionError(error.message);
+      if (!controller.signal.aborted) setQuestionError(error.message);
     } finally {
-      setGeneratingQuestions(false);
+      if (followupAbortRef.current === controller) {
+        followupAbortRef.current = null;
+        setGeneratingQuestions(false);
+      }
     }
   }
 
@@ -755,6 +777,7 @@ export function PaperChatView({ onSelectPaper, setStatusMessage = () => {}, targ
   const [savingChatModel, setSavingChatModel] = useState(false);
   const [savingReferencePapers, setSavingReferencePapers] = useState(false);
   const [projectContextPreferences, setProjectContextPreferences] = useState({});
+  const chatAbortRef = useRef(null);
   const conversationsQuery = useCachedApi(
     ["reader", "conversations", questionFilter],
     () => api(`/api/reader/conversations?limit=100&offset=0&questions=${encodeURIComponent(questionFilter)}`),
@@ -792,6 +815,16 @@ export function PaperChatView({ onSelectPaper, setStatusMessage = () => {}, targ
   }, [targetPaperId, targetPaperKey]);
 
   useEffect(() => {
+    setPendingUser(null);
+    setStreamingAssistant(null);
+    setBusy(false);
+    return () => {
+      chatAbortRef.current?.abort();
+      chatAbortRef.current = null;
+    };
+  }, [activePaperId]);
+
+  useEffect(() => {
     if (targetPaperId || activePaperId || !conversationsQuery.hasData || !items.length) return;
     selectPaper(items[0].paper_id, { replace: true });
   }, [activePaperId, conversationsQuery.hasData, items, selectPaper, targetPaperId]);
@@ -810,12 +843,15 @@ export function PaperChatView({ onSelectPaper, setStatusMessage = () => {}, targ
     const nextMessage = String(rawMessage || "").trim();
     if (!paperId || !nextMessage) return;
     const sentAt = Date.now();
+    chatAbortRef.current?.abort();
+    const controller = new AbortController();
+    chatAbortRef.current = controller;
     setBusy(true);
     setPendingUser({ id: `pending-user-${sentAt}`, paper_id: paperId, role: "user", content: nextMessage, source: "chat", created_at: new Date(sentAt).toISOString(), transient: true });
     setStreamingAssistant({ id: `streaming-assistant-${sentAt}`, paper_id: paperId, role: "assistant", content: "", source: "chat", created_at: new Date().toISOString(), transient: true, streaming: true });
     try {
       const path = `/api/reader/papers/${paperId}/chat`;
-      const response = await fetch(path, { method: "POST", credentials: "same-origin", headers: { accept: "text/event-stream", "content-type": "application/json" }, body: JSON.stringify({ message: nextMessage, stream: true, include_project_context: projectContextEnabled }) });
+      const response = await fetch(path, { method: "POST", credentials: "same-origin", headers: { accept: "text/event-stream", "content-type": "application/json" }, body: JSON.stringify({ message: nextMessage, stream: true, include_project_context: projectContextEnabled }), signal: controller.signal });
       if (!response.ok) throw await readErrorResponse(response, path, t("reader.chatRequestFailed"));
       let completed = false;
       await readSseStream(response, {
@@ -828,13 +864,16 @@ export function PaperChatView({ onSelectPaper, setStatusMessage = () => {}, targ
       conversationsQuery.refresh({ force: true }).catch(() => {});
       setStatusMessage(t("reader.messages.replyGenerated"));
     } catch (error) {
-      if (options.restoreOnFailure !== false) setMessage(nextMessage);
-      setStatusMessage(error.message);
+      if (!controller.signal.aborted && options.restoreOnFailure !== false) setMessage(nextMessage);
+      if (!controller.signal.aborted) setStatusMessage(error.message);
       await detailQuery.refresh({ force: true }).catch(() => {});
     } finally {
       setPendingUser((current) => current && Number(current.paper_id) === paperId ? null : current);
       setStreamingAssistant((current) => current && Number(current.paper_id) === paperId ? null : current);
-      setBusy(false);
+      if (chatAbortRef.current === controller) {
+        chatAbortRef.current = null;
+        setBusy(false);
+      }
     }
   }
 

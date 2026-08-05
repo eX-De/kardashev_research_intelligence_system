@@ -47,6 +47,7 @@ from .paper_reports import ensure_paper_reports_for_recommendations, process_pap
 from .papers import prune_unqualified_arxiv_library_papers
 from .project_chat_profiles import refresh_project_chat_profiles
 from .search_backfill import backfill_search_indexes
+from .unified_search import deep_search
 from .project_status import run_daily_project_status_sql
 from .paper_reader import (
     generate_reader_followup_questions,
@@ -1978,6 +1979,12 @@ def cmd_backfill_search_indexes(_: argparse.Namespace) -> None:
     _print_json(result)
 
 
+def cmd_api_unified_search(_: argparse.Namespace) -> None:
+    payload = _read_json_stdin("unified search")
+    result = _with_db(lambda conn, settings: deep_search(conn, settings, payload))
+    _print_json(result)
+
+
 def cmd_api_paper_report(args: argparse.Namespace) -> None:
     payload = _read_json_stdin("paper report")
     result = _with_db(
@@ -2239,6 +2246,9 @@ def build_parser() -> argparse.ArgumentParser:
     api_paper_recommendation = sub.add_parser("api-paper-recommendation")
     api_paper_recommendation.add_argument("paper_id")
     api_paper_recommendation.set_defaults(func=cmd_api_paper_recommendation)
+
+    api_unified_search = sub.add_parser("api-unified-search")
+    api_unified_search.set_defaults(func=cmd_api_unified_search)
 
     api_paper_report = sub.add_parser("api-paper-report")
     api_paper_report.add_argument("paper_id")

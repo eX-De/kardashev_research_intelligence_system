@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Callable
 
 from .config import Settings
+from .compute_contract import ComputeRequestCancelled
 from .db import clean_unicode, from_json
 from .db_types import DbConnection
 from .embeddings import cosine, embed_text
@@ -852,7 +853,13 @@ def _knowledge_results(
         )
 
 
-def deep_search(conn: DbConnection, settings: Settings, payload: dict[str, object]) -> dict[str, object]:
+def deep_search(
+    conn: DbConnection,
+    settings: Settings,
+    payload: dict[str, object],
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> dict[str, object]:
     started = time.perf_counter()
     try:
         timeout_ms = max(1_000, min(int(payload.get("timeout_ms") or 60_000), 120_000))
@@ -876,10 +883,14 @@ def deep_search(conn: DbConnection, settings: Settings, payload: dict[str, objec
         if payload.get(key):
             filters[key] = payload.get(key)
 
+    if cancelled and cancelled():
+        raise ComputeRequestCancelled()
     model = clean_unicode(settings.llm_embedding_model).strip()
     if not model:
         raise RuntimeError("Embedding model is not configured")
     query_embedding = embed_text(settings, query)
+    if cancelled and cancelled():
+        raise ComputeRequestCancelled()
     if not query_embedding:
         raise RuntimeError("Query embedding returned no vector")
 
@@ -913,6 +924,8 @@ def deep_search(conn: DbConnection, settings: Settings, payload: dict[str, objec
         source_calls.append(("knowledge_keywords", _knowledge_lexical_results))
         source_calls.append(("non_obsidian_knowledge", _knowledge_results))
     for source, loader in source_calls:
+        if cancelled and cancelled():
+            raise ComputeRequestCancelled()
         if time.perf_counter() >= deadline:
             partial_failures.append({"source": source, "error": f"search timeout after {timeout_ms} ms"})
             continue

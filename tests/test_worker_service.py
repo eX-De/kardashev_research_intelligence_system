@@ -25,7 +25,7 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         entries = worker_job_inventory()
         inventory_types = {str(entry["type"]) for entry in entries}
         self.assertEqual(inventory_types, set(service.SUPPORTED_WORKER_JOB_TYPES))
-        self.assertEqual(len(entries), 23)
+        self.assertEqual(len(entries), 22)
         for entry in entries:
             self.assertTrue(str(entry.get("label") or "").strip(), entry["type"])
             self.assertTrue(str(entry.get("concurrency_group") or "").strip(), entry["type"])
