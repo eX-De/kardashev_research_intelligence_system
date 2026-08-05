@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
 
@@ -73,8 +73,37 @@ function startProcess(name, command, args) {
   return child;
 }
 
-process.on("SIGINT", () => shutdown(130));
-process.on("SIGTERM", () => shutdown(143));
+export function initializeSchema({ run = spawnSync } = {}) {
+  console.log(`[start] initializing database schema: ${PYTHON_BIN} -m worker.cli init-db`);
+  const result = run(PYTHON_BIN, ["-m", "worker.cli", "init-db"], {
+    cwd: ROOT_DIR,
+    env: process.env,
+    stdio: "inherit",
+    windowsHide: false
+  });
+  if (result?.error) throw result.error;
+  if (result?.status !== 0) {
+    throw new Error(`database schema initialization failed with ${formatExit(result?.status, result?.signal)}`);
+  }
+}
 
-startProcess("api", process.execPath, ["server.js"]);
-startProcess("worker", PYTHON_BIN, ["-m", "worker.service"]);
+function installSignalHandlers() {
+  process.on("SIGINT", () => shutdown(130));
+  process.on("SIGTERM", () => shutdown(143));
+}
+
+export function main({ initialize = initializeSchema, launch = startProcess, installSignals = installSignalHandlers } = {}) {
+  installSignals();
+  initialize();
+  launch("api", process.execPath, ["server.js"]);
+  launch("worker", PYTHON_BIN, ["-m", "worker.service"]);
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    main();
+  } catch (error) {
+    console.error(`[start] ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+  }
+}

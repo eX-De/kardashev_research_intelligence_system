@@ -13,6 +13,7 @@ from typing import Any
 from .config import load_settings
 from .db import clean_unicode, connect, init_db
 from .queue import (
+    cancel_worker_job_before_dispatch,
     claim_next_worker_job,
     cleanup_stale_worker_jobs,
     complete_worker_job,
@@ -187,21 +188,22 @@ class WorkerHeartbeat:
         self.worker_id = worker_id
         self.interval_seconds = max(1, int(interval_seconds))
         self.started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        self._current_job_id: int | None = None
+        self._current_job: tuple[int, int] | None = None
         self._state_lock = threading.Lock()
         self._beat_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="kris-worker-heartbeat", daemon=True)
 
-    def _snapshot(self) -> int | None:
+    def _snapshot(self) -> tuple[int, int] | None:
         with self._state_lock:
-            return self._current_job_id
+            return self._current_job
 
     def _beat(self, *, status_override: str = "") -> None:
         if not self._beat_lock.acquire(blocking=False):
             return
         try:
-            current_job_id = self._snapshot()
+            current_job = self._snapshot()
+            current_job_id = current_job[0] if current_job else None
             conn = connect()
             try:
                 heartbeat_worker(
@@ -214,11 +216,12 @@ class WorkerHeartbeat:
                     meta={"service": "worker.service"},
                     commit=False,
                 )
-                if current_job_id:
+                if current_job:
                     heartbeat_worker_job(
                         conn,
                         self.worker_id,
                         current_job_id,
+                        current_job[1],
                         commit=False,
                     )
                 conn.commit()
@@ -238,9 +241,9 @@ class WorkerHeartbeat:
         self._beat()
         self._thread.start()
 
-    def set_current_job(self, worker_job_id: int | None) -> None:
+    def set_current_job(self, worker_job: tuple[int, int] | None) -> None:
         with self._state_lock:
-            self._current_job_id = int(worker_job_id) if worker_job_id else None
+            self._current_job = worker_job
         self._beat()
 
     def stop(self) -> None:
@@ -251,6 +254,36 @@ class WorkerHeartbeat:
             self._beat(status_override="stopped")
         except Exception:
             pass
+
+
+class WorkerStaleRecovery:
+    def __init__(self, interval_seconds: int, stale_after_seconds: int) -> None:
+        self.interval_seconds = max(1, int(interval_seconds))
+        self.stale_after_seconds = max(60, int(stale_after_seconds))
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="kris-worker-stale-recovery", daemon=True)
+
+    def scan_once(self) -> dict[str, int]:
+        conn = connect()
+        try:
+            return cleanup_stale_worker_jobs(conn, stale_after_seconds=self.stale_after_seconds)
+        finally:
+            conn.close()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            try:
+                self.scan_once()
+            except Exception as exc:
+                print(f"KRIS worker stale recovery failed: {exc}", file=sys.stderr, flush=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=self.interval_seconds + 1)
 
 
 def _payload(worker_job: dict[str, Any]) -> dict[str, Any]:
@@ -813,23 +846,41 @@ def run_once(worker_id: str, on_job_change=None) -> dict[str, Any]:
         if not claimed:
             return {"claimed": False}
         worker_job = claimed["worker_job"]
+        lease_attempt = int(worker_job.get("attempts") or 1)
         if on_job_change:
-            on_job_change(int(worker_job["id"]))
+            on_job_change((int(worker_job["id"]), lease_attempt))
         handler_started_at = time.perf_counter()
         _log_job_observation("worker_job.running", worker_job, worker_id)
-        insert_app_event(conn, "task.started", task_event_payload(worker_job, "running"))
         try:
             settings = apply_stored_settings(conn, base_settings)
+            cancellation = cancel_worker_job_before_dispatch(
+                conn,
+                int(worker_job["id"]),
+                worker_id=worker_id,
+                lease_attempt=lease_attempt,
+            )
+            if cancellation.get("cancelled"):
+                cancelled_job = cancellation["worker_job"] or worker_job
+                _log_job_observation(
+                    "worker_job.cancelled",
+                    cancelled_job,
+                    worker_id,
+                    handler_duration_seconds=0,
+                )
+                return {"claimed": True, "worker_job": cancelled_job, "cancelled": True}
             try:
                 result = dispatch_worker_job(conn, settings, worker_job)
             except Exception as exc:
-                failed = fail_worker_job(conn, int(worker_job["id"]), str(exc), worker_id=worker_id)
+                notification = _reader_import_notification(worker_job, error_message=str(exc))
+                failed = fail_worker_job(
+                    conn,
+                    int(worker_job["id"]),
+                    str(exc),
+                    worker_id=worker_id,
+                    lease_attempt=lease_attempt,
+                    event_extra={"notification": notification} if notification else None,
+                )
                 failed_job = failed["worker_job"] or worker_job
-                failed_payload = task_event_payload(failed_job, "failed", message=str(exc))
-                notification = _reader_import_notification(failed_job, error_message=str(exc))
-                if notification:
-                    failed_payload["notification"] = notification
-                insert_app_event(conn, "task.failed", failed_payload)
                 _log_job_observation(
                     "worker_job.failed",
                     failed_job,
@@ -843,9 +894,9 @@ def run_once(worker_id: str, on_job_change=None) -> dict[str, Any]:
                 result,
                 message=str(result.get("message") or f"{worker_job['job_type']} completed"),
                 worker_id=worker_id,
+                lease_attempt=lease_attempt,
             )
             completed_job = completed["worker_job"] or worker_job
-            insert_app_event(conn, "task.finished", task_event_payload(completed_job, "completed", result=result))
             _publish_project_domain_events(conn, worker_job, result)
             _publish_artifact_domain_events(conn, worker_job, result)
             _publish_reader_domain_events(conn, worker_job, result)
@@ -880,6 +931,12 @@ def run_once(worker_id: str, on_job_change=None) -> dict[str, Any]:
 def main() -> int:
     worker_id = _worker_id()
     poll_interval_ms = _env_int("KRIS_WORKER_POLL_INTERVAL_MS", 1000, minimum=100)
+    stale_after_seconds = _env_int("KRIS_WORKER_JOB_STALE_AFTER_SECONDS", 90, minimum=60)
+    stale_recovery_interval_seconds = _env_int(
+        "KRIS_WORKER_STALE_RECOVERY_INTERVAL_SECONDS",
+        30,
+        minimum=1,
+    )
     os.environ.setdefault("KRIS_WORKER_OUTBOX_EVENTS", "1")
     if _env_flag("KRIS_WORKER_INIT_DB_ON_START", True):
         load_settings()
@@ -888,7 +945,7 @@ def main() -> int:
             init_db(conn)
             cleanup_stale_worker_jobs(
                 conn,
-                stale_after_seconds=_env_int("KRIS_WORKER_JOB_STALE_AFTER_SECONDS", 90, minimum=60),
+                stale_after_seconds=stale_after_seconds,
             )
         finally:
             conn.close()
@@ -896,7 +953,9 @@ def main() -> int:
         worker_id,
         _env_int("KRIS_WORKER_HEARTBEAT_INTERVAL_SECONDS", 5, minimum=1),
     )
+    stale_recovery = WorkerStaleRecovery(stale_recovery_interval_seconds, stale_after_seconds)
     heartbeat.start()
+    stale_recovery.start()
     print(f"KRIS worker service started: {worker_id}", flush=True)
     try:
         while True:
@@ -910,6 +969,7 @@ def main() -> int:
                 traceback.print_exc(file=sys.stderr)
                 time.sleep(poll_interval_ms / 1000)
     finally:
+        stale_recovery.stop()
         heartbeat.stop()
 
 

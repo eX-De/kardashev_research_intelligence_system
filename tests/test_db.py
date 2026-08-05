@@ -81,6 +81,8 @@ class PostgresTestDatabaseTests(unittest.TestCase):
         schema = postgres_schema_sql()
         indexes = postgres_index_sql()
         self.assertIn("CREATE TABLE IF NOT EXISTS worker_jobs", schema)
+        self.assertIn("cancel_requested_at TEXT", schema)
+        self.assertIn("cancel_reason TEXT", schema)
         self.assertIn("CREATE TABLE IF NOT EXISTS app_events", schema)
         self.assertIn("worker_jobs", REQUIRED_TABLES)
         self.assertIn("app_events", REQUIRED_TABLES)

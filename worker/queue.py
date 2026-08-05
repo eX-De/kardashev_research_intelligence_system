@@ -23,6 +23,8 @@ def _row_to_worker_job(row: Any | None) -> dict[str, Any] | None:
         "run_after": row["run_after"],
         "locked_by": row["locked_by"] or "",
         "locked_at": row["locked_at"],
+        "cancel_requested_at": row["cancel_requested_at"],
+        "cancel_reason": row["cancel_reason"] or "",
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
         "started_at": row["started_at"],
@@ -50,7 +52,7 @@ def _worker_job_select_columns() -> str:
     return """
       id, job_run_id, job_type, status, priority, payload_json, result_json,
       error_message, attempts, max_attempts, run_after, locked_by, locked_at,
-      created_at, updated_at, started_at, finished_at
+      cancel_requested_at, cancel_reason, created_at, updated_at, started_at, finished_at
     """
 
 
@@ -71,6 +73,20 @@ def _parse_timestamp(value: str | None) -> datetime | None:
 
 
 _TASK_RESULT_MISSING = object()
+
+
+def _required_worker_id(worker_id: str) -> str:
+    normalized = str(worker_id or "").strip()
+    if not normalized:
+        raise ValueError("worker_id is required")
+    return normalized
+
+
+def _required_lease_attempt(lease_attempt: int) -> int:
+    normalized = int(lease_attempt or 0)
+    if normalized < 1:
+        raise ValueError("lease_attempt must be a positive integer")
+    return normalized
 
 
 def _compact_task_result(result: Any) -> Any:
@@ -213,11 +229,14 @@ def heartbeat_worker_job(
     conn: Any,
     worker_id: str,
     worker_job_id: int,
+    lease_attempt: int,
     *,
     now: str | None = None,
     commit: bool = True,
 ) -> bool:
     heartbeat_at = now or utc_now()
+    normalized_worker_id = _required_worker_id(worker_id)
+    normalized_lease_attempt = _required_lease_attempt(lease_attempt)
     row = conn.execute(
         """
         UPDATE worker_jobs
@@ -225,9 +244,16 @@ def heartbeat_worker_job(
         WHERE id = ?
           AND status = 'running'
           AND locked_by = ?
+          AND attempts = ?
         RETURNING job_run_id
         """,
-        (heartbeat_at, heartbeat_at, int(worker_job_id), str(worker_id)),
+        (
+            heartbeat_at,
+            heartbeat_at,
+            int(worker_job_id),
+            normalized_worker_id,
+            normalized_lease_attempt,
+        ),
     ).fetchone()
     if row and row["job_run_id"] is not None:
         conn.execute(
@@ -241,12 +267,14 @@ def heartbeat_worker_job(
 
 def claim_next_worker_job(conn: Any, worker_id: str, *, now: str | None = None) -> dict[str, Any] | None:
     claimed_at = now or utc_now()
+    normalized_worker_id = _required_worker_id(worker_id)
     try:
         row = conn.execute(
             f"""
             SELECT {_worker_job_select_columns()}
             FROM worker_jobs
             WHERE status = 'queued'
+              AND cancel_requested_at IS NULL
               AND attempts < max_attempts
               AND (run_after IS NULL OR run_after <= ?)
             ORDER BY priority DESC, run_after NULLS FIRST, id
@@ -268,11 +296,16 @@ def claim_next_worker_job(conn: Any, worker_id: str, *, now: str | None = None) 
                 started_at = COALESCE(started_at, ?),
                 updated_at = ?
             WHERE id = ?
+              AND status = 'queued'
+              AND cancel_requested_at IS NULL
             RETURNING {_worker_job_select_columns()}
             """,
-            (worker_id, claimed_at, claimed_at, claimed_at, int(row["id"])),
+            (normalized_worker_id, claimed_at, claimed_at, claimed_at, int(row["id"])),
         ).fetchone()
         worker_job = _row_to_worker_job(updated)
+        if not worker_job:
+            conn.rollback()
+            return None
         job_run = None
         if worker_job and worker_job.get("job_run_id"):
             job_run = conn.execute(
@@ -284,8 +317,19 @@ def claim_next_worker_job(conn: Any, worker_id: str, *, now: str | None = None) 
                 WHERE id = ?
                 RETURNING {_job_run_select_columns()}
                 """,
-                (f"Claimed by worker {worker_id}", claimed_at, int(worker_job["job_run_id"])),
+                (f"Claimed by worker {normalized_worker_id}", claimed_at, int(worker_job["job_run_id"])),
             ).fetchone()
+        insert_app_event(
+            conn,
+            "task.started",
+            task_event_payload(
+                worker_job,
+                "running",
+                message=f"Claimed by worker {normalized_worker_id}",
+            ),
+            created_at=claimed_at,
+            commit=False,
+        )
         conn.commit()
         return {"worker_job": worker_job, "job_run": _row_to_job_run(job_run)}
     except Exception:
@@ -323,6 +367,7 @@ def cleanup_stale_worker_jobs(
             "stale_worker_jobs_checked": len(rows),
             "stale_worker_jobs_requeued": 0,
             "stale_worker_jobs_failed": 0,
+            "stale_worker_jobs_cancelled": 0,
         }
         for row in rows:
             current = _row_to_worker_job(row)
@@ -336,7 +381,45 @@ def cleanup_stale_worker_jobs(
                 if exhausted
                 else f"Requeued stale worker job after {attempts}/{max_attempts} attempts"
             )
-            if exhausted:
+            if current.get("cancel_requested_at"):
+                message = str(current.get("cancel_reason") or "Worker job cancelled")
+                updated = conn.execute(
+                    f"""
+                    UPDATE worker_jobs
+                    SET status = 'cancelled',
+                        error_message = '',
+                        locked_by = '',
+                        locked_at = NULL,
+                        finished_at = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                      AND status = 'running'
+                      AND attempts = ?
+                    RETURNING {_worker_job_select_columns()}
+                    """,
+                    (now_text, now_text, int(current["id"]), attempts),
+                ).fetchone()
+                worker_job = _row_to_worker_job(updated)
+                if not worker_job:
+                    continue
+                if worker_job.get("job_run_id"):
+                    conn.execute(
+                        """
+                        UPDATE job_runs
+                        SET status = 'cancelled', finished_at = ?, message = ?, heartbeat_at = ?
+                        WHERE id = ?
+                        """,
+                        (now_text, message, now_text, int(worker_job["job_run_id"])),
+                    )
+                insert_app_event(
+                    conn,
+                    "task.cancelled",
+                    task_event_payload(worker_job, "cancelled", message=message, stale=True),
+                    created_at=now_text,
+                    commit=False,
+                )
+                result["stale_worker_jobs_cancelled"] += 1
+            elif exhausted:
                 updated = conn.execute(
                     f"""
                     UPDATE worker_jobs
@@ -416,20 +499,129 @@ def cleanup_stale_worker_jobs(
         raise
 
 
+def _cancel_owned_worker_job(
+    conn: Any,
+    worker_job_id: int,
+    worker_id: str,
+    lease_attempt: int,
+    *,
+    message: str,
+    now: str,
+) -> dict[str, Any] | None:
+    row = conn.execute(
+        f"""
+        UPDATE worker_jobs
+        SET status = 'cancelled',
+            error_message = '',
+            locked_by = '',
+            locked_at = NULL,
+            finished_at = ?,
+            updated_at = ?
+        WHERE id = ?
+          AND status = 'running'
+          AND locked_by = ?
+          AND attempts = ?
+          AND cancel_requested_at IS NOT NULL
+        RETURNING {_worker_job_select_columns()}
+        """,
+        (now, now, int(worker_job_id), worker_id, lease_attempt),
+    ).fetchone()
+    return _row_to_worker_job(row)
+
+
+def _update_job_run_terminal(
+    conn: Any,
+    worker_job: dict[str, Any],
+    status: str,
+    message: str,
+    now: str,
+) -> dict[str, Any] | None:
+    if not worker_job.get("job_run_id"):
+        return None
+    row = conn.execute(
+        f"""
+        UPDATE job_runs
+        SET status = ?, finished_at = ?, message = ?, heartbeat_at = ?
+        WHERE id = ?
+        RETURNING {_job_run_select_columns()}
+        """,
+        (status, now, message, now, int(worker_job["job_run_id"])),
+    ).fetchone()
+    return _row_to_job_run(row)
+
+
+def cancel_worker_job_before_dispatch(
+    conn: Any,
+    worker_job_id: int,
+    *,
+    worker_id: str,
+    lease_attempt: int,
+    message: str = "Worker job cancelled",
+    now: str | None = None,
+) -> dict[str, Any]:
+    finished = now or utc_now()
+    normalized_worker_id = _required_worker_id(worker_id)
+    normalized_lease_attempt = _required_lease_attempt(lease_attempt)
+    normalized_message = str(message or "Worker job cancelled")
+    try:
+        worker_job = _cancel_owned_worker_job(
+            conn,
+            worker_job_id,
+            normalized_worker_id,
+            normalized_lease_attempt,
+            message=normalized_message,
+            now=finished,
+        )
+        if not worker_job:
+            current = conn.execute(
+                """
+                SELECT status, locked_by, attempts, cancel_requested_at
+                FROM worker_jobs
+                WHERE id = ?
+                """,
+                (int(worker_job_id),),
+            ).fetchone()
+            if (
+                current
+                and current["status"] == "running"
+                and str(current["locked_by"] or "") == normalized_worker_id
+                and int(current["attempts"] or 0) == normalized_lease_attempt
+                and not current["cancel_requested_at"]
+            ):
+                conn.rollback()
+                return {"worker_job": None, "job_run": None, "cancelled": False}
+            raise RuntimeError(f"Worker job lease lost before dispatch: {worker_job_id}")
+        job_run = _update_job_run_terminal(conn, worker_job, "cancelled", normalized_message, finished)
+        insert_app_event(
+            conn,
+            "task.cancelled",
+            task_event_payload(worker_job, "cancelled", message=normalized_message),
+            created_at=finished,
+            commit=False,
+        )
+        conn.commit()
+        return {"worker_job": worker_job, "job_run": job_run, "cancelled": True}
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+
+
 def complete_worker_job(
     conn: Any,
     worker_job_id: int,
     result: dict[str, Any],
     *,
+    worker_id: str,
+    lease_attempt: int,
     message: str = "Worker job completed",
-    worker_id: str = "",
     now: str | None = None,
 ) -> dict[str, Any]:
     finished = now or utc_now()
-    owner_filter = " AND status = 'running' AND locked_by = ?" if worker_id else ""
-    params = [to_json(result or {}), finished, finished, int(worker_job_id)]
-    if worker_id:
-        params.append(str(worker_id))
+    normalized_worker_id = _required_worker_id(worker_id)
+    normalized_lease_attempt = _required_lease_attempt(lease_attempt)
     try:
         row = conn.execute(
             f"""
@@ -437,32 +629,38 @@ def complete_worker_job(
             SET status = 'completed',
                 result_json = ?,
                 error_message = '',
+                locked_by = '',
+                locked_at = NULL,
                 finished_at = ?,
                 updated_at = ?
-            WHERE id = ?{owner_filter}
+            WHERE id = ?
+              AND status = 'running'
+              AND locked_by = ?
+              AND attempts = ?
             RETURNING {_worker_job_select_columns()}
             """,
-            tuple(params),
+            (
+                to_json(result or {}),
+                finished,
+                finished,
+                int(worker_job_id),
+                normalized_worker_id,
+                normalized_lease_attempt,
+            ),
         ).fetchone()
         worker_job = _row_to_worker_job(row)
         if not worker_job:
             raise RuntimeError(f"Worker job lease lost before completion: {worker_job_id}")
-        job_run = None
-        if worker_job and worker_job.get("job_run_id"):
-            job_run = conn.execute(
-                f"""
-                UPDATE job_runs
-                SET status = 'completed',
-                    finished_at = ?,
-                    message = ?,
-                    heartbeat_at = ?
-                WHERE id = ?
-                RETURNING {_job_run_select_columns()}
-                """,
-                (finished, message, finished, int(worker_job["job_run_id"])),
-            ).fetchone()
+        job_run = _update_job_run_terminal(conn, worker_job, "completed", message, finished)
+        insert_app_event(
+            conn,
+            "task.finished",
+            task_event_payload(worker_job, "completed", message=message, result=result),
+            created_at=finished,
+            commit=False,
+        )
         conn.commit()
-        return {"worker_job": worker_job, "job_run": _row_to_job_run(job_run)}
+        return {"worker_job": worker_job, "job_run": job_run, "cancelled": False}
     except Exception:
         try:
             conn.rollback()
@@ -476,47 +674,50 @@ def fail_worker_job(
     worker_job_id: int,
     error_message: str,
     *,
-    worker_id: str = "",
+    worker_id: str,
+    lease_attempt: int,
+    event_extra: dict[str, Any] | None = None,
     now: str | None = None,
 ) -> dict[str, Any]:
     finished = now or utc_now()
     message = str(error_message or "Worker job failed")
-    owner_filter = " AND status = 'running' AND locked_by = ?" if worker_id else ""
-    params = [message, finished, finished, int(worker_job_id)]
-    if worker_id:
-        params.append(str(worker_id))
+    normalized_worker_id = _required_worker_id(worker_id)
+    normalized_lease_attempt = _required_lease_attempt(lease_attempt)
     try:
         row = conn.execute(
             f"""
             UPDATE worker_jobs
             SET status = 'failed',
                 error_message = ?,
+                locked_by = '',
+                locked_at = NULL,
                 finished_at = ?,
                 updated_at = ?
-            WHERE id = ?{owner_filter}
+            WHERE id = ?
+              AND status = 'running'
+              AND locked_by = ?
+              AND attempts = ?
             RETURNING {_worker_job_select_columns()}
             """,
-            tuple(params),
+            (
+                message,
+                finished,
+                finished,
+                int(worker_job_id),
+                normalized_worker_id,
+                normalized_lease_attempt,
+            ),
         ).fetchone()
         worker_job = _row_to_worker_job(row)
         if not worker_job:
             raise RuntimeError(f"Worker job lease lost before failure: {worker_job_id}")
-        job_run = None
-        if worker_job and worker_job.get("job_run_id"):
-            job_run = conn.execute(
-                f"""
-                UPDATE job_runs
-                SET status = 'failed',
-                    finished_at = ?,
-                    message = ?,
-                    heartbeat_at = ?
-                WHERE id = ?
-                RETURNING {_job_run_select_columns()}
-                """,
-                (finished, message, finished, int(worker_job["job_run_id"])),
-            ).fetchone()
+        job_run = _update_job_run_terminal(conn, worker_job, "failed", message, finished)
+        event_payload = task_event_payload(worker_job, "failed", message=message)
+        if event_extra:
+            event_payload.update(event_extra)
+        insert_app_event(conn, "task.failed", event_payload, created_at=finished, commit=False)
         conn.commit()
-        return {"worker_job": worker_job, "job_run": _row_to_job_run(job_run)}
+        return {"worker_job": worker_job, "job_run": job_run, "cancelled": False}
     except Exception:
         try:
             conn.rollback()

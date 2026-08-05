@@ -13,6 +13,14 @@ from worker.queue import task_event_payload
 
 
 class WorkerServiceDispatchTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.cancel_checkpoint_patcher = patch(
+            "worker.service.cancel_worker_job_before_dispatch",
+            return_value={"worker_job": None, "job_run": None, "cancelled": False},
+        )
+        self.cancel_checkpoint = self.cancel_checkpoint_patcher.start()
+        self.addCleanup(self.cancel_checkpoint_patcher.stop)
+
     def test_dispatch_inventory_has_labels_and_observation_groups(self) -> None:
         entries = worker_job_inventory()
         inventory_types = {str(entry["type"]) for entry in entries}
@@ -27,7 +35,7 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         contract = json.loads(fixture_path.read_text(encoding="utf-8"))
         self.assertEqual(
             [item["name"] for item in contract["cases"]],
-            ["queued", "running", "completed", "failed", "requeued"],
+            ["queued", "running", "completed", "failed", "requeued", "cancelled"],
         )
         for item in contract["cases"]:
             options = dict(item["options"])
@@ -274,29 +282,47 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         }
         with patch("worker.service.connect", return_value=conn), \
             patch("worker.service.claim_next_worker_job", return_value={"worker_job": worker_job, "job_run": {}}), \
-            patch("worker.service.insert_app_event") as insert_event, \
             patch("worker.service.load_settings", return_value=object()), \
             patch("worker.service.apply_stored_settings", return_value=object()), \
             patch("worker.service.dispatch_worker_job", return_value={"message": "done"}), \
-            patch("worker.service.complete_worker_job", return_value={"worker_job": {**worker_job, "status": "completed"}, "job_run": {}}):
+            patch("worker.service.complete_worker_job", return_value={"worker_job": {**worker_job, "status": "completed"}, "job_run": {}}) as complete:
             job_changes = []
             result = service.run_once("worker-test", job_changes.append)
 
         self.assertTrue(result["claimed"])
-        self.assertEqual(insert_event.call_args_list[0].args[1], "task.started")
-        self.assertEqual(insert_event.call_args_list[1].args[1], "task.finished")
-        started_payload = insert_event.call_args_list[0].args[2]
-        self.assertEqual(started_payload["task"]["id"], 44)
-        self.assertEqual(started_payload["task"]["worker_job_id"], 9)
-        self.assertNotIn("job_id", started_payload["task"])
-        finished_payload = insert_event.call_args_list[1].args[2]
-        self.assertEqual(finished_payload["task"]["id"], 44)
-        self.assertEqual(finished_payload["task"]["worker_job_id"], 9)
-        self.assertEqual(finished_payload["task"]["result"], {"message": "done"})
-        self.assertEqual(job_changes, [9, None])
+        self.assertEqual(complete.call_args.kwargs["worker_id"], "worker-test")
+        self.assertEqual(complete.call_args.kwargs["lease_attempt"], 1)
+        self.assertEqual(job_changes, [(9, 1), None])
         conn.close.assert_called_once_with()
 
-    def test_run_once_toasts_when_reader_import_fails(self) -> None:
+    def test_run_once_confirms_requested_cancellation_before_dispatch(self) -> None:
+        conn = Mock()
+        worker_job = {
+            "id": 9,
+            "job_run_id": 44,
+            "job_type": "generate-reports",
+            "payload": {"command": "generate-reports", "source": "manual", "args": []},
+            "attempts": 1,
+        }
+        cancelled_job = {**worker_job, "status": "cancelled", "cancel_requested_at": "now"}
+        self.cancel_checkpoint.return_value = {
+            "worker_job": cancelled_job,
+            "job_run": {"status": "cancelled"},
+            "cancelled": True,
+        }
+        with patch("worker.service.connect", return_value=conn), \
+            patch("worker.service.claim_next_worker_job", return_value={"worker_job": worker_job, "job_run": {}}), \
+            patch("worker.service.load_settings", return_value=object()), \
+            patch("worker.service.apply_stored_settings", return_value=object()), \
+            patch("worker.service.dispatch_worker_job") as dispatch, \
+            patch("worker.service.complete_worker_job") as complete:
+            result = service.run_once("worker-test")
+
+        self.assertTrue(result["cancelled"])
+        dispatch.assert_not_called()
+        complete.assert_not_called()
+
+    def test_handler_error_wins_over_late_cancel_request_and_fails_job(self) -> None:
         conn = Mock()
         worker_job = {
             "id": 48,
@@ -311,24 +337,24 @@ class WorkerServiceDispatchTests(unittest.TestCase):
             "status": "failed",
             "error_message": "HTTP Error 403: Forbidden",
             "finished_at": "2026-07-23T03:38:19+00:00",
+            "cancel_requested_at": "2026-07-23T03:38:18.500000+00:00",
         }
         with patch("worker.service.connect", return_value=conn), \
             patch("worker.service.claim_next_worker_job", return_value={"worker_job": worker_job, "job_run": {}}), \
-            patch("worker.service.insert_app_event") as insert_event, \
             patch("worker.service.load_settings", return_value=object()), \
             patch("worker.service.apply_stored_settings", return_value=object()), \
             patch("worker.service.dispatch_worker_job", side_effect=RuntimeError("HTTP Error 403: Forbidden")), \
-            patch("worker.service.fail_worker_job", return_value={"worker_job": failed_job, "job_run": {}}):
+            patch("worker.service.fail_worker_job", return_value={"worker_job": failed_job, "job_run": {}}) as fail:
             with self.assertRaisesRegex(RuntimeError, "HTTP Error 403: Forbidden"):
                 service.run_once("worker-test")
 
-        failed_event = next(call for call in insert_event.call_args_list if call.args[1] == "task.failed")
-        payload = failed_event.args[2]
-        self.assertEqual(payload["task"]["status"], "failed")
-        self.assertEqual(payload["notification"]["channels"], ["toast"])
-        self.assertEqual(payload["notification"]["severity"], "bad")
-        self.assertEqual(payload["notification"]["title"], "URL 导入失败")
-        self.assertEqual(payload["notification"]["detail"], "HTTP Error 403: Forbidden")
+        payload = fail.call_args.kwargs["event_extra"]["notification"]
+        self.assertEqual(payload["channels"], ["toast"])
+        self.assertEqual(payload["severity"], "bad")
+        self.assertEqual(payload["title"], "URL 导入失败")
+        self.assertEqual(payload["detail"], "HTTP Error 403: Forbidden")
+        self.assertEqual(fail.call_args.kwargs["lease_attempt"], 1)
+        self.assertEqual(failed_job["status"], "failed")
         conn.close.assert_called_once_with()
 
     def test_run_once_loads_dotenv_before_connecting(self) -> None:
@@ -371,6 +397,7 @@ class WorkerServiceDispatchTests(unittest.TestCase):
             patch("worker.service.init_db"), \
             patch("worker.service.cleanup_stale_worker_jobs"), \
             patch("worker.service.WorkerHeartbeat") as heartbeat_class, \
+            patch("worker.service.WorkerStaleRecovery") as stale_recovery_class, \
             patch("worker.service.run_once", side_effect=KeyboardInterrupt):
             self.assertEqual(service.main(), 0)
 
@@ -378,8 +405,24 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         conn.close.assert_called_once_with()
         heartbeat_class.return_value.start.assert_called_once_with()
         heartbeat_class.return_value.stop.assert_called_once_with()
+        stale_recovery_class.return_value.start.assert_called_once_with()
+        stale_recovery_class.return_value.stop.assert_called_once_with()
 
-    def test_run_once_publishes_project_domain_events(self) -> None:
+    def test_stale_recovery_scan_uses_an_independent_connection(self) -> None:
+        conn = Mock()
+        with patch("worker.service.connect", return_value=conn), \
+            patch(
+                "worker.service.cleanup_stale_worker_jobs",
+                return_value={"stale_worker_jobs_requeued": 1},
+            ) as cleanup:
+            recovery = service.WorkerStaleRecovery(5, 90)
+            result = recovery.scan_once()
+
+        self.assertEqual(result["stale_worker_jobs_requeued"], 1)
+        cleanup.assert_called_once_with(conn, stale_after_seconds=90)
+        conn.close.assert_called_once_with()
+
+    def test_handler_success_wins_over_late_cancel_and_publishes_domain_events(self) -> None:
         conn = Mock()
         worker_job = {
             "id": 12,
@@ -411,7 +454,7 @@ class WorkerServiceDispatchTests(unittest.TestCase):
             service.run_once("worker-test")
 
         event_names = [call.args[1] for call in insert_event.call_args_list]
-        self.assertIn("task.finished", event_names)
+        self.assertNotIn("task.finished", event_names)
         self.assertIn("project.updated", event_names)
         self.assertIn("artifact.created", event_names)
 
@@ -525,7 +568,14 @@ class WorkerServiceDispatchTests(unittest.TestCase):
             patch("worker.service.load_settings", return_value=object()), \
             patch("worker.service.apply_stored_settings", return_value=object()), \
             patch("worker.service.dispatch_worker_job", return_value=result_payload), \
-            patch("worker.service.complete_worker_job", return_value={"worker_job": {**worker_job, "status": "completed"}, "job_run": {}}):
+            patch(
+                "worker.service.complete_worker_job",
+                return_value={
+                    "worker_job": {**worker_job, "status": "completed", "cancel_requested_at": "now"},
+                    "job_run": {},
+                    "cancelled": False,
+                },
+            ):
             service.run_once("worker-test")
 
         report_events = [call for call in insert_event.call_args_list if call.args[1] == "paper_report.updated"]
@@ -601,7 +651,7 @@ class WorkerServiceDispatchTests(unittest.TestCase):
             service.run_once("worker-test")
 
         event_names = [call.args[1] for call in insert_event.call_args_list]
-        self.assertIn("task.finished", event_names)
+        self.assertNotIn("task.finished", event_names)
         self.assertIn("artifact.updated", event_names)
         self.assertIn("paper_report.updated", event_names)
         self.assertIn("papers.changed", event_names)

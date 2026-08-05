@@ -26,6 +26,8 @@ export const SERVER_EVENTS = Object.freeze({
   READER_PAPERS_IMPORTED: "reader.papers.imported",
   SETTINGS_CHANGED: "settings.changed",
   SEARCH_COMPLETED: "search.completed",
+  TASK_CANCEL_REQUESTED: "task.cancel_requested",
+  TASK_CANCELLED: "task.cancelled",
   TASK_FAILED: "task.failed",
   TASK_FINISHED: "task.finished",
   TASK_STARTED: "task.started",

@@ -143,7 +143,8 @@ test("Node task event payloads match the shared cross-language contract", () => 
     "running",
     "completed",
     "failed",
-    "requeued"
+    "requeued",
+    "cancelled"
   ]);
   for (const item of taskEventContract.cases) {
     assert.deepEqual(

@@ -28,6 +28,8 @@ export const SERVER_EVENTS = Object.freeze({
   READER_PAPERS_IMPORTED: "reader.papers.imported",
   SETTINGS_CHANGED: "settings.changed",
   SEARCH_COMPLETED: "search.completed",
+  TASK_CANCEL_REQUESTED: "task.cancel_requested",
+  TASK_CANCELLED: "task.cancelled",
   TASK_FAILED: "task.failed",
   TASK_FINISHED: "task.finished",
   TASK_STARTED: "task.started",
@@ -54,6 +56,8 @@ const TASK_EVENTS = new Set([
   SERVER_EVENTS.JOB_FAILED,
   SERVER_EVENTS.JOB_FINISHED,
   SERVER_EVENTS.JOB_STARTED,
+  SERVER_EVENTS.TASK_CANCEL_REQUESTED,
+  SERVER_EVENTS.TASK_CANCELLED,
   SERVER_EVENTS.TASK_FAILED,
   SERVER_EVENTS.TASK_FINISHED,
   SERVER_EVENTS.TASK_STARTED

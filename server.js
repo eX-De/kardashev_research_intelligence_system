@@ -16,7 +16,6 @@ import {
   compactProjectChangedPayload,
   compactProjectPayload,
   compactSettingsChangedPayload,
-  compactTaskEventPayload,
   compactUpdatePayload,
   createEventPublisher,
   eventNumber,
@@ -76,7 +75,12 @@ import {
   unlinkProjectNote as unlinkNodeProjectNote,
   unlinkProjectPaper as unlinkNodeProjectPaper
 } from "./server/projects.js";
-import { cleanupStaleWorkerJobs, countActiveWorkerJobs, enqueueWorkerJob, getWorkerJob } from "./server/workerQueue.js";
+import {
+  countActiveWorkerJobs,
+  enqueueWorkerJob,
+  getWorkerJob,
+  requestWorkerJobCancellation
+} from "./server/workerQueue.js";
 import { getWorkerStatus, requireAvailableWorker } from "./server/workerHealth.js";
 import { normalizeSearchRequest, quickSearch } from "./server/search.js";
 import {
@@ -130,15 +134,6 @@ const OUTBOX_POLLER_ENABLED = envBoolean("KRIS_OUTBOX_POLLER_ENABLED", true);
 const OUTBOX_POLL_INTERVAL_MS = Math.max(
   250,
   Number(process.env.KRIS_OUTBOX_POLL_INTERVAL_MS || 1000)
-);
-const STALE_JOB_CLEANUP_ENABLED = envBoolean("KRIS_STALE_JOB_CLEANUP_ENABLED", true);
-const STALE_JOB_CLEANUP_INTERVAL_MS = Math.max(
-  10 * 1000,
-  Number(process.env.KRIS_STALE_JOB_CLEANUP_INTERVAL_MS || 60 * 1000)
-);
-const WORKER_JOB_STALE_AFTER_SECONDS = Math.max(
-  60,
-  Number(process.env.KRIS_WORKER_JOB_STALE_AFTER_SECONDS || 90)
 );
 const WORKER_MONITOR_INTERVAL_MS = Math.max(
   1000,
@@ -195,15 +190,6 @@ const updateCheckRuntime = {
   lastCheckAt: null,
   lastError: null,
   lastNotifiedVersion: null
-};
-
-const staleJobCleanupRuntime = {
-  timer: null,
-  inFlight: null,
-  lastStartedAt: null,
-  lastFinishedAt: null,
-  lastResult: null,
-  lastError: null
 };
 
 const outboxRuntime = {
@@ -616,10 +602,6 @@ async function publishDurablePaperReportChanged(type, data = {}, fallbackId = nu
   return publishDurableEvent(type, compactPaperReportChangedPayload(data, fallbackId, extra));
 }
 
-async function publishDurableTaskEvent(type, job, options = {}) {
-  return publishDurableEvent(type, compactTaskEventPayload(job, options, schedulerStatus()));
-}
-
 function isDailyJobCommand(command) {
   return DAILY_JOB_COMMANDS.has(String(command || ""));
 }
@@ -695,7 +677,6 @@ async function enqueueProjectWorkerJob(command, projectId, payload = {}, { sourc
     worker_job_id: response.worker_job_id,
     project_id: normalizedProjectId
   };
-  await publishDurableTaskEvent(SERVER_EVENTS.TASK_STARTED, jobRuntime.lastJob, { status: "queued" });
   return response;
 }
 
@@ -726,12 +707,10 @@ async function enqueueActionWorkerJob(command, payload = {}, { source = "action"
     worker_job_id: response.worker_job_id,
     ...payload
   };
-  await publishDurableTaskEvent(SERVER_EVENTS.TASK_STARTED, jobRuntime.lastJob, { status: "queued" });
   return response;
 }
 
 async function activeDatabaseJob({ ignoreDailyJobs = false, ignorePaperReportQueueJobs = false, includeQueued = false } = {}) {
-  await cleanupStaleJobs({ source: "job-check" });
   const statuses = includeQueued ? new Set(["queued", "running"]) : new Set(["running"]);
   const history = await getJobsHistoryResponse(100);
   return (history.items || []).find((job) => {
@@ -864,72 +843,6 @@ function schedulerSettingsForMode(mode) {
     run_daily_on_startup_enabled: mode === "startup",
     scheduler_enabled: mode === "scheduler"
   };
-}
-
-async function cleanupStaleJobs({ force = false, source = "manual" } = {}) {
-  if (!STALE_JOB_CLEANUP_ENABLED) {
-    return { ok: true, skipped: true, reason: "disabled" };
-  }
-  if (staleJobCleanupRuntime.inFlight) {
-    return staleJobCleanupRuntime.inFlight;
-  }
-  const now = Date.now();
-  if (!force && staleJobCleanupRuntime.lastFinishedAt && !staleJobCleanupRuntime.lastError) {
-    const ageMs = now - new Date(staleJobCleanupRuntime.lastFinishedAt).getTime();
-    if (Number.isFinite(ageMs) && ageMs >= 0 && ageMs < STALE_JOB_CLEANUP_INTERVAL_MS) {
-      return {
-        ok: true,
-        skipped: true,
-        reason: "recent",
-        last_finished_at: staleJobCleanupRuntime.lastFinishedAt
-      };
-    }
-  }
-
-  staleJobCleanupRuntime.lastStartedAt = new Date().toISOString();
-  staleJobCleanupRuntime.inFlight = (async () => {
-    try {
-      const workerJobResult = await cleanupStaleWorkerJobs({
-        staleAfterSeconds: WORKER_JOB_STALE_AFTER_SECONDS
-      });
-      const legacyResult = await jsonFromWorker(["api-jobs-cleanup"]);
-      const result = { ...legacyResult, ...workerJobResult };
-      staleJobCleanupRuntime.lastResult = { ...result, source };
-      staleJobCleanupRuntime.lastError = null;
-      if (
-        workerJobResult.stale_worker_jobs_requeued
-        || workerJobResult.stale_worker_jobs_failed
-      ) {
-        await pollOutboxOnce();
-      }
-      return result;
-    } catch (error) {
-      staleJobCleanupRuntime.lastError = { message: error.message, at: new Date().toISOString(), source };
-      schedulerRuntime.lastError = { message: error.message, at: new Date().toISOString() };
-      return { ok: false, error: error.message };
-    } finally {
-      staleJobCleanupRuntime.lastFinishedAt = new Date().toISOString();
-      staleJobCleanupRuntime.inFlight = null;
-    }
-  })();
-  return staleJobCleanupRuntime.inFlight;
-}
-
-function scheduleStaleJobCleanup(delayMs = STALE_JOB_CLEANUP_INTERVAL_MS) {
-  if (!STALE_JOB_CLEANUP_ENABLED) return;
-  if (staleJobCleanupRuntime.timer) clearTimeout(staleJobCleanupRuntime.timer);
-  staleJobCleanupRuntime.timer = setTimeout(() => {
-    staleJobCleanupRuntime.timer = null;
-    cleanupStaleJobs({ force: true, source: "timer" })
-      .finally(() => scheduleStaleJobCleanup());
-  }, Math.max(1000, Number(delayMs) || STALE_JOB_CLEANUP_INTERVAL_MS));
-  staleJobCleanupRuntime.timer.unref?.();
-}
-
-function startStaleJobCleanup() {
-  if (!STALE_JOB_CLEANUP_ENABLED) return;
-  cleanupStaleJobs({ force: true, source: "startup" })
-    .finally(() => scheduleStaleJobCleanup());
 }
 
 async function pollOutboxOnce() {
@@ -1194,7 +1107,6 @@ async function enqueueManagedJob(command, source = "manual", args = []) {
     message: response.message,
     worker_job_id: response.worker_job_id
   };
-  await publishDurableTaskEvent(SERVER_EVENTS.TASK_STARTED, jobRuntime.lastJob, { status: "queued" });
   return response;
 }
 
@@ -1387,7 +1299,7 @@ async function runPaperReportQueueOnce() {
       return schedulerStatus();
     }
     for (let index = 0; index < launchCount; index += 1) {
-      const queuedJob = await enqueueWorkerJob({
+      await enqueueWorkerJob({
         jobType: PAPER_REPORT_QUEUE_COMMAND,
         payload: {
           command: PAPER_REPORT_QUEUE_COMMAND,
@@ -1398,15 +1310,6 @@ async function runPaperReportQueueOnce() {
         priority: jobPriority(PAPER_REPORT_QUEUE_COMMAND),
         message: `${PAPER_REPORT_QUEUE_COMMAND} queued`
       });
-      await publishDurableTaskEvent(SERVER_EVENTS.TASK_STARTED, {
-        id: queuedJob.job_run?.id || null,
-        command: PAPER_REPORT_QUEUE_COMMAND,
-        source: "paper-report-queue",
-        args: ["--limit", "1"],
-        status: "queued",
-        started_at: queuedJob.job_run?.started_at || new Date().toISOString(),
-        message: `${PAPER_REPORT_QUEUE_COMMAND} queued`
-      }, { status: "queued" });
     }
     paperReportQueueRuntime.active += launchCount;
     paperReportQueueRuntime.lastError = null;
@@ -1449,7 +1352,6 @@ function localDateKey(value) {
 }
 
 async function runDailyStateToday() {
-  await cleanupStaleJobs({ source: "daily-state" });
   const today = localDateKey(new Date());
   const history = await getJobsHistoryResponse(500);
   for (const job of history.items || []) {
@@ -2284,6 +2186,26 @@ async function routeApi(req, res, url) {
     return;
   }
 
+  const workerJobCancelMatch = url.pathname.match(/^\/api\/jobs\/(\d+)\/cancel$/);
+  if (req.method === "POST" && workerJobCancelMatch) {
+    const body = await readRequestJson(req);
+    const data = await requestWorkerJobCancellation(workerJobCancelMatch[1], {
+      reason: body?.reason || "Cancellation requested by user"
+    });
+    if (!data) {
+      const error = new Error("Worker job not found or no longer cancellable");
+      error.statusCode = 404;
+      throw error;
+    }
+    if (!data.cancellation_requested && !data.cancelled) {
+      const error = new Error(`Worker job is already ${data.worker_job.status}`);
+      error.statusCode = 409;
+      throw error;
+    }
+    sendJson(res, data.cancelled ? 200 : 202, { ok: true, ...data });
+    return;
+  }
+
   if (req.method === "GET" && url.pathname === "/api/library/location") {
     const data = await locateNodePaperLibraryItem({
       status: url.searchParams.get("status") || "",
@@ -2811,7 +2733,6 @@ const server = createServer((req, res) => {
 
 server.listen(PORT, () => {
   console.log(`Research Intelligence dashboard listening on http://localhost:${PORT}`);
-  startStaleJobCleanup();
   startOutboxPoller();
   startWorkerMonitor();
   schedulePaperReportQueue(1000);

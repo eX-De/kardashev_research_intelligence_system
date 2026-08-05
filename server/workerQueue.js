@@ -35,10 +35,12 @@ function cleanMaxAttempts(value) {
   return maxAttempts;
 }
 
-function cleanWorkerId(value) {
-  const workerId = String(value || "").trim();
-  if (!workerId) throw new ValidationError("worker_id is required");
-  return workerId;
+function cleanWorkerJobId(value) {
+  const id = Number(value);
+  if (!Number.isInteger(id) || id <= 0) {
+    throw new ValidationError("worker job id must be a positive integer");
+  }
+  return id;
 }
 
 function workerJobRow(row) {
@@ -57,6 +59,8 @@ function workerJobRow(row) {
     run_after: row.run_after ?? null,
     locked_by: row.locked_by || "",
     locked_at: row.locked_at ?? null,
+    cancel_requested_at: row.cancel_requested_at ?? null,
+    cancel_reason: row.cancel_reason || "",
     created_at: row.created_at,
     updated_at: row.updated_at,
     started_at: row.started_at ?? null,
@@ -77,12 +81,6 @@ function jobRunRow(row) {
     heartbeat_at: row.heartbeat_at ?? null,
     meta: parseJson(row.meta_json, {})
   };
-}
-
-function staleCutoff(now, staleAfterSeconds) {
-  const parsedNow = new Date(now);
-  const base = Number.isFinite(parsedNow.getTime()) ? parsedNow : new Date();
-  return new Date(base.getTime() - Math.max(1, Number(staleAfterSeconds) || 1) * 1000).toISOString();
 }
 
 async function updateJobRunForWorkerJob(client, workerJob, status, { now, message = "" } = {}) {
@@ -142,7 +140,7 @@ export async function enqueueWorkerJob({
         VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, $7)
         RETURNING id, job_run_id, job_type, status, priority, payload_json, result_json,
                   error_message, attempts, max_attempts, run_after, locked_by, locked_at,
-                  created_at, updated_at, started_at, finished_at
+                  cancel_requested_at, cancel_reason, created_at, updated_at, started_at, finished_at
       `,
       [
         jobRun.id,
@@ -154,7 +152,13 @@ export async function enqueueWorkerJob({
         now
       ]
     );
-    return { job_run: jobRun, worker_job: workerJobRow(workerJobResult.rows[0]) };
+    const workerJob = workerJobRow(workerJobResult.rows[0]);
+    await insertAppEvent(
+      SERVER_EVENTS.TASK_STARTED,
+      compactTaskEventPayload(workerJob, { status: "queued", message }),
+      { createdAt: now, client }
+    );
+    return { job_run: jobRun, worker_job: workerJob };
   });
   console.info(JSON.stringify({
     event: "worker_job.queued",
@@ -189,13 +193,12 @@ export async function countActiveWorkerJobs(jobType = "") {
 }
 
 export async function getWorkerJob(workerJobId) {
-  const id = Number(workerJobId);
-  if (!Number.isInteger(id) || id <= 0) throw new ValidationError("worker job id must be a positive integer");
+  const id = cleanWorkerJobId(workerJobId);
   const result = await query(
     `
       SELECT id, job_run_id, job_type, status, priority, payload_json, result_json,
              error_message, attempts, max_attempts, run_after, locked_by, locked_at,
-             created_at, updated_at, started_at, finished_at
+             cancel_requested_at, cancel_reason, created_at, updated_at, started_at, finished_at
       FROM worker_jobs
       WHERE id = $1
     `,
@@ -204,193 +207,112 @@ export async function getWorkerJob(workerJobId) {
   return workerJobRow(result.rows?.[0]);
 }
 
-export async function claimNextWorkerJob({ workerId, now = isoNow() } = {}) {
-  const normalizedWorkerId = cleanWorkerId(workerId);
-  return withTransaction(async (client) => {
-    const claimable = await client.query(
-      `
-        SELECT id, job_run_id, job_type, status, priority, payload_json, result_json,
-               error_message, attempts, max_attempts, run_after, locked_by, locked_at,
-               created_at, updated_at, started_at, finished_at
-        FROM worker_jobs
-        WHERE status = 'queued'
-          AND attempts < max_attempts
-          AND (run_after IS NULL OR run_after <= $1)
-        ORDER BY priority DESC, run_after NULLS FIRST, id
-        FOR UPDATE SKIP LOCKED
-        LIMIT 1
-      `,
-      [now]
-    );
-    const queued = claimable.rows[0];
-    if (!queued) return null;
-    const claimedResult = await client.query(
-      `
-        UPDATE worker_jobs
-        SET status = 'running',
-            attempts = attempts + 1,
-            locked_by = $1,
-            locked_at = $2,
-            started_at = COALESCE(started_at, $2),
-            updated_at = $2
-        WHERE id = $3
-        RETURNING id, job_run_id, job_type, status, priority, payload_json, result_json,
-                  error_message, attempts, max_attempts, run_after, locked_by, locked_at,
-                  created_at, updated_at, started_at, finished_at
-      `,
-      [normalizedWorkerId, now, queued.id]
-    );
-    const workerJob = workerJobRow(claimedResult.rows[0]);
-    const jobRun = await updateJobRunForWorkerJob(
-      client,
-      workerJob,
-      "running",
-      { now, message: `Claimed by worker ${normalizedWorkerId}` }
-    );
-    return { worker_job: workerJob, job_run: jobRun };
-  });
-}
-
-export async function completeWorkerJob(workerJobId, result = {}, { message = "Worker job completed", now = isoNow() } = {}) {
-  const id = Number(workerJobId);
-  if (!Number.isInteger(id) || id <= 0) throw new ValidationError("worker job id must be a positive integer");
-  return withTransaction(async (client) => {
-    const updated = await client.query(
-      `
-        UPDATE worker_jobs
-        SET status = 'completed',
-            result_json = $1,
-            error_message = '',
-            finished_at = $2,
-            updated_at = $2
-        WHERE id = $3
-        RETURNING id, job_run_id, job_type, status, priority, payload_json, result_json,
-                  error_message, attempts, max_attempts, run_after, locked_by, locked_at,
-                  created_at, updated_at, started_at, finished_at
-      `,
-      [toJson(result || {}), now, id]
-    );
-    const workerJob = workerJobRow(updated.rows[0]);
-    const jobRun = await updateJobRunForWorkerJob(client, workerJob, "completed", { now, message });
-    return { worker_job: workerJob, job_run: jobRun };
-  });
-}
-
-export async function failWorkerJob(workerJobId, errorMessage, { now = isoNow() } = {}) {
-  const id = Number(workerJobId);
-  if (!Number.isInteger(id) || id <= 0) throw new ValidationError("worker job id must be a positive integer");
-  const message = String(errorMessage || "Worker job failed");
-  return withTransaction(async (client) => {
-    const updated = await client.query(
-      `
-        UPDATE worker_jobs
-        SET status = 'failed',
-            error_message = $1,
-            finished_at = $2,
-            updated_at = $2
-        WHERE id = $3
-        RETURNING id, job_run_id, job_type, status, priority, payload_json, result_json,
-                  error_message, attempts, max_attempts, run_after, locked_by, locked_at,
-                  created_at, updated_at, started_at, finished_at
-      `,
-      [message, now, id]
-    );
-    const workerJob = workerJobRow(updated.rows[0]);
-    const jobRun = await updateJobRunForWorkerJob(client, workerJob, "failed", { now, message });
-    return { worker_job: workerJob, job_run: jobRun };
-  });
-}
-
-export async function cleanupStaleWorkerJobs({
-  staleAfterSeconds = 30 * 60,
-  limit = 100,
-  now = isoNow()
-} = {}) {
+export async function listWorkerJobs({ status = "", jobType = "", limit = 100 } = {}) {
   const normalizedLimit = Number.parseInt(String(limit), 10);
   if (!Number.isInteger(normalizedLimit) || normalizedLimit < 1) {
     throw new ValidationError("limit must be a positive integer");
   }
-  const cutoff = staleCutoff(now, staleAfterSeconds);
+  const params = [];
+  const filters = [];
+  if (String(status || "").trim()) {
+    params.push(cleanStatus(status));
+    filters.push(`status = $${params.length}`);
+  }
+  if (String(jobType || "").trim()) {
+    params.push(cleanJobType(jobType));
+    filters.push(`job_type = $${params.length}`);
+  }
+  params.push(normalizedLimit);
+  const result = await query(
+    `
+      SELECT id, job_run_id, job_type, status, priority, payload_json, result_json,
+             error_message, attempts, max_attempts, run_after, locked_by, locked_at,
+             cancel_requested_at, cancel_reason, created_at, updated_at, started_at, finished_at
+      FROM worker_jobs
+      ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""}
+      ORDER BY id DESC
+      LIMIT $${params.length}
+    `,
+    params
+  );
+  return result.rows.map(workerJobRow);
+}
+
+export async function requestWorkerJobCancellation(
+  workerJobId,
+  { reason = "Cancellation requested", now = isoNow() } = {}
+) {
+  const id = cleanWorkerJobId(workerJobId);
+  const message = String(reason || "Cancellation requested").trim() || "Cancellation requested";
   return withTransaction(async (client) => {
-    const stale = await client.query(
+    const selected = await client.query(
       `
         SELECT id, job_run_id, job_type, status, priority, payload_json, result_json,
                error_message, attempts, max_attempts, run_after, locked_by, locked_at,
-               created_at, updated_at, started_at, finished_at
+               cancel_requested_at, cancel_reason, created_at, updated_at, started_at, finished_at
         FROM worker_jobs
-        WHERE status = 'running'
-          AND (locked_at IS NULL OR locked_at < $1)
-        ORDER BY locked_at NULLS FIRST, id
-        FOR UPDATE SKIP LOCKED
-        LIMIT $2
+        WHERE id = $1
+        FOR UPDATE
       `,
-      [cutoff, normalizedLimit]
+      [id]
     );
-    const result = {
-      stale_worker_jobs_checked: stale.rows.length,
-      stale_worker_jobs_requeued: 0,
-      stale_worker_jobs_failed: 0
-    };
-    for (const row of stale.rows) {
-      const current = workerJobRow(row);
-      const attempts = Number(current.attempts || 0);
-      const maxAttempts = Number(current.max_attempts || 1);
-      const exhausted = attempts >= maxAttempts;
-      const message = exhausted
-        ? `Marked stale worker job failed after ${attempts}/${maxAttempts} attempts`
-        : `Requeued stale worker job after ${attempts}/${maxAttempts} attempts`;
-      if (exhausted) {
-        const failed = await client.query(
-          `
-            UPDATE worker_jobs
-            SET status = 'failed',
-                error_message = $1,
-                locked_by = '',
-                locked_at = NULL,
-                finished_at = $2,
-                updated_at = $2
-            WHERE id = $3
-            RETURNING id, job_run_id, job_type, status, priority, payload_json, result_json,
-                      error_message, attempts, max_attempts, run_after, locked_by, locked_at,
-                      created_at, updated_at, started_at, finished_at
-          `,
-          [message, now, current.id]
-        );
-        const workerJob = workerJobRow(failed.rows[0]);
-        await updateJobRunForWorkerJob(client, workerJob, "failed", { now, message });
-        await insertAppEvent(
-          SERVER_EVENTS.TASK_FAILED,
-          compactTaskEventPayload(workerJob, { status: "failed", stale: true, message }),
-          { createdAt: now, client }
-        );
-        result.stale_worker_jobs_failed += 1;
-      } else {
-        const requeued = await client.query(
-          `
-            UPDATE worker_jobs
-            SET status = 'queued',
-                error_message = '',
-                locked_by = '',
-                locked_at = NULL,
-                updated_at = $1
-            WHERE id = $2
-            RETURNING id, job_run_id, job_type, status, priority, payload_json, result_json,
-                      error_message, attempts, max_attempts, run_after, locked_by, locked_at,
-                      created_at, updated_at, started_at, finished_at
-          `,
-          [now, current.id]
-        );
-        const workerJob = workerJobRow(requeued.rows[0]);
-        await updateJobRunForWorkerJob(client, workerJob, "queued", { now, message });
-        await insertAppEvent(
-          SERVER_EVENTS.TASK_STARTED,
-          compactTaskEventPayload(workerJob, { status: "queued", stale: true, message }),
-          { createdAt: now, client }
-        );
-        result.stale_worker_jobs_requeued += 1;
-      }
+    const current = workerJobRow(selected.rows[0]);
+    if (!current) return null;
+    if (["completed", "failed", "cancelled"].includes(current.status)) {
+      return { worker_job: current, job_run: null, cancellation_requested: false, cancelled: current.status === "cancelled" };
     }
-    return result;
+
+    if (current.status === "queued") {
+      const updated = await client.query(
+        `
+          UPDATE worker_jobs
+          SET status = 'cancelled',
+              cancel_requested_at = $1,
+              cancel_reason = $2,
+              locked_by = '',
+              locked_at = NULL,
+              finished_at = $1,
+              updated_at = $1
+          WHERE id = $3 AND status = 'queued'
+          RETURNING id, job_run_id, job_type, status, priority, payload_json, result_json,
+                    error_message, attempts, max_attempts, run_after, locked_by, locked_at,
+                    cancel_requested_at, cancel_reason, created_at, updated_at, started_at, finished_at
+        `,
+        [now, message, id]
+      );
+      const workerJob = workerJobRow(updated.rows[0]);
+      if (!workerJob) return null;
+      const jobRun = await updateJobRunForWorkerJob(client, workerJob, "cancelled", { now, message });
+      await insertAppEvent(
+        SERVER_EVENTS.TASK_CANCELLED,
+        compactTaskEventPayload(workerJob, { status: "cancelled", message }),
+        { createdAt: now, client }
+      );
+      return { worker_job: workerJob, job_run: jobRun, cancellation_requested: true, cancelled: true };
+    }
+
+    const updated = await client.query(
+      `
+        UPDATE worker_jobs
+        SET cancel_requested_at = COALESCE(cancel_requested_at, $1),
+            cancel_reason = CASE WHEN cancel_reason = '' THEN $2 ELSE cancel_reason END,
+            updated_at = $1
+        WHERE id = $3 AND status = 'running'
+        RETURNING id, job_run_id, job_type, status, priority, payload_json, result_json,
+                  error_message, attempts, max_attempts, run_after, locked_by, locked_at,
+                  cancel_requested_at, cancel_reason, created_at, updated_at, started_at, finished_at
+      `,
+      [now, message, id]
+    );
+    const workerJob = workerJobRow(updated.rows[0]);
+    if (!workerJob) return null;
+    const jobRun = await updateJobRunForWorkerJob(client, workerJob, "running", { now, message });
+    await insertAppEvent(
+      SERVER_EVENTS.TASK_CANCEL_REQUESTED,
+      compactTaskEventPayload(workerJob, { status: "cancel_requested", message }),
+      { createdAt: now, client }
+    );
+    return { worker_job: workerJob, job_run: jobRun, cancellation_requested: true, cancelled: false };
   });
 }
 
