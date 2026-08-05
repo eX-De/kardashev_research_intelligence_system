@@ -55,6 +55,9 @@ function createHealthPool({
             is_live: true
           }] };
         }
+        if (normalized.includes("FROM WORKER_JOBS") && normalized.includes("GROUP BY JOB_TYPE, STATUS")) {
+          return { rows: [] };
+        }
         if (normalized.includes("FROM WORKER_JOBS") && normalized.includes("OLDEST_QUEUED_AT")) {
           return { rows: [{ queued: "0", running: "0", oldest_queued_at: null, oldest_queued_seconds: null }] };
         }

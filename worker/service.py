@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 import traceback
+from datetime import datetime, timezone
 from typing import Any
 
 from .config import load_settings
@@ -39,6 +40,7 @@ from .search_backfill import backfill_search_indexes
 from .unified_search import deep_search
 from .experiment_reports import index_experiment_report
 from .library_search_index import index_library_paper
+from .job_inventory import worker_job_concurrency_group
 
 
 DISPATCHERS = {
@@ -89,6 +91,28 @@ READER_IMPORT_NOTIFICATION_LABELS = {
     "reader-import-web": "网页导入",
 }
 
+EXPLICIT_WORKER_JOB_TYPES = {
+    "artifact-index",
+    "artifact-index-backfill",
+    "experiment-report-index",
+    "unified-search",
+    "library-paper-index",
+    "generate-paper-reports",
+    "run-daily",
+    "resume-daily",
+    "retry-daily",
+    "project-index",
+    "project-export-obsidian",
+    "project-context",
+    "artifact-export-obsidian",
+    "reader-import-upload",
+    "reader-import-url",
+    "reader-import-web",
+    "reader-save-obsidian",
+    "paper-report",
+}
+SUPPORTED_WORKER_JOB_TYPES = frozenset(DISPATCHERS) | frozenset(EXPLICIT_WORKER_JOB_TYPES)
+
 READER_IMPORT_NOTIFICATION_TYPES = {
     "reader-import-upload": "upload",
     "reader-import-url": "url",
@@ -116,6 +140,46 @@ def _worker_id() -> str:
     if configured:
         return configured
     return f"{socket.gethostname()}:{os.getpid()}"
+
+
+def _queue_wait_seconds(worker_job: dict[str, Any], *, now: datetime | None = None) -> float | None:
+    created_at = worker_job.get("created_at")
+    if not created_at:
+        return None
+    try:
+        created = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    return round(max(0.0, (current - created.astimezone(timezone.utc)).total_seconds()), 3)
+
+
+def _log_job_observation(
+    event: str,
+    worker_job: dict[str, Any],
+    worker_id: str,
+    *,
+    handler_duration_seconds: float | None = None,
+) -> dict[str, Any]:
+    observation = {
+        "event": event,
+        "worker_job_id": worker_job.get("id") or worker_job.get("worker_job_id"),
+        "job_type": str(worker_job.get("job_type") or ""),
+        "worker_id": worker_id,
+        "attempt": int(worker_job.get("attempts") or 0),
+        "concurrency_group": worker_job_concurrency_group(str(worker_job.get("job_type") or "")),
+        "queue_wait_seconds": _queue_wait_seconds(worker_job),
+        "handler_duration_seconds": (
+            round(max(0.0, handler_duration_seconds), 3)
+            if handler_duration_seconds is not None
+            else None
+        ),
+    }
+    sys.stdout.write(json.dumps(clean_unicode(observation), ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+    return observation
 
 
 class WorkerHeartbeat:
@@ -751,6 +815,8 @@ def run_once(worker_id: str, on_job_change=None) -> dict[str, Any]:
         worker_job = claimed["worker_job"]
         if on_job_change:
             on_job_change(int(worker_job["id"]))
+        handler_started_at = time.perf_counter()
+        _log_job_observation("worker_job.running", worker_job, worker_id)
         insert_app_event(conn, "task.started", task_event_payload(worker_job, "running"))
         try:
             settings = apply_stored_settings(conn, base_settings)
@@ -764,6 +830,12 @@ def run_once(worker_id: str, on_job_change=None) -> dict[str, Any]:
                 if notification:
                     failed_payload["notification"] = notification
                 insert_app_event(conn, "task.failed", failed_payload)
+                _log_job_observation(
+                    "worker_job.failed",
+                    failed_job,
+                    worker_id,
+                    handler_duration_seconds=time.perf_counter() - handler_started_at,
+                )
                 raise
             completed = complete_worker_job(
                 conn,
@@ -791,6 +863,12 @@ def run_once(worker_id: str, on_job_change=None) -> dict[str, Any]:
                         "partial": bool((result.get("stats") or {}).get("partial")),
                     },
                 )
+            _log_job_observation(
+                "worker_job.completed",
+                completed_job,
+                worker_id,
+                handler_duration_seconds=time.perf_counter() - handler_started_at,
+            )
             return {"claimed": True, "worker_job": completed_job, "result": result}
         finally:
             if on_job_change:
@@ -824,15 +902,7 @@ def main() -> int:
         while True:
             try:
                 result = run_once(worker_id, heartbeat.set_current_job)
-                if result.get("claimed"):
-                    sys.stdout.write(json.dumps(clean_unicode({
-                        "event": "worker_job.completed",
-                        "worker_id": worker_id,
-                        "worker_job_id": result.get("worker_job", {}).get("id"),
-                        "job_type": result.get("worker_job", {}).get("job_type"),
-                    }), ensure_ascii=False) + "\n")
-                    sys.stdout.flush()
-                else:
+                if not result.get("claimed"):
                     time.sleep(poll_interval_ms / 1000)
             except KeyboardInterrupt:
                 return 0

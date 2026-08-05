@@ -2144,7 +2144,10 @@ async function routeApi(req, res, url) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/jobs/status") {
-    sendJson(res, 200, { scheduler: schedulerStatus() });
+    sendJson(res, 200, {
+      scheduler: schedulerStatus(),
+      worker: await getWorkerStatus()
+    });
     return;
   }
 

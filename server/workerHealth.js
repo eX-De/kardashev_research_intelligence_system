@@ -1,4 +1,5 @@
 import { query } from "./db.js";
+import { workerJobConcurrencyGroup } from "./workerJobInventory.js";
 
 const DEFAULT_HEARTBEAT_TTL_SECONDS = 15;
 
@@ -23,7 +24,7 @@ export function workerHeartbeatTtlSeconds() {
 export async function getWorkerStatus(options = {}, db = { query }) {
   const ttlSeconds = positiveInteger(options.heartbeatTtlSeconds, workerHeartbeatTtlSeconds(), 1);
   const required = jobBackend() !== "cli";
-  const [instancesResult, queueResult] = await Promise.all([
+  const [instancesResult, queueResult, queueBreakdownResult] = await Promise.all([
     db.query(
       `
         SELECT worker_id, status, started_at, heartbeat_at, current_job_id, pid,
@@ -47,6 +48,22 @@ export async function getWorkerStatus(options = {}, db = { query }) {
           )) AS oldest_queued_seconds
         FROM worker_jobs
       `
+    ),
+    db.query(
+      `
+        SELECT
+          job_type,
+          status,
+          COUNT(*) AS count,
+          MIN(NULLIF(created_at, '')::timestamptz) FILTER (WHERE status = 'queued') AS oldest_queued_at,
+          EXTRACT(EPOCH FROM (
+            NOW() - MIN(NULLIF(created_at, '')::timestamptz) FILTER (WHERE status = 'queued')
+          )) AS oldest_queued_seconds
+        FROM worker_jobs
+        WHERE status IN ('queued', 'running')
+        GROUP BY job_type, status
+        ORDER BY job_type, status
+      `
     )
   ]);
   const instances = (instancesResult.rows || []).map((row) => ({
@@ -62,6 +79,45 @@ export async function getWorkerStatus(options = {}, db = { query }) {
   const queueRow = queueResult.rows?.[0] || {};
   const queued = numberValue(queueRow.queued);
   const running = numberValue(queueRow.running);
+  const byType = {};
+  const byGroup = {};
+  for (const row of queueBreakdownResult.rows || []) {
+    const jobType = String(row.job_type || "unknown");
+    const status = String(row.status || "");
+    const count = numberValue(row.count);
+    const group = workerJobConcurrencyGroup(jobType);
+    const typeStats = byType[jobType] || {
+      queued: 0,
+      running: 0,
+      active: 0,
+      concurrency_group: group,
+      oldest_queued_at: null,
+      oldest_queued_seconds: 0
+    };
+    if (status === "queued" || status === "running") typeStats[status] += count;
+    typeStats.active += count;
+    if (status === "queued") {
+      typeStats.oldest_queued_at = row.oldest_queued_at || null;
+      typeStats.oldest_queued_seconds = Math.max(0, numberValue(row.oldest_queued_seconds));
+    }
+    byType[jobType] = typeStats;
+
+    const groupStats = byGroup[group] || {
+      queued: 0,
+      running: 0,
+      active: 0,
+      oldest_queued_at: null,
+      oldest_queued_seconds: 0
+    };
+    if (status === "queued" || status === "running") groupStats[status] += count;
+    groupStats.active += count;
+    const waitSeconds = Math.max(0, numberValue(row.oldest_queued_seconds));
+    if (status === "queued" && waitSeconds >= groupStats.oldest_queued_seconds) {
+      groupStats.oldest_queued_at = row.oldest_queued_at || null;
+      groupStats.oldest_queued_seconds = waitSeconds;
+    }
+    byGroup[group] = groupStats;
+  }
   const available = !required || liveInstances.length > 0;
   return {
     required,
@@ -76,7 +132,9 @@ export async function getWorkerStatus(options = {}, db = { query }) {
       running,
       active: queued + running,
       oldest_queued_at: queueRow.oldest_queued_at || null,
-      oldest_queued_seconds: Math.max(0, numberValue(queueRow.oldest_queued_seconds))
+      oldest_queued_seconds: Math.max(0, numberValue(queueRow.oldest_queued_seconds)),
+      by_type: byType,
+      by_group: byGroup
     },
     stalled: required && !available && queued + running > 0
   };

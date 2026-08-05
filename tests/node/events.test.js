@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -8,6 +9,10 @@ import {
   compactTaskEventPayload,
   createEventPublisher
 } from "../../server/events.js";
+
+const taskEventContract = JSON.parse(
+  readFileSync(new URL("../fixtures/task-event-contract.json", import.meta.url), "utf8")
+);
 
 function createPublisher() {
   return createEventPublisher({
@@ -130,4 +135,21 @@ test("publishTaskEvent carries scheduler and compact task result", () => {
   assert.equal(event.data.task.command, "sync-obsidian");
   assert.deepEqual(event.data.task.result, { ok: true, message: "done" });
   assert.equal(event.data.scheduler.enabled, true);
+});
+
+test("Node task event payloads match the shared cross-language contract", () => {
+  assert.deepEqual(taskEventContract.cases.map((item) => item.name), [
+    "queued",
+    "running",
+    "completed",
+    "failed",
+    "requeued"
+  ]);
+  for (const item of taskEventContract.cases) {
+    assert.deepEqual(
+      compactTaskEventPayload(item.job, item.options),
+      item.expected,
+      item.name
+    );
+  }
 });

@@ -1,13 +1,69 @@
 from __future__ import annotations
 
+import json
 import unittest
+from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from worker import service
+from worker.job_inventory import worker_job_inventory
 from worker.paper_reports import _paper_report_result
+from worker.queue import task_event_payload
 
 
 class WorkerServiceDispatchTests(unittest.TestCase):
+    def test_dispatch_inventory_has_labels_and_observation_groups(self) -> None:
+        entries = worker_job_inventory()
+        inventory_types = {str(entry["type"]) for entry in entries}
+        self.assertEqual(inventory_types, set(service.SUPPORTED_WORKER_JOB_TYPES))
+        self.assertEqual(len(entries), 23)
+        for entry in entries:
+            self.assertTrue(str(entry.get("label") or "").strip(), entry["type"])
+            self.assertTrue(str(entry.get("concurrency_group") or "").strip(), entry["type"])
+
+    def test_python_task_event_payloads_match_shared_cross_language_contract(self) -> None:
+        fixture_path = Path(__file__).parent / "fixtures" / "task-event-contract.json"
+        contract = json.loads(fixture_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [item["name"] for item in contract["cases"]],
+            ["queued", "running", "completed", "failed", "requeued"],
+        )
+        for item in contract["cases"]:
+            options = dict(item["options"])
+            status = options.pop("status")
+            actual = task_event_payload(item["job"], status, **options)
+            self.assertEqual(actual, item["expected"], item["name"])
+
+    def test_job_observation_separates_queue_wait_from_handler_duration(self) -> None:
+        worker_job = {
+            "id": 91,
+            "job_type": "paper-report",
+            "attempts": 2,
+            "created_at": "2026-08-05T10:00:00+00:00",
+        }
+        self.assertEqual(
+            service._queue_wait_seconds(
+                worker_job,
+                now=datetime(2026, 8, 5, 10, 0, 9, 250000, tzinfo=timezone.utc),
+            ),
+            9.25,
+        )
+        with patch("worker.service._queue_wait_seconds", return_value=9.25), \
+            patch("worker.service.sys.stdout"):
+            observation = service._log_job_observation(
+                "worker_job.completed",
+                worker_job,
+                "worker-test",
+                handler_duration_seconds=2.1256,
+            )
+        self.assertEqual(observation["queue_wait_seconds"], 9.25)
+        self.assertEqual(observation["handler_duration_seconds"], 2.126)
+        self.assertEqual(observation["job_type"], "paper-report")
+        self.assertEqual(observation["worker_id"], "worker-test")
+        self.assertEqual(observation["attempt"], 2)
+        self.assertEqual(observation["concurrency_group"], "llm")
+
     def test_paper_report_result_marks_reader_sources_as_manual_imports(self) -> None:
         base = {
             "paper_id": 7,

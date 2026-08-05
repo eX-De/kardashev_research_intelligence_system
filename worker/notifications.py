@@ -5,26 +5,13 @@ from collections.abc import Callable
 from typing import Any
 
 from .db import from_json
+from .job_inventory import worker_job_title
 from .update_check import UPDATE_NOTIFICATION_TYPE, read_update_status, update_notification
 
 
 NotificationBuilder = Callable[[dict[str, Any]], list[dict[str, Any]]]
 REGISTERED_NOTIFICATION_BUILDERS: list[dict[str, Any]] = []
 
-JOB_TITLES = {
-    "run-daily": "每日流程",
-    "resume-daily": "恢复每日流程",
-    "retry-daily": "历史论文补跑",
-    "fetch-arxiv": "arXiv 抓取",
-    "cache-arxiv-text": "论文正文缓存",
-    "generate-paper-reports": "全文报告生成",
-    "generate-reports": "每日总报告生成",
-    "sync-obsidian": "Obsidian 同步",
-    "rank-papers": "论文匹配",
-    "project-index": "项目索引生成",
-    "project-export-obsidian": "项目导出",
-    "project-context": "项目上下文入库",
-}
 DAILY_JOB_TYPES = {"run-daily", "resume-daily", "retry-daily"}
 ARXIV_RATE_LIMITED = "arxiv_rate_limited"
 
@@ -40,7 +27,7 @@ def register_notification_builder(event_type: str, description: str) -> Callable
 
 
 def _job_title(job_type: str) -> str:
-    return JOB_TITLES.get(job_type, job_type or "任务")
+    return worker_job_title(job_type)
 
 
 def _meta_number(meta: dict[str, Any], keys: list[str]) -> int:

@@ -1,0 +1,142 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "queued",
+      "job": {
+        "id": 901,
+        "job_run_id": 501,
+        "job_type": "artifact-index",
+        "status": "queued",
+        "payload": { "command": "artifact-index", "source": "artifact", "args": ["--force"] },
+        "started_at": "2026-08-05T10:00:00+00:00",
+        "finished_at": null,
+        "error_message": ""
+      },
+      "options": { "status": "queued", "message": "artifact-index queued" },
+      "expected": {
+        "task": {
+          "id": 501,
+          "worker_job_id": 901,
+          "command": "artifact-index",
+          "source": "artifact",
+          "args": ["--force"],
+          "status": "queued",
+          "started_at": "2026-08-05T10:00:00+00:00",
+          "finished_at": null,
+          "message": "artifact-index queued"
+        }
+      }
+    },
+    {
+      "name": "running",
+      "job": {
+        "id": 902,
+        "job_run_id": 502,
+        "job_type": "reader-import-url",
+        "status": "running",
+        "payload": { "command": "reader-import-url", "source": "reader-url", "args": [] },
+        "started_at": "2026-08-05T10:01:00+00:00",
+        "finished_at": null,
+        "error_message": ""
+      },
+      "options": { "status": "running" },
+      "expected": {
+        "task": {
+          "id": 502,
+          "worker_job_id": 902,
+          "command": "reader-import-url",
+          "source": "reader-url",
+          "args": [],
+          "status": "running",
+          "started_at": "2026-08-05T10:01:00+00:00",
+          "finished_at": null,
+          "message": null
+        }
+      }
+    },
+    {
+      "name": "completed",
+      "job": {
+        "id": 903,
+        "job_run_id": 503,
+        "job_type": "paper-report",
+        "status": "completed",
+        "payload": { "command": "paper-report", "source": "manual", "args": [] },
+        "started_at": "2026-08-05T10:02:00+00:00",
+        "finished_at": "2026-08-05T10:02:12+00:00",
+        "error_message": ""
+      },
+      "options": { "status": "completed", "message": "done", "result": { "ok": true, "message": "done", "ignored": "large" } },
+      "expected": {
+        "task": {
+          "id": 503,
+          "worker_job_id": 903,
+          "command": "paper-report",
+          "source": "manual",
+          "args": [],
+          "status": "completed",
+          "started_at": "2026-08-05T10:02:00+00:00",
+          "finished_at": "2026-08-05T10:02:12+00:00",
+          "message": "done",
+          "result": { "ok": true, "message": "done" }
+        }
+      }
+    },
+    {
+      "name": "failed",
+      "job": {
+        "id": 904,
+        "job_run_id": 504,
+        "job_type": "reader-import-web",
+        "status": "failed",
+        "payload": { "command": "reader-import-web", "source": "reader-web", "args": [] },
+        "started_at": "2026-08-05T10:03:00+00:00",
+        "finished_at": "2026-08-05T10:03:02+00:00",
+        "error_message": "HTTP 403"
+      },
+      "options": { "status": "failed", "message": "HTTP 403" },
+      "expected": {
+        "task": {
+          "id": 504,
+          "worker_job_id": 904,
+          "command": "reader-import-web",
+          "source": "reader-web",
+          "args": [],
+          "status": "failed",
+          "started_at": "2026-08-05T10:03:00+00:00",
+          "finished_at": "2026-08-05T10:03:02+00:00",
+          "message": "HTTP 403"
+        }
+      }
+    },
+    {
+      "name": "requeued",
+      "job": {
+        "id": 905,
+        "job_run_id": 505,
+        "job_type": "artifact-index",
+        "status": "queued",
+        "payload": { "command": "artifact-index", "source": "recovery", "args": [] },
+        "started_at": "2026-08-05T10:04:00+00:00",
+        "finished_at": null,
+        "error_message": ""
+      },
+      "options": { "status": "queued", "message": "Requeued stale worker job", "stale": true },
+      "expected": {
+        "task": {
+          "id": 505,
+          "worker_job_id": 905,
+          "command": "artifact-index",
+          "source": "recovery",
+          "args": [],
+          "status": "queued",
+          "started_at": "2026-08-05T10:04:00+00:00",
+          "finished_at": null,
+          "message": "Requeued stale worker job"
+        },
+        "stale": true
+      }
+    }
+  ]
+}

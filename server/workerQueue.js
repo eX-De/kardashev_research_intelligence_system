@@ -1,6 +1,7 @@
 import { parseJson, query, toJson, ValidationError, withTransaction } from "./db.js";
 import { SERVER_EVENTS, compactTaskEventPayload } from "./events.js";
 import { insertAppEvent } from "./outbox.js";
+import { workerJobConcurrencyGroup } from "./workerJobInventory.js";
 
 const WORKER_JOB_STATUSES = new Set(["queued", "running", "completed", "failed", "cancelled"]);
 
@@ -113,7 +114,7 @@ export async function enqueueWorkerJob({
   const normalizedJobType = cleanJobType(jobType);
   const normalizedPriority = cleanPriority(priority);
   const normalizedMaxAttempts = cleanMaxAttempts(maxAttempts);
-  return withTransaction(async (client) => {
+  const queued = await withTransaction(async (client) => {
     const jobRunResult = await client.query(
       `
         INSERT INTO job_runs(job_type, status, started_at, message, heartbeat_at, meta_json)
@@ -155,6 +156,17 @@ export async function enqueueWorkerJob({
     );
     return { job_run: jobRun, worker_job: workerJobRow(workerJobResult.rows[0]) };
   });
+  console.info(JSON.stringify({
+    event: "worker_job.queued",
+    worker_job_id: queued.worker_job?.id || null,
+    job_type: normalizedJobType,
+    worker_id: null,
+    attempt: 0,
+    concurrency_group: workerJobConcurrencyGroup(normalizedJobType),
+    queue_wait_seconds: 0,
+    handler_duration_seconds: null
+  }));
+  return queued;
 }
 
 export async function countActiveWorkerJobs(jobType = "") {

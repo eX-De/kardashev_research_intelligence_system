@@ -439,6 +439,9 @@ test("getPaperLibraryImportStatus projects active imports without exposing stage
       if (String(sql).includes("FROM worker_instances")) {
         return { rows: [] };
       }
+      if (String(sql).includes("GROUP BY job_type, status")) {
+        return { rows: [] };
+      }
       if (String(sql).includes("oldest_queued_at")) {
         return { rows: [{ queued: "1", running: "1", oldest_queued_at: "2026-08-01T14:59:00Z", oldest_queued_seconds: "60" }] };
       }
