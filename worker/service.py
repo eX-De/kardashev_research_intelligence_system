@@ -34,7 +34,7 @@ from .cli import (
     run_rank_job,
     run_sync_obsidian_job,
 )
-from .knowledge import save_manual_project_context
+from .knowledge import index_knowledge_document, save_manual_project_context
 from .paper_reader import import_reader_pdfs, import_reader_urls, import_reader_webpages, save_reader_note_to_obsidian
 from .artifact_index import index_artifact, remove_artifact_index
 from .search_backfill import backfill_search_indexes
@@ -102,6 +102,7 @@ EXPLICIT_WORKER_JOB_TYPES = {
     "retry-daily",
     "project-index",
     "project-export-obsidian",
+    "knowledge-document-index",
     "project-context",
     "artifact-export-obsidian",
     "reader-import-upload",
@@ -396,6 +397,33 @@ def _compact_project_payload(result: dict[str, Any], fallback_id: int | None = N
     }
 
 
+def _knowledge_index_domain_events(
+    worker_job: dict[str, Any],
+    *,
+    index_status: str,
+    document_id: int | None = None,
+    error: str = "",
+) -> list[dict[str, Any]]:
+    if str(worker_job.get("job_type") or "") != "knowledge-document-index":
+        return []
+    if index_status == "superseded":
+        return []
+    payload = _payload(worker_job)
+    project_id = _optional_int(payload.get("project_id"))
+    resolved_document_id = document_id or _optional_int(payload.get("document_id"))
+    return [{
+        "event_type": "project.updated",
+        "payload": {
+            "project": {"project_id": project_id, "id": project_id},
+            "project_id": project_id,
+            "document_id": resolved_document_id,
+            "index_status": index_status,
+            "index_error": clean_unicode(error).strip(),
+            "reason": "project_context_index",
+        },
+    }]
+
+
 def _compact_artifact_payload(result: dict[str, Any], key: str = "generated_artifact") -> dict[str, Any] | None:
     artifact = result.get(key) if isinstance(result, dict) else None
     if not isinstance(artifact, dict):
@@ -444,7 +472,6 @@ def _publish_project_domain_events(conn: Any, worker_job: dict[str, Any], result
         project = _compact_project_payload(result, project_id)
         insert_app_event(conn, "project.updated", {"project": project, "project_id": project["project_id"], "reason": "project_context"})
         return
-
     result_summary = _result_summary(result, PROJECT_RESULT_CHANGE_KEYS)
     if not result_summary:
         return
@@ -728,6 +755,7 @@ def _publish_paper_domain_events(conn: Any, worker_job: dict[str, Any], result: 
 
 
 def run_project_context_job(conn: Any, settings: Any, worker_job: dict[str, Any]) -> dict[str, Any]:
+    """Temporary rollback-only implementation for KRIS_PROJECT_CONTEXT_BACKEND=legacy."""
     payload = _payload(worker_job)
     project_id = _required_int(payload.get("project_id"), "project_id")
     raw_context = clean_unicode(str(payload.get("raw_context") or payload.get("context") or payload.get("project_context") or "")).strip()
@@ -799,6 +827,15 @@ def dispatch_worker_job(conn: Any, settings: Any, worker_job: dict[str, Any]) ->
     if job_type == "project-export-obsidian":
         project_id = _required_int(payload.get("project_id") or _arg_value(args, "--project-id"), "project_id")
         return export_project_to_obsidian(conn, settings, project_id)
+
+    if job_type == "knowledge-document-index":
+        return index_knowledge_document(
+            conn,
+            settings,
+            document_id=_required_int(payload.get("document_id"), "document_id"),
+            project_id=_required_int(payload.get("project_id"), "project_id"),
+            expected_content_hash=clean_unicode(str(payload.get("content_hash") or "")).strip(),
+        )
 
     if job_type == "project-context":
         return run_project_context_job(conn, settings, worker_job)
@@ -885,6 +922,11 @@ def run_once(worker_id: str, on_job_change=None) -> dict[str, Any]:
                     worker_id=worker_id,
                     lease_attempt=lease_attempt,
                     event_extra={"notification": notification} if notification else None,
+                    domain_events=_knowledge_index_domain_events(
+                        worker_job,
+                        index_status=str(getattr(exc, "knowledge_index_status", "failed")),
+                        error=str(exc),
+                    ),
                 )
                 failed_job = failed["worker_job"] or worker_job
                 _log_job_observation(
@@ -901,6 +943,11 @@ def run_once(worker_id: str, on_job_change=None) -> dict[str, Any]:
                 message=str(result.get("message") or f"{worker_job['job_type']} completed"),
                 worker_id=worker_id,
                 lease_attempt=lease_attempt,
+                domain_events=_knowledge_index_domain_events(
+                    worker_job,
+                    index_status=str(result.get("index_status") or "ready"),
+                    document_id=_optional_int(result.get("document_id")),
+                ),
             )
             completed_job = completed["worker_job"] or worker_job
             _publish_project_domain_events(conn, worker_job, result)

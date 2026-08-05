@@ -301,7 +301,8 @@ function ProjectContextPanel({ contextDocuments, linkedNotes, candidateNotes, on
             <article className="project-detail-resource-item" key={`${document.document_id}-${document.relation}`}>
               <div>
                 <strong>{document.title}</strong>
-                <p>{t(`sourceType.${document.source_type}`, { defaultValue: document.source_type })} · {t(`noteRelation.${document.relation}`, { defaultValue: document.relation })} · {t("detail.chunkCount", { count: document.chunk_count })}</p>
+                <p>{t(`sourceType.${document.source_type}`, { defaultValue: document.source_type })} · {t(`noteRelation.${document.relation}`, { defaultValue: document.relation })} · {document.index_status === "ready" ? t("detail.chunkCount", { count: document.chunk_count }) : t(`indexStatus.${document.index_status || "pending"}`)}</p>
+                {document.index_status === "failed" && document.index_error ? <small>{document.index_error}</small> : null}
                 {document.excerpt ? <small>{snippet(document.excerpt, 160)}</small> : null}
               </div>
             </article>

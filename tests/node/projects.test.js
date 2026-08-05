@@ -40,6 +40,11 @@ function createProjectsPool() {
   }];
   const projectNotes = [];
   const artifacts = [];
+  const knowledgeDocuments = [];
+  const projectContextDocuments = [];
+  const workerJobs = [];
+  const appEvents = [];
+  let failOutbox = false;
   const arxivPapers = [{
     id: 12,
     arxiv_id: "2607.00012",
@@ -111,6 +116,7 @@ function createProjectsPool() {
       txCalls.push(normalized);
       return { rows: [] };
     }
+    if (normalized.startsWith("SELECT PG_ADVISORY_XACT_LOCK")) return { rows: [{ pg_advisory_xact_lock: null }] };
     if (normalized.startsWith("SELECT P.*") && normalized.includes("FROM RESEARCH_PROJECTS P") && !normalized.includes("WHERE P.ID")) {
       return { rows: projectListRows() };
     }
@@ -136,7 +142,16 @@ function createProjectsPool() {
       return { rows: [] };
     }
     if (normalized.includes("FROM PROJECT_CONTEXT_DOCUMENTS PCD")) {
-      return { rows: [] };
+      return {
+        rows: projectContextDocuments
+          .filter((link) => Number(link.project_id) === Number(params[0]))
+          .map((link) => ({
+            ...knowledgeDocuments.find((item) => item.id === link.document_id),
+            relation: link.relation,
+            weight: link.weight,
+            chunk_count: "0"
+          }))
+      };
     }
     if (normalized.startsWith("INSERT INTO RESEARCH_PROJECTS")) {
       const now = params[13];
@@ -161,6 +176,62 @@ function createProjectsPool() {
       };
       projects.push(row);
       return { rows: [{ id: row.id }] };
+    }
+    if (normalized.startsWith("UPDATE RESEARCH_PROJECTS")) {
+      const project = projects.find((item) => Number(item.id) === Number(params[14]));
+      Object.assign(project, {
+        name: params[0], status: params[1], summary: params[2], goals: params[3], keywords_json: params[4],
+        obsidian_project_path: params[5], obsidian_output_dir: params[6], obsidian_folder: params[7],
+        obsidian_status_tag: params[8], discovery_source: params[9], source_tags_json: params[10],
+        arxiv_categories_json: params[11], automation_json: params[12], updated_at: params[13]
+      });
+      return { rows: [] };
+    }
+    if (normalized.startsWith("SELECT ID, CONTENT_HASH, INDEX_STATUS")) {
+      return { rows: knowledgeDocuments.filter((item) => item.source_uri === params[0]).slice(0, 1) };
+    }
+    if (normalized.startsWith("INSERT INTO KNOWLEDGE_DOCUMENTS")) {
+      const row = {
+        id: knowledgeDocuments.length + 1, source_type: "manual_project", source_uri: params[0], title: params[1],
+        raw_content: params[2], content_hash: params[3], metadata_json: params[4], index_status: "pending",
+        index_error: "", indexed_content_hash: "", indexed_at: "", created_at: params[5], updated_at: params[5]
+      };
+      knowledgeDocuments.push(row);
+      return { rows: [{ id: row.id }] };
+    }
+    if (normalized.startsWith("UPDATE KNOWLEDGE_DOCUMENTS")) {
+      const document = knowledgeDocuments.find((item) => Number(item.id) === Number(params[7]));
+      Object.assign(document, {
+        title: params[0], raw_content: params[1], content_hash: params[2], metadata_json: params[3],
+        index_status: params[4], index_error: params[5], updated_at: params[6]
+      });
+      return { rows: [] };
+    }
+    if (normalized.startsWith("DELETE FROM RESEARCH_CHUNKS")) return { rows: [], rowCount: 0 };
+    if (normalized.startsWith("INSERT INTO PROJECT_CONTEXT_DOCUMENTS")) {
+      if (!projectContextDocuments.some((item) => item.project_id === Number(params[0]) && item.document_id === Number(params[1]))) {
+        projectContextDocuments.push({ project_id: Number(params[0]), document_id: Number(params[1]), relation: "primary", weight: 1 });
+      }
+      return { rows: [] };
+    }
+    if (normalized.startsWith("SELECT ID, JOB_RUN_ID, JOB_TYPE") && normalized.includes("PAYLOAD_JSON::JSONB")) {
+      return { rows: workerJobs.filter((item) => ["queued", "running"].includes(item.status) && item.payload_json === params[0]).slice(-1) };
+    }
+    if (normalized.startsWith("INSERT INTO WORKER_JOBS")) {
+      const row = {
+        id: workerJobs.length + 1, job_run_id: null, job_type: params[1], status: "queued", priority: params[2],
+        payload_json: params[3], result_json: "{}", error_message: "", attempts: 0, max_attempts: params[4],
+        run_after: params[5], locked_by: "", locked_at: null, cancel_requested_at: null, cancel_reason: "",
+        created_at: params[6], updated_at: params[6], started_at: null, finished_at: null
+      };
+      workerJobs.push(row);
+      return { rows: [row] };
+    }
+    if (normalized.startsWith("INSERT INTO APP_EVENTS")) {
+      if (failOutbox) throw new Error("outbox failure");
+      const row = { id: appEvents.length + 1, event_type: params[0], payload_json: params[1], created_at: params[2], published_at: null };
+      appEvents.push(row);
+      return { rows: [row] };
     }
     if (normalized.startsWith("SELECT OBSIDIAN_PROJECT_PATH")) {
       return { rows: detailRows(params[0]) };
@@ -242,6 +313,12 @@ function createProjectsPool() {
     projects,
     projectPapers,
     libraryPapers,
+    knowledgeDocuments,
+    workerJobs,
+    appEvents,
+    failNextOutbox() {
+      failOutbox = true;
+    },
     pool: {
       async query(sql, params) {
         return runQuery(sql, params);
@@ -328,6 +405,61 @@ test("linkProjectPaper rejects invalid relation", async () => {
       () => linkProjectPaper(1, { paper_id: 12, relation: "bad" }),
       ValidationError
     );
+  } finally {
+    setPoolForTesting(null);
+  }
+});
+
+test("saveProject persists raw context and queued index facts in one transaction", async () => {
+  const fake = createProjectsPool();
+  setPoolForTesting(fake.pool);
+  try {
+    const detail = await saveProject({ name: "Context Project", raw_context: "A durable project context" });
+    assert.equal(detail.context_document.index_status, "pending");
+    assert.equal(detail.context_job.worker_job_id, 1);
+    assert.deepEqual(Object.keys(fake.workerJobs[0].payload_json ? JSON.parse(fake.workerJobs[0].payload_json) : {}).sort(), ["content_hash", "document_id", "project_id"]);
+    assert.equal(fake.knowledgeDocuments.length, 1);
+    assert.equal(fake.appEvents.length, 1);
+    assert.deepEqual(fake.txCalls.slice(0, 2), ["BEGIN", "COMMIT"]);
+  } finally {
+    setPoolForTesting(null);
+  }
+});
+
+test("saveProject deduplicates matching hashes and retries a failed index", async () => {
+  const fake = createProjectsPool();
+  setPoolForTesting(fake.pool);
+  try {
+    const created = await saveProject({ name: "Context Project", raw_context: "Stable context" });
+    const projectId = created.project.id;
+    const duplicate = await saveProject({ id: projectId, name: "Context Project", raw_context: "Stable context" });
+    assert.equal(duplicate.context_job.deduplicated, true);
+    assert.equal(fake.workerJobs.length, 1);
+
+    fake.knowledgeDocuments[0].index_status = "ready";
+    const ready = await saveProject({ id: projectId, name: "Context Project", raw_context: "Stable context" });
+    assert.equal(ready.context_document.index_status, "ready");
+    assert.equal(ready.context_job, undefined);
+    assert.equal(fake.workerJobs.length, 1);
+
+    fake.knowledgeDocuments[0].index_status = "failed";
+    fake.workerJobs[0].status = "failed";
+    const retried = await saveProject({ id: projectId, name: "Context Project", raw_context: "Stable context" });
+    assert.equal(retried.context_document.index_status, "pending");
+    assert.equal(retried.context_job.deduplicated, false);
+    assert.equal(fake.workerJobs.length, 2);
+  } finally {
+    setPoolForTesting(null);
+  }
+});
+
+test("saveProject rolls back project context and job when outbox insertion fails", async () => {
+  const fake = createProjectsPool();
+  fake.failNextOutbox();
+  setPoolForTesting(fake.pool);
+  try {
+    await assert.rejects(() => saveProject({ name: "Rollback Project", raw_context: "Rollback context" }));
+    assert.deepEqual(fake.txCalls.filter((item) => item !== "RELEASE"), ["BEGIN", "ROLLBACK"]);
   } finally {
     setPoolForTesting(null);
   }

@@ -101,7 +101,7 @@ async function updateJobRunForWorkerJob(client, workerJob, status, { now, messag
   return jobRunRow(result.rows[0]);
 }
 
-export async function enqueueWorkerJob({
+export async function enqueueWorkerJobInTransaction(client, {
   jobType,
   payload = {},
   priority = 0,
@@ -113,9 +113,8 @@ export async function enqueueWorkerJob({
   const normalizedJobType = cleanJobType(jobType);
   const normalizedPriority = cleanPriority(priority);
   const normalizedMaxAttempts = cleanMaxAttempts(maxAttempts);
-  const queued = await withTransaction(async (client) => {
-    let jobRun = null;
-    if (DAILY_JOB_TYPES.has(normalizedJobType)) {
+  let jobRun = null;
+  if (DAILY_JOB_TYPES.has(normalizedJobType)) {
       const jobRunResult = await client.query(
         `
           INSERT INTO job_runs(job_type, status, started_at, message, heartbeat_at, meta_json)
@@ -130,8 +129,8 @@ export async function enqueueWorkerJob({
         ]
       );
       jobRun = jobRunRow(jobRunResult.rows[0]);
-    }
-    const workerJobResult = await client.query(
+  }
+  const workerJobResult = await client.query(
       `
         INSERT INTO worker_jobs(
           job_run_id, job_type, status, priority, payload_json, max_attempts,
@@ -152,21 +151,27 @@ export async function enqueueWorkerJob({
         now
       ]
     );
-    const workerJob = workerJobRow(workerJobResult.rows[0]);
-    await insertAppEvent(
-      SERVER_EVENTS.TASK_STARTED,
-      compactTaskEventPayload(workerJob, { status: "queued", message }),
-      { createdAt: now, client }
-    );
-    return { job_run: jobRun, worker_job: workerJob };
-  });
+  const workerJob = workerJobRow(workerJobResult.rows[0]);
+  await insertAppEvent(
+    SERVER_EVENTS.TASK_STARTED,
+    compactTaskEventPayload(workerJob, { status: "queued", message }),
+    { createdAt: now, client }
+  );
+  return { job_run: jobRun, worker_job: workerJob };
+}
+
+export async function enqueueWorkerJob(options = {}) {
+  cleanJobType(options.jobType);
+  cleanPriority(options.priority ?? 0);
+  cleanMaxAttempts(options.maxAttempts ?? 1);
+  const queued = await withTransaction((client) => enqueueWorkerJobInTransaction(client, options));
   console.info(JSON.stringify({
     event: "worker_job.queued",
     worker_job_id: queued.worker_job?.id || null,
-    job_type: normalizedJobType,
+    job_type: queued.worker_job?.job_type || "",
     worker_id: null,
     attempt: 0,
-    concurrency_group: workerJobConcurrencyGroup(normalizedJobType),
+    concurrency_group: workerJobConcurrencyGroup(queued.worker_job?.job_type),
     queue_wait_seconds: 0,
     handler_duration_seconds: null
   }));

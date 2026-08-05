@@ -12,6 +12,7 @@ from .embeddings import embed_text
 HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 POSTGRES_DOCUMENT_LOCK_NAMESPACE = 724018
 POSTGRES_LEGACY_NOTE_LOCK_NAMESPACE = 724019
+KNOWLEDGE_INDEX_STATUSES = {"pending", "running", "ready", "failed"}
 
 
 def content_hash(text: str) -> str:
@@ -129,22 +130,26 @@ def upsert_knowledge_document(
                 raw_content = ?,
                 content_hash = ?,
                 metadata_json = ?,
+                index_status = 'ready',
+                index_error = '',
+                indexed_content_hash = ?,
                 indexed_at = ?,
                 updated_at = ?
             WHERE id = ?
             """,
-            (title, raw_content, digest, to_json(metadata), now, now, document_id),
+            (title, raw_content, digest, to_json(metadata), digest, now, now, document_id),
         )
     else:
         cur = conn.execute(
             """
             INSERT INTO knowledge_documents(
               source_type, source_uri, title, raw_content, content_hash,
-              metadata_json, indexed_at, created_at, updated_at
+              metadata_json, index_status, index_error, indexed_content_hash,
+              indexed_at, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, 'ready', '', ?, ?, ?, ?)
             """,
-            (source_type, source_uri, title, raw_content, digest, to_json(metadata), now, now, now),
+            (source_type, source_uri, title, raw_content, digest, to_json(metadata), digest, now, now, now),
         )
         document_id = int(cur.lastrowid or 0)
         if not document_id:
@@ -260,6 +265,174 @@ def replace_document_chunks(
             )
             embeddings_created += 1
     return created, embeddings_created
+
+
+def index_knowledge_document(
+    conn: DbConnection,
+    settings: Settings,
+    *,
+    document_id: int,
+    project_id: int,
+    expected_content_hash: str,
+    embedder: Callable[[Settings, str], list[float] | None] | None = None,
+) -> dict[str, object]:
+    """Index one persisted document without allowing stale work to replace newer content."""
+    document_id = int(document_id)
+    project_id = int(project_id)
+    expected_content_hash = clean_unicode(expected_content_hash).strip()
+    if document_id <= 0 or project_id <= 0 or not expected_content_hash:
+        raise RuntimeError("document_id, project_id and content_hash are required")
+
+    is_postgres = getattr(conn, "dialect", "") == "postgres"
+    lock_held = False
+    try:
+        if is_postgres:
+            conn.execute("SELECT pg_advisory_lock(?, ?)", (POSTGRES_DOCUMENT_LOCK_NAMESPACE, document_id))
+            lock_held = True
+
+        lock_suffix = " FOR UPDATE" if is_postgres else ""
+        document = conn.execute(
+            f"""
+            SELECT kd.id, kd.title, kd.raw_content, kd.content_hash
+            FROM knowledge_documents kd
+            JOIN project_context_documents pcd ON pcd.document_id = kd.id
+            WHERE kd.id = ? AND pcd.project_id = ?
+            LIMIT 1{lock_suffix}
+            """,
+            (document_id, project_id),
+        ).fetchone()
+        if not document:
+            raise RuntimeError(f"Knowledge document not found for project: {document_id}/{project_id}")
+        if str(document["content_hash"] or "") != expected_content_hash:
+            conn.rollback()
+            return {
+                "document_id": document_id,
+                "project_id": project_id,
+                "content_hash": expected_content_hash,
+                "index_status": "superseded",
+                "superseded": True,
+            }
+
+        conn.execute(
+            """
+            UPDATE knowledge_documents
+            SET index_status = 'running', index_error = '', updated_at = ?
+            WHERE id = ? AND content_hash = ?
+            """,
+            (utc_now(), document_id, expected_content_hash),
+        )
+        conn.commit()
+
+        chunks = chunk_markdown(str(document["title"] or ""), str(document["raw_content"] or ""))
+        prepared: list[tuple[dict[str, object], list[float] | None]] = []
+        for chunk in chunks:
+            vector = (embedder or embed_text)(settings, str(chunk.get("text") or ""))
+            prepared.append((chunk, vector))
+
+        current = conn.execute(
+            f"SELECT content_hash FROM knowledge_documents WHERE id = ?{lock_suffix}",
+            (document_id,),
+        ).fetchone()
+        if not current or str(current["content_hash"] or "") != expected_content_hash:
+            conn.rollback()
+            return {
+                "document_id": document_id,
+                "project_id": project_id,
+                "content_hash": expected_content_hash,
+                "index_status": "superseded",
+                "superseded": True,
+            }
+
+        conn.execute("DELETE FROM research_chunks WHERE document_id = ?", (document_id,))
+        now = utc_now()
+        embeddings_created = 0
+        for index, (chunk, vector) in enumerate(prepared):
+            chunk_text = clean_unicode(str(chunk.get("text") or "")).strip()
+            if not chunk_text:
+                continue
+            cur = conn.execute(
+                """
+                INSERT INTO research_chunks(
+                  note_id, document_id, chunk_index, heading, text, token_count, source, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    None,
+                    document_id,
+                    index,
+                    clean_unicode(str(chunk.get("heading") or ""))[:240],
+                    chunk_text,
+                    int(chunk.get("token_count") or max(1, len(chunk_text.split()))),
+                    "manual_project",
+                    now,
+                ),
+            )
+            if vector is not None:
+                conn.execute(
+                    """
+                    INSERT INTO chunk_embeddings(chunk_id, model, embedding_json, created_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(chunk_id) DO UPDATE SET
+                      model = excluded.model,
+                      embedding_json = excluded.embedding_json,
+                      created_at = excluded.created_at
+                    """,
+                    (int(cur.lastrowid), settings.llm_embedding_model, to_json(vector), now),
+                )
+                embeddings_created += 1
+        updated = conn.execute(
+            """
+            UPDATE knowledge_documents
+            SET index_status = 'ready',
+                index_error = '',
+                indexed_content_hash = ?,
+                indexed_at = ?,
+                updated_at = ?
+            WHERE id = ? AND content_hash = ?
+            """,
+            (expected_content_hash, now, now, document_id, expected_content_hash),
+        )
+        if updated.rowcount != 1:
+            conn.rollback()
+            return {
+                "document_id": document_id,
+                "project_id": project_id,
+                "content_hash": expected_content_hash,
+                "index_status": "superseded",
+                "superseded": True,
+            }
+        return {
+            "document_id": document_id,
+            "project_id": project_id,
+            "content_hash": expected_content_hash,
+            "index_status": "ready",
+            "chunks_created": len(prepared),
+            "embeddings_created": embeddings_created,
+            "superseded": False,
+            "updated_at": now,
+        }
+    except Exception as exc:
+        conn.rollback()
+        try:
+            failed_update = conn.execute(
+                """
+                UPDATE knowledge_documents
+                SET index_status = 'failed', index_error = ?, updated_at = ?
+                WHERE id = ? AND content_hash = ?
+                """,
+                (clean_unicode(str(exc))[:2000], utc_now(), document_id, expected_content_hash),
+            )
+            setattr(exc, "knowledge_index_status", "failed" if failed_update.rowcount == 1 else "superseded")
+        except Exception:
+            conn.rollback()
+        raise
+    finally:
+        if lock_held:
+            try:
+                conn.execute("SELECT pg_advisory_unlock(?, ?)", (POSTGRES_DOCUMENT_LOCK_NAMESPACE, document_id))
+            except Exception:
+                conn.rollback()
 
 
 def link_project_context_document(

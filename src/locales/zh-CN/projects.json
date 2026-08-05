@@ -18,6 +18,7 @@
   "noteRelation": {"source":"资料","idea":"想法","method":"方法","result":"结果","todo":"待办","center_page":"中心页","folder_member":"项目文件夹"},
   "sourceType": {"manual_project":"系统内项目","obsidian":"Obsidian","experiment_report":"实验报告"},
   "importance": {"high":"高","medium":"中","low":"低"},
+  "indexStatus":{"pending":"等待索引","running":"正在索引","ready":"索引完成","failed":"索引失败"},
   "list": {
     "eyebrow":"研究组织","title":"项目工作台","syncing":"正在同步","activeCount":"{{count}} 个活跃项目","newProject":"新建项目",
     "portfolio":"研究组合","heroTitle":"把论文、上下文与产物组织成持续推进的研究空间","loadingProjects":"正在读取你的研究项目。","overviewSentence":"当前共维护 {{total}} 个项目，其中 {{active}} 个正在推进。","firstProjectHint":"建立第一个项目，从研究问题开始积累长期上下文。",

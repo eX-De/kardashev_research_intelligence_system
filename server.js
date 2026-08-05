@@ -131,6 +131,7 @@ const REQUEST_TIMING_LOG_ENABLED = envBoolean("KRIS_REQUEST_TIMING_LOG", false);
 const WORKER_TIMING_LOG_ENABLED = envBoolean("KRIS_WORKER_TIMING_LOG", false);
 const JOB_BACKEND = String(envValue("KRIS_JOB_BACKEND", "queue") || "queue").trim().toLowerCase();
 const COMPUTE_BACKEND = String(envValue("KRIS_COMPUTE_BACKEND", "service") || "service").trim().toLowerCase();
+const PROJECT_CONTEXT_BACKEND = String(envValue("KRIS_PROJECT_CONTEXT_BACKEND", "node") || "node").trim().toLowerCase();
 const OUTBOX_POLLER_ENABLED = envBoolean("KRIS_OUTBOX_POLLER_ENABLED", true);
 const OUTBOX_POLL_INTERVAL_MS = Math.max(
   250,
@@ -153,6 +154,9 @@ const requestTimingStorage = new AsyncLocalStorage();
 
 if (!["service", "legacy"].includes(COMPUTE_BACKEND)) {
   throw new Error("KRIS_COMPUTE_BACKEND must be service or legacy");
+}
+if (!["node", "legacy"].includes(PROJECT_CONTEXT_BACKEND)) {
+  throw new Error("KRIS_PROJECT_CONTEXT_BACKEND must be node or legacy");
 }
 
 function abortOnClientDisconnect(req, res) {
@@ -663,10 +667,6 @@ function queuedTaskResponse(command, source, args, queued) {
   };
 }
 
-function projectContextText(payload = {}) {
-  return String(payload.raw_context || payload.context || payload.project_context || "").trim();
-}
-
 async function enqueueProjectWorkerJob(command, projectId, payload = {}, { source = "project" } = {}) {
   const normalizedProjectId = eventNumber(projectId);
   if (!normalizedProjectId) {
@@ -912,6 +912,26 @@ function startOutboxPoller() {
   if (!OUTBOX_POLLER_ENABLED) return;
   pollOutboxOnce()
     .finally(() => scheduleOutboxPoller());
+}
+
+function projectContextText(payload = {}) {
+  return String(payload.raw_context || payload.context || payload.project_context || "").trim();
+}
+
+async function saveProjectWithContextBackend(payload) {
+  if (PROJECT_CONTEXT_BACKEND === "node") return saveNodeProject(payload);
+  const rawContext = projectContextText(payload);
+  if (rawContext && isQueueJobBackend()) await requireAvailableWorker();
+  const data = await saveNodeProject({ ...payload, raw_context: "", context: "", project_context: "" });
+  if (rawContext && data?.project?.id) {
+    data.context_job = await enqueueProjectWorkerJob(
+      "project-context",
+      data.project.id,
+      { raw_context: rawContext, title: `${data.project.name || "Project"} context` },
+      { source: "project-save-legacy" }
+    );
+  }
+  return data;
 }
 
 function workerUnavailableNotification(status) {
@@ -1883,20 +1903,7 @@ async function routeApi(req, res, url) {
 
   if (req.method === "POST" && url.pathname === "/api/projects") {
     const body = await readRequestJson(req);
-    const rawContext = projectContextText(body);
-    if (rawContext && isQueueJobBackend()) await requireAvailableWorker();
-    const data = await saveNodeProject(body);
-    if (rawContext && data?.project?.id) {
-      data.context_job = await enqueueProjectWorkerJob(
-        "project-context",
-        data.project.id,
-        {
-          raw_context: rawContext,
-          title: `${data.project.name || "Project"} context`
-        },
-        { source: "project-save" }
-      );
-    }
+    const data = await saveProjectWithContextBackend(body);
     sendJson(res, 200, data);
     await publishDurableProjectChanged(body.id ? SERVER_EVENTS.PROJECT_UPDATED : SERVER_EVENTS.PROJECT_CREATED, data, body.id);
     return;
@@ -1912,20 +1919,7 @@ async function routeApi(req, res, url) {
   if (req.method === "POST" && projectMatch) {
     const body = await readRequestJson(req);
     const payload = { ...body, id: Number(projectMatch[1]) };
-    const rawContext = projectContextText(body);
-    if (rawContext && isQueueJobBackend()) await requireAvailableWorker();
-    const data = await saveNodeProject(payload);
-    if (rawContext && data?.project?.id) {
-      data.context_job = await enqueueProjectWorkerJob(
-        "project-context",
-        data.project.id,
-        {
-          raw_context: rawContext,
-          title: `${data.project.name || "Project"} context`
-        },
-        { source: "project-save" }
-      );
-    }
+    const data = await saveProjectWithContextBackend(payload);
     sendJson(res, 200, data);
     await publishDurableProjectChanged(SERVER_EVENTS.PROJECT_UPDATED, data, projectMatch[1]);
     return;

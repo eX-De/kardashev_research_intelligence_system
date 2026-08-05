@@ -678,6 +678,7 @@ def complete_worker_job(
     worker_id: str,
     lease_attempt: int,
     message: str = "Worker job completed",
+    domain_events: list[dict[str, Any]] | None = None,
     now: str | None = None,
 ) -> dict[str, Any]:
     finished = now or utc_now()
@@ -720,6 +721,14 @@ def complete_worker_job(
             created_at=finished,
             commit=False,
         )
+        for event in domain_events or []:
+            insert_app_event(
+                conn,
+                str(event.get("event_type") or ""),
+                event.get("payload") if isinstance(event.get("payload"), dict) else {},
+                created_at=finished,
+                commit=False,
+            )
         conn.commit()
         return {"worker_job": worker_job, "job_run": job_run, "cancelled": False}
     except Exception:
@@ -738,6 +747,7 @@ def fail_worker_job(
     worker_id: str,
     lease_attempt: int,
     event_extra: dict[str, Any] | None = None,
+    domain_events: list[dict[str, Any]] | None = None,
     now: str | None = None,
 ) -> dict[str, Any]:
     finished = now or utc_now()
@@ -777,6 +787,14 @@ def fail_worker_job(
         if event_extra:
             event_payload.update(event_extra)
         insert_app_event(conn, "task.failed", event_payload, created_at=finished, commit=False)
+        for event in domain_events or []:
+            insert_app_event(
+                conn,
+                str(event.get("event_type") or ""),
+                event.get("payload") if isinstance(event.get("payload"), dict) else {},
+                created_at=finished,
+                commit=False,
+            )
         conn.commit()
         return {"worker_job": worker_job, "job_run": job_run, "cancelled": False}
     except Exception:

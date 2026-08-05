@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
   NotFoundError,
   ValidationError,
@@ -7,6 +9,7 @@ import {
   toJson,
   withTransaction
 } from "./db.js";
+import { enqueueWorkerJobInTransaction } from "./workerQueue.js";
 
 export const PROJECT_STATUSES = new Set(["planned", "active", "completed", "paused", "exploring", "writing", "archived"]);
 export const PROJECT_PAPER_RELATIONS = new Set(["candidate", "reading", "core", "background", "rejected"]);
@@ -29,6 +32,12 @@ const ARCHIVE_PROTECTED_STATUSES = new Set(["saved", "reading", "read"]);
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+const PROJECT_CONTEXT_LOCK_NAMESPACE = 724020;
+
+function contentHash(value) {
+  return createHash("sha256").update(text(value), "utf8").digest("hex");
 }
 
 function text(value) {
@@ -142,6 +151,10 @@ async function projectContextPayload(db, projectId) {
         kd.source_uri,
         kd.title,
         kd.raw_content,
+        kd.content_hash,
+        kd.index_status,
+        kd.index_error,
+        kd.indexed_content_hash,
         kd.indexed_at,
         kd.updated_at,
         pcd.relation,
@@ -163,6 +176,10 @@ async function projectContextPayload(db, projectId) {
     source_uri: row.source_uri,
     title: row.title,
     excerpt: text(row.raw_content).slice(0, 600),
+    content_hash: row.content_hash || "",
+    index_status: ["pending", "running", "ready", "failed"].includes(row.index_status) ? row.index_status : "pending",
+    index_error: row.index_error || "",
+    indexed_content_hash: row.indexed_content_hash || "",
     relation: row.relation,
     weight: numberValue(row.weight),
     chunk_count: numberValue(row.chunk_count),
@@ -570,13 +587,159 @@ function normalizedProjectPayload(payload = {}) {
     discovery_source: discoverySource,
     source_tags: tagPayload(payload.source_tags ?? []),
     arxiv_categories: csvPayload(payload.arxiv_categories ?? []),
-    automation: automationPayload(payload.automation ?? {})
+    automation: automationPayload(payload.automation ?? {}),
+    raw_context: text(payload.raw_context ?? payload.context ?? payload.project_context)
+  };
+}
+
+async function saveManualProjectContext(client, projectId, projectName, rawContext, now) {
+  await client.query("SELECT pg_advisory_xact_lock($1, $2)", [PROJECT_CONTEXT_LOCK_NAMESPACE, projectId]);
+  const sourceUri = `project:${projectId}:manual_context`;
+  const digest = contentHash(rawContext);
+  const existingResult = await client.query(
+    `
+      SELECT id, content_hash, index_status, index_error, indexed_content_hash
+      FROM knowledge_documents
+      WHERE source_type = 'manual_project' AND source_uri = $1
+      ORDER BY id
+      LIMIT 1
+      FOR UPDATE
+    `,
+    [sourceUri]
+  );
+  let documentId;
+  let queued = null;
+  let indexStatus = "pending";
+  let indexError = "";
+  if (existingResult.rows[0]) {
+    const existing = existingResult.rows[0];
+    documentId = Number(existing.id);
+    const sameHash = String(existing.content_hash || "") === digest;
+    const currentStatus = ["pending", "running", "ready", "failed"].includes(existing.index_status)
+      ? existing.index_status
+      : "pending";
+    indexStatus = sameHash && currentStatus !== "failed" ? currentStatus : "pending";
+    indexError = sameHash && currentStatus !== "failed" ? String(existing.index_error || "") : "";
+    await client.query(
+      `
+        UPDATE knowledge_documents
+        SET title = $1,
+            raw_content = $2,
+            content_hash = $3,
+            metadata_json = $4,
+            index_status = $5,
+            index_error = $6,
+            indexed_content_hash = CASE WHEN content_hash = $3 THEN indexed_content_hash ELSE '' END,
+            updated_at = $7
+        WHERE id = $8
+      `,
+      [
+        `${projectName || "Project"} context`,
+        rawContext,
+        digest,
+        toJson({ project_id: projectId, created_from: "manual_project_context" }),
+        indexStatus,
+        indexError,
+        now,
+        documentId
+      ]
+    );
+    if (!sameHash) {
+      await client.query("DELETE FROM research_chunks WHERE document_id = $1", [documentId]);
+    }
+  } else {
+    const inserted = await client.query(
+      `
+        INSERT INTO knowledge_documents(
+          source_type, source_uri, title, raw_content, content_hash, metadata_json,
+          index_status, index_error, indexed_content_hash, indexed_at, created_at, updated_at
+        )
+        VALUES ('manual_project', $1, $2, $3, $4, $5, 'pending', '', '', '', $6, $6)
+        RETURNING id
+      `,
+      [
+        sourceUri,
+        `${projectName || "Project"} context`,
+        rawContext,
+        digest,
+        toJson({ project_id: projectId, created_from: "manual_project_context" }),
+        now
+      ]
+    );
+    documentId = Number(inserted.rows[0].id);
+  }
+  await client.query(
+    `
+      INSERT INTO project_context_documents(project_id, document_id, relation, weight, created_at, updated_at)
+      VALUES ($1, $2, 'primary', 1.0, $3, $3)
+      ON CONFLICT(project_id, document_id, relation) DO UPDATE SET
+        weight = excluded.weight,
+        updated_at = excluded.updated_at
+    `,
+    [projectId, documentId, now]
+  );
+  if (indexStatus !== "ready") {
+    if (["pending", "running"].includes(indexStatus)) {
+      const active = await client.query(
+        `
+          SELECT id, job_run_id, job_type, status, priority, payload_json, result_json,
+                 error_message, attempts, max_attempts, run_after, locked_by, locked_at,
+                 cancel_requested_at, cancel_reason, created_at, updated_at, started_at, finished_at
+          FROM worker_jobs
+          WHERE job_type = 'knowledge-document-index'
+            AND status IN ('queued', 'running')
+            AND payload_json::jsonb = $1::jsonb
+          ORDER BY id DESC
+          LIMIT 1
+        `,
+        [toJson({ document_id: documentId, project_id: projectId, content_hash: digest })]
+      );
+      if (active.rows[0]) {
+        const row = active.rows[0];
+        queued = {
+          job_run: null,
+          worker_job: {
+            id: Number(row.id),
+            job_run_id: null,
+            job_type: row.job_type,
+            status: row.status,
+            priority: Number(row.priority || 0),
+            payload: parseJson(row.payload_json, {}),
+            result: parseJson(row.result_json, {}),
+            error_message: row.error_message || "",
+            attempts: Number(row.attempts || 0),
+            max_attempts: Number(row.max_attempts || 1),
+            created_at: row.created_at,
+            updated_at: row.updated_at
+          },
+          deduplicated: true
+        };
+      }
+    }
+    if (!queued) {
+      queued = await enqueueWorkerJobInTransaction(client, {
+        jobType: "knowledge-document-index",
+        payload: { document_id: documentId, project_id: projectId, content_hash: digest },
+        priority: 10,
+        message: "knowledge-document-index queued",
+        now
+      });
+    }
+  }
+  return {
+    document: {
+      document_id: documentId,
+      content_hash: digest,
+      index_status: indexStatus,
+      index_error: indexError
+    },
+    queued
   };
 }
 
 export async function saveProject(payload = {}) {
   const normalized = normalizedProjectPayload(payload);
-  const projectId = await withTransaction(async (client) => {
+  const saved = await withTransaction(async (client) => {
     const now = nowIso();
     if (normalized.id) {
       const existingResult = await client.query(
@@ -626,7 +789,11 @@ export async function saveProject(payload = {}) {
           normalized.id
         ]
       );
-      return normalized.id;
+      let context = null;
+      if (normalized.raw_context) {
+        context = await saveManualProjectContext(client, normalized.id, normalized.name, normalized.raw_context, now);
+      }
+      return { projectId: normalized.id, context };
     }
 
     const inserted = await client.query(
@@ -657,9 +824,31 @@ export async function saveProject(payload = {}) {
         now
       ]
     );
-    return Number(inserted.rows[0].id);
+    const projectId = Number(inserted.rows[0].id);
+    let context = null;
+    if (normalized.raw_context) {
+      context = await saveManualProjectContext(client, projectId, normalized.name, normalized.raw_context, now);
+    }
+    return { projectId, context };
   });
-  return getProjectDetail(projectId);
+  const detail = await getProjectDetail(saved.projectId);
+  if (saved.context) {
+    detail.context_document = saved.context.document;
+    if (saved.context.queued) {
+      const workerJob = saved.context.queued.worker_job;
+      detail.context_job = {
+        ok: true,
+        queued: true,
+        deduplicated: saved.context.queued.deduplicated === true,
+        command: "knowledge-document-index",
+        job_id: workerJob.id,
+        worker_job_id: workerJob.id,
+        job_run_id: null,
+        worker_job: workerJob
+      };
+    }
+  }
+  return detail;
 }
 
 function validateRelation(value, allowed, fallback) {

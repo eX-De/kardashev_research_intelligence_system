@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS knowledge_documents (
   raw_content TEXT NOT NULL DEFAULT '',
   content_hash TEXT NOT NULL DEFAULT '',
   metadata_json TEXT NOT NULL DEFAULT '{}',
+  index_status TEXT NOT NULL DEFAULT 'ready',
+  index_error TEXT NOT NULL DEFAULT '',
+  indexed_content_hash TEXT NOT NULL DEFAULT '',
   indexed_at TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -640,6 +643,7 @@ POSTGRES_REQUIRED_INDEXES = REQUIRED_INDEXES | {
 }
 
 REQUIRED_COLUMNS = {
+    "knowledge_documents": {"index_status", "index_error", "indexed_content_hash"},
     "research_chunks": {"document_id"},
     "arxiv_papers": {
         "pdf_path",
@@ -1114,6 +1118,31 @@ def _migrate_user_paper_relations_to_canonical(conn) -> None:
 
 
 def _migrate_postgres_db(conn) -> None:
+    knowledge_columns = _postgres_columns(conn, "knowledge_documents")
+    added_index_status = "index_status" not in knowledge_columns
+    added_indexed_content_hash = "indexed_content_hash" not in knowledge_columns
+    _postgres_add_column_if_missing(
+        conn,
+        "knowledge_documents",
+        "index_status",
+        "index_status TEXT NOT NULL DEFAULT 'ready'",
+    )
+    _postgres_add_column_if_missing(
+        conn,
+        "knowledge_documents",
+        "index_error",
+        "index_error TEXT NOT NULL DEFAULT ''",
+    )
+    _postgres_add_column_if_missing(
+        conn,
+        "knowledge_documents",
+        "indexed_content_hash",
+        "indexed_content_hash TEXT NOT NULL DEFAULT ''",
+    )
+    if added_index_status:
+        conn.execute("UPDATE knowledge_documents SET index_status = 'ready'")
+    if added_indexed_content_hash:
+        conn.execute("UPDATE knowledge_documents SET indexed_content_hash = content_hash")
     _postgres_add_column_if_missing(
         conn,
         "research_chunks",

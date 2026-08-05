@@ -25,7 +25,7 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         entries = worker_job_inventory()
         inventory_types = {str(entry["type"]) for entry in entries}
         self.assertEqual(inventory_types, set(service.SUPPORTED_WORKER_JOB_TYPES))
-        self.assertEqual(len(entries), 22)
+        self.assertEqual(len(entries), 23)
         for entry in entries:
             self.assertTrue(str(entry.get("label") or "").strip(), entry["type"])
             self.assertTrue(str(entry.get("concurrency_group") or "").strip(), entry["type"])
@@ -152,21 +152,26 @@ class WorkerServiceDispatchTests(unittest.TestCase):
 
         run.assert_called_once_with(conn, settings, 5, worker_job["payload"])
 
-    def test_dispatch_project_context_saves_context_and_returns_detail(self) -> None:
+    def test_dispatch_knowledge_document_index_uses_identity_and_content_hash_only(self) -> None:
         conn = object()
         settings = object()
         worker_job = {
             "id": 11,
             "job_run_id": 46,
-            "job_type": "project-context",
-            "payload": {"command": "project-context", "project_id": 5, "raw_context": "context"},
+            "job_type": "knowledge-document-index",
+            "payload": {"document_id": 7, "project_id": 5, "content_hash": "abc123"},
         }
-        with patch("worker.service.save_manual_project_context", return_value={"document_id": 7}) as save_context, \
-            patch("worker.service.project_detail", return_value={"project": {"id": 5}}):
+        with patch("worker.service.index_knowledge_document", return_value={"document_id": 7}) as index_document:
             result = service.dispatch_worker_job(conn, settings, worker_job)
 
-        self.assertEqual(result["context_document"], {"document_id": 7})
-        save_context.assert_called_once()
+        self.assertEqual(result, {"document_id": 7})
+        index_document.assert_called_once_with(
+            conn,
+            settings,
+            document_id=7,
+            project_id=5,
+            expected_content_hash="abc123",
+        )
 
     def test_dispatch_artifact_export_uses_payload_body(self) -> None:
         conn = object()

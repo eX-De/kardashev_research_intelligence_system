@@ -238,6 +238,35 @@ class WorkerQueueTests(unittest.TestCase):
         conn.commit.assert_not_called()
         conn.rollback.assert_called_once_with()
 
+    def test_failure_commits_task_and_project_domain_event_together(self) -> None:
+        conn = Mock()
+        failed = worker_job_row(
+            job_run_id=None,
+            job_type="knowledge-document-index",
+            status="failed",
+            error_message="embedding failed",
+            finished_at="2026-08-01T10:00:01+00:00",
+        )
+        conn.execute.side_effect = [Cursor(row=failed), Cursor(lastrowid=99), Cursor(lastrowid=100)]
+
+        result = fail_worker_job(
+            conn,
+            7,
+            "embedding failed",
+            worker_id="worker-a",
+            lease_attempt=1,
+            domain_events=[{
+                "event_type": "project.updated",
+                "payload": {"project_id": 5, "document_id": 9, "index_status": "failed"},
+            }],
+            now="2026-08-01T10:00:01+00:00",
+        )
+
+        self.assertEqual(result["worker_job"]["status"], "failed")
+        self.assertEqual(conn.execute.call_args_list[1].args[1][0], "task.failed")
+        self.assertEqual(conn.execute.call_args_list[2].args[1][0], "project.updated")
+        conn.commit.assert_called_once_with()
+
     def test_completion_wins_over_a_cancel_requested_after_dispatch(self) -> None:
         conn = Mock()
         completed = worker_job_row(
