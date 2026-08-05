@@ -10,6 +10,7 @@ from .embeddings import embed_many
 from .knowledge import chunk_markdown
 from .pgvector_search import ensure_pgvector_indexes
 from .search_corpus import artifact_is_searchable, artifact_uses_generic_embedding_index
+from .queue import enqueue_worker_job
 
 
 ARTIFACT_INDEX_JOB = "artifact-index"
@@ -204,31 +205,22 @@ def enqueue_artifact_index(conn: DbConnection, settings: Settings, artifact: dic
         ):
             return {"queued": False, "deduplicated": True, "worker_job_id": int(row["id"]), "artifact_id": artifact_id}
 
-    now = utc_now()
-    cursor = conn.execute(
-        """
-        INSERT INTO worker_jobs(
-          job_type, status, priority, payload_json, max_attempts, created_at, updated_at
-        ) VALUES (?, 'queued', ?, ?, ?, ?, ?)
-        """,
-        (
-            ARTIFACT_INDEX_JOB,
-            15,
-            to_json({
-                "command": ARTIFACT_INDEX_JOB,
-                "source": "artifact-lifecycle",
-                "artifact_id": artifact_id,
-                "action": action,
-                "content_hash": digest,
-                "model": model,
-            }),
-            3,
-            now,
-            now,
-        ),
+    worker_job = enqueue_worker_job(
+        conn,
+        ARTIFACT_INDEX_JOB,
+        {
+            "command": ARTIFACT_INDEX_JOB,
+            "source": "artifact-lifecycle",
+            "artifact_id": artifact_id,
+            "action": action,
+            "content_hash": digest,
+            "model": model,
+        },
+        priority=15,
+        max_attempts=3,
+        commit=True,
     )
-    conn.commit()
-    return {"queued": True, "worker_job_id": int(cursor.lastrowid), "artifact_id": artifact_id, "action": action}
+    return {"queued": True, "worker_job_id": int(worker_job["id"]), "artifact_id": artifact_id, "action": action}
 
 
 def backfill_artifact_indexes(conn: DbConnection, settings: Settings) -> dict[str, object]:

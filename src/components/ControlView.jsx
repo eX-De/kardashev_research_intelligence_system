@@ -11,6 +11,7 @@ import { api, chooseLocalPath, postJson } from "../lib/dashboard.js";
 import { friendlyObsidianMessage, obsidianCapabilityFrom } from "../lib/obsidianCapability.js";
 import { normalizeProviders, OPENROUTER_BASE_URL, providerPayload, providerType } from "../lib/settingsProviders.js";
 import { dailyStepLabel, formatApiError } from "../lib/systemMessages.js";
+import { dailyRecoveryFromHistory, fallbackHistoryFromSummary } from "../lib/taskHistory.js";
 import "../styles/ControlView.css";
 
 const AUTO_SAVE_DELAY_MS = 850;
@@ -30,7 +31,6 @@ const SETTINGS_ENTRIES = [
   { to: "/settings/data", index: "02", type: "data", eyebrow: "KNOWLEDGE", translationKey: "entries.data" },
   { to: "/settings/models", index: "03", type: "models", eyebrow: "INTELLIGENCE", translationKey: "entries.models" }
 ];
-const DAILY_JOB_TYPES = new Set(["run-daily", "resume-daily", "retry-daily"]);
 const ABOUT_LINKS = [
   {
     title: "KRIS GitHub",
@@ -175,28 +175,6 @@ function schedulerStatusMessage(scheduler, t) {
     : scheduler?.last_job?.message || scheduler?.last_error?.message || t("status.idle");
 }
 
-function dailyRecoveryFromHistory(history = []) {
-  for (const item of history) {
-    if (!DAILY_JOB_TYPES.has(item?.job_type)) continue;
-    if (item.status === "completed") return null;
-    if (item.status !== "failed") continue;
-    const progress = item.meta?.daily_progress && typeof item.meta.daily_progress === "object"
-      ? item.meta.daily_progress
-      : null;
-    if (!progress) continue;
-    const steps = Array.isArray(progress.steps) ? progress.steps : [];
-    const failedStep = steps.find((step) => step?.status === "failed") || {};
-    return {
-      job_id: item.id,
-      failed_step: failedStep.key || progress.current_key || "",
-      failed_label: failedStep.label || progress.current_label || "",
-      completed: Number(progress.completed || steps.filter((step) => step?.status === "completed").length || 0),
-      total: Number(progress.total || steps.length || 0),
-    };
-  }
-  return null;
-}
-
 export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) {
   const { t } = useTranslation(["settings", "common", "system"]);
   const location = useLocation();
@@ -228,7 +206,7 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
   const health = healthQuery.data || null;
   const scheduler = jobStatusQuery.data?.scheduler || {};
   const jobsSummary = jobsSummaryQuery.data || {};
-  const fallbackHistory = jobsSummary.latest_job ? [{ ...jobsSummary.latest_job, meta: {} }] : [];
+  const fallbackHistory = fallbackHistoryFromSummary(jobsSummary);
   const history = historyQuery.hasData ? historyQuery.data?.items || [] : fallbackHistory;
   const dailyRecovery = dailyRecoveryFromHistory(history);
   const tasksLoading = !jobStatusQuery.hasData || !jobsSummaryQuery.hasData;

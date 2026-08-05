@@ -4,6 +4,7 @@ import { insertAppEvent } from "./outbox.js";
 import { workerJobConcurrencyGroup } from "./workerJobInventory.js";
 
 const WORKER_JOB_STATUSES = new Set(["queued", "running", "completed", "failed", "cancelled"]);
+const DAILY_JOB_TYPES = new Set(["run-daily", "resume-daily", "retry-daily"]);
 
 function isoNow() {
   return new Date().toISOString();
@@ -113,24 +114,23 @@ export async function enqueueWorkerJob({
   const normalizedPriority = cleanPriority(priority);
   const normalizedMaxAttempts = cleanMaxAttempts(maxAttempts);
   const queued = await withTransaction(async (client) => {
-    const jobRunResult = await client.query(
-      `
-        INSERT INTO job_runs(job_type, status, started_at, message, heartbeat_at, meta_json)
-        VALUES ($1, 'queued', $2, $3, $2, $4)
-        RETURNING id, job_type, status, started_at, finished_at, message, pid, heartbeat_at, meta_json
-      `,
-      [
-        normalizedJobType,
-        now,
-        message,
-        toJson({
-          queued: true,
-          worker_job: true,
-          queued_at: now
-        })
-      ]
-    );
-    const jobRun = jobRunRow(jobRunResult.rows[0]);
+    let jobRun = null;
+    if (DAILY_JOB_TYPES.has(normalizedJobType)) {
+      const jobRunResult = await client.query(
+        `
+          INSERT INTO job_runs(job_type, status, started_at, message, heartbeat_at, meta_json)
+          VALUES ($1, 'queued', $2, $3, $2, $4)
+          RETURNING id, job_type, status, started_at, finished_at, message, pid, heartbeat_at, meta_json
+        `,
+        [
+          normalizedJobType,
+          now,
+          message,
+          toJson({ queued: true, daily_run: true, queued_at: now })
+        ]
+      );
+      jobRun = jobRunRow(jobRunResult.rows[0]);
+    }
     const workerJobResult = await client.query(
       `
         INSERT INTO worker_jobs(
@@ -143,7 +143,7 @@ export async function enqueueWorkerJob({
                   cancel_requested_at, cancel_reason, created_at, updated_at, started_at, finished_at
       `,
       [
-        jobRun.id,
+        jobRun?.id || null,
         normalizedJobType,
         normalizedPriority,
         toJson(payload || {}),

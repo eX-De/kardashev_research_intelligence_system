@@ -8,6 +8,7 @@ from .db_types import DbConnection
 from .embeddings import embed_many
 from .pgvector_search import ensure_pgvector_indexes
 from .search_corpus import searchable_library_paper_sql
+from .queue import enqueue_worker_job
 
 
 LIBRARY_PAPER_INDEX_JOB = "library-paper-index"
@@ -51,30 +52,20 @@ def enqueue_library_paper_index(
         ):
             return {"queued": False, "deduplicated": True, "worker_job_id": int(row["id"]), "paper_id": int(paper_id)}
 
-    now = utc_now()
-    cursor = conn.execute(
-        """
-        INSERT INTO worker_jobs(
-          job_type, status, priority, payload_json, max_attempts, created_at, updated_at
-        ) VALUES (?, 'queued', ?, ?, ?, ?, ?)
-        """,
-        (
-            LIBRARY_PAPER_INDEX_JOB,
-            14,
-            to_json(
-                {
-                    "command": LIBRARY_PAPER_INDEX_JOB,
-                    "source": "paper-import",
-                    "paper_id": int(paper_id),
-                    "model": model,
-                }
-            ),
-            3,
-            now,
-            now,
-        ),
+    worker_job = enqueue_worker_job(
+        conn,
+        LIBRARY_PAPER_INDEX_JOB,
+        {
+            "command": LIBRARY_PAPER_INDEX_JOB,
+            "source": "paper-import",
+            "paper_id": int(paper_id),
+            "model": model,
+        },
+        priority=14,
+        max_attempts=3,
+        commit=False,
     )
-    return {"queued": True, "worker_job_id": int(cursor.lastrowid), "paper_id": int(paper_id)}
+    return {"queued": True, "worker_job_id": int(worker_job["id"]), "paper_id": int(paper_id)}
 
 
 def index_library_paper(

@@ -38,11 +38,11 @@ function createHealthPool({
         if (normalized === "SELECT COUNT(*) AS COUNT FROM ARXIV_PAPERS WHERE TEXT_STATUS = 'COMPLETE'") {
           return { rows: [{ count: paperTexts }] };
         }
-        if (normalized.includes("FROM JOB_RUNS") && normalized.includes("ORDER BY ID DESC") && normalized.includes("LIMIT 1")) {
+        if (normalized.includes("WITH TASK_HISTORY AS")) {
           return { rows: latestJob ? [latestJob] : [] };
         }
-        if (normalized.includes("COUNT(*) AS COUNT FROM JOB_RUNS WHERE STATUS = 'RUNNING'")) {
-          return { rows: [{ count: runningCount }] };
+        if (normalized.includes("WORKER_RUNNING_COUNT") && normalized.includes("DAILY_RUNNING_COUNT")) {
+          return { rows: [{ worker_running_count: "0", daily_running_count: runningCount, legacy_running_count: "0" }] };
         }
         if (normalized.includes("FROM WORKER_INSTANCES")) {
           return { rows: [{
@@ -132,12 +132,17 @@ test("getHealthSummary returns Python-compatible local Obsidian and counts shape
       runningCount: "1",
       latestJob: {
         id: "12",
+        record_type: "daily_run",
+        worker_job_id: "13",
+        job_run_id: "12",
         job_type: "run-daily",
         status: "running",
         started_at: "2026-07-06T10:00:00+00:00",
         finished_at: null,
         message: "Daily run",
-        heartbeat_at: "2026-07-06T10:00:30+00:00"
+        heartbeat_at: "2026-07-06T10:00:30+00:00",
+        error_message: "",
+        meta_json: "{}"
       }
     });
     setPoolForTesting(fake.pool);
@@ -175,14 +180,21 @@ test("getHealthSummary returns Python-compatible local Obsidian and counts shape
           papers: 8
         },
         running_count: 1,
+        worker_running_count: 0,
+        daily_running_count: 1,
         latest_job: {
           id: 12,
+          record_type: "daily_run",
+          worker_job_id: 13,
+          job_run_id: 12,
           job_type: "run-daily",
           status: "running",
           started_at: "2026-07-06T10:00:00+00:00",
           finished_at: null,
           message: "Daily run",
-          heartbeat_at: "2026-07-06T10:00:30+00:00"
+          heartbeat_at: "2026-07-06T10:00:30+00:00",
+          pid: null,
+          meta: {}
         }
       });
     } finally {

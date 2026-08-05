@@ -100,7 +100,22 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         with patch("worker.service.run_generate_paper_reports_job", return_value={"ok": True}) as run:
             self.assertEqual(service.dispatch_worker_job(conn, settings, worker_job), {"ok": True})
 
-        run.assert_called_once_with(conn, settings, limit=1, job_id=42)
+        run.assert_called_once_with(conn, settings, limit=1, job_id=42, track_job_run=True)
+
+    def test_dispatch_ordinary_cli_job_disables_implicit_job_run_tracking(self) -> None:
+        conn = object()
+        settings = object()
+        worker_job = {
+            "id": 8,
+            "job_run_id": None,
+            "job_type": "sync-obsidian",
+            "payload": {"command": "sync-obsidian", "args": []},
+        }
+        run = Mock(return_value={"ok": True})
+        with patch.dict(service.DISPATCHERS, {"sync-obsidian": run}):
+            self.assertEqual(service.dispatch_worker_job(conn, settings, worker_job), {"ok": True})
+
+        run.assert_called_once_with(conn, settings, job_id=None, track_job_run=False)
 
     def test_dispatch_resume_daily_uses_payload_job_id(self) -> None:
         conn = object()

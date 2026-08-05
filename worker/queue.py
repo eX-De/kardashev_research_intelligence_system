@@ -109,11 +109,12 @@ def task_event_payload(
 ) -> dict[str, Any]:
     payload = worker_job.get("payload") if isinstance(worker_job.get("payload"), dict) else {}
     args = payload.get("args") if isinstance(payload.get("args"), list) else []
+    worker_job_id = worker_job.get("worker_job_id") or worker_job.get("id")
+    job_run_id = worker_job.get("job_run_id") or worker_job.get("job_id")
     task = {
-        "id": worker_job.get("job_run_id") or worker_job.get("job_id") or worker_job.get("id"),
-        "worker_job_id": worker_job.get("worker_job_id") or (
-            worker_job.get("id") if worker_job.get("job_run_id") else None
-        ),
+        "id": job_run_id or worker_job_id,
+        "worker_job_id": worker_job_id,
+        "job_run_id": job_run_id,
         "command": payload.get("command") or worker_job.get("command") or worker_job.get("job_type"),
         "source": payload.get("source") or worker_job.get("source") or None,
         "args": [str(item) for item in args],
@@ -130,6 +131,7 @@ def task_event_payload(
             for key in (
                 "id",
                 "worker_job_id",
+                "job_run_id",
                 "command",
                 "source",
                 "args",
@@ -145,6 +147,65 @@ def task_event_payload(
     if stale:
         payload_out["stale"] = True
     return payload_out
+
+
+def enqueue_worker_job(
+    conn: Any,
+    job_type: str,
+    payload: dict[str, Any],
+    *,
+    priority: int = 0,
+    max_attempts: int = 1,
+    message: str | None = None,
+    now: str | None = None,
+    commit: bool = False,
+) -> dict[str, Any]:
+    """Insert a child job and its queued outbox event in one transaction."""
+    queued_at = now or utc_now()
+    normalized_job_type = str(job_type or "").strip()
+    if not normalized_job_type:
+        raise ValueError("job_type is required")
+    try:
+        row = conn.execute(
+            f"""
+            INSERT INTO worker_jobs(
+              job_run_id, job_type, status, priority, payload_json, max_attempts,
+              created_at, updated_at
+            ) VALUES (NULL, ?, 'queued', ?, ?, ?, ?, ?)
+            RETURNING {_worker_job_select_columns()}
+            """,
+            (
+                normalized_job_type,
+                int(priority),
+                to_json(payload or {}),
+                max(1, int(max_attempts)),
+                queued_at,
+                queued_at,
+            ),
+        ).fetchone()
+        worker_job = _row_to_worker_job(row)
+        if not worker_job:
+            raise RuntimeError(f"Failed to enqueue worker job: {normalized_job_type}")
+        insert_app_event(
+            conn,
+            "task.started",
+            task_event_payload(
+                worker_job,
+                "queued",
+                message=message or f"{normalized_job_type} queued",
+            ),
+            created_at=queued_at,
+            commit=False,
+        )
+        if commit:
+            conn.commit()
+        return worker_job
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
 
 
 def insert_app_event(

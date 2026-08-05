@@ -53,6 +53,8 @@ function compactRuntimeJob(job) {
   if (!job) return null;
   return {
     id: job.id || null,
+    worker_job_id: job.worker_job_id || null,
+    job_run_id: job.job_run_id || null,
     command: job.command || null,
     source: job.source || null,
     args: Array.isArray(job.args) ? job.args : [],
@@ -77,9 +79,14 @@ export function compactSchedulerPayload(status = {}) {
 
 export function compactTaskEventPayload(job, options = {}, scheduler = null) {
   const jobPayload = job?.payload && typeof job.payload === "object" ? job.payload : {};
+  const hasWorkerIdentity = job?.worker_job_id !== undefined
+    || Object.prototype.hasOwnProperty.call(job || {}, "job_run_id");
+  const workerJobId = job?.worker_job_id || (hasWorkerIdentity ? job?.id : null) || null;
+  const jobRunId = job?.job_run_id || job?.job_id || (!hasWorkerIdentity ? job?.id : null) || null;
   const task = {
-    id: job?.job_run_id || job?.job_id || job?.id || null,
-    worker_job_id: job?.worker_job_id || (job?.job_run_id ? job?.id : null),
+    id: jobRunId || workerJobId,
+    worker_job_id: workerJobId,
+    job_run_id: jobRunId,
     command: jobPayload.command || job?.command || job?.job_type || null,
     source: jobPayload.source || job?.source || null,
     args: Array.isArray(jobPayload.args) ? jobPayload.args : Array.isArray(job?.args) ? job.args : [],

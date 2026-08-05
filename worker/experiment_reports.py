@@ -15,6 +15,7 @@ from .db import clean_unicode, from_json, to_json, utc_now
 from .knowledge import save_project_context_document
 from .obsidian_remote import obsidian_remote_enabled
 from .pgvector_search import ensure_pgvector_indexes
+from .queue import enqueue_worker_job
 
 
 EXPERIMENT_REPORT_ARTIFACT_TYPE = "experiment_report"
@@ -116,27 +117,21 @@ def enqueue_experiment_report_index(
             and str(queued.get("model") or "") == model
         ):
             return {"queued": False, "deduplicated": True, "worker_job_id": int(row["id"])}
-    now = utc_now()
-    cursor = conn.execute(
-        """
-        INSERT INTO worker_jobs(job_type, status, priority, payload_json, max_attempts, created_at, updated_at)
-        VALUES (?, 'queued', 15, ?, 3, ?, ?)
-        """,
-        (
-            EXPERIMENT_REPORT_INDEX_JOB,
-            to_json({
-                "command": EXPERIMENT_REPORT_INDEX_JOB,
-                "source": "experiment-report",
-                "artifact_id": artifact_id,
-                "content_hash": digest,
-                "model": model,
-            }),
-            now,
-            now,
-        ),
+    worker_job = enqueue_worker_job(
+        conn,
+        EXPERIMENT_REPORT_INDEX_JOB,
+        {
+            "command": EXPERIMENT_REPORT_INDEX_JOB,
+            "source": "experiment-report",
+            "artifact_id": artifact_id,
+            "content_hash": digest,
+            "model": model,
+        },
+        priority=15,
+        max_attempts=3,
+        commit=True,
     )
-    conn.commit()
-    return {"queued": True, "worker_job_id": int(cursor.lastrowid)}
+    return {"queued": True, "worker_job_id": int(worker_job["id"])}
 
 
 def index_experiment_report(conn: DbConnection, settings: Settings, artifact_id: int) -> dict[str, object]:

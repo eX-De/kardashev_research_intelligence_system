@@ -1,11 +1,11 @@
 {
-  "version": 1,
+  "version": 2,
   "cases": [
     {
       "name": "queued",
       "job": {
         "id": 901,
-        "job_run_id": 501,
+        "job_run_id": null,
         "job_type": "artifact-index",
         "status": "queued",
         "payload": { "command": "artifact-index", "source": "artifact", "args": ["--force"] },
@@ -16,8 +16,9 @@
       "options": { "status": "queued", "message": "artifact-index queued" },
       "expected": {
         "task": {
-          "id": 501,
+          "id": 901,
           "worker_job_id": 901,
+          "job_run_id": null,
           "command": "artifact-index",
           "source": "artifact",
           "args": ["--force"],
@@ -32,7 +33,7 @@
       "name": "running",
       "job": {
         "id": 902,
-        "job_run_id": 502,
+        "job_run_id": null,
         "job_type": "reader-import-url",
         "status": "running",
         "payload": { "command": "reader-import-url", "source": "reader-url", "args": [] },
@@ -43,8 +44,9 @@
       "options": { "status": "running" },
       "expected": {
         "task": {
-          "id": 502,
+          "id": 902,
           "worker_job_id": 902,
+          "job_run_id": null,
           "command": "reader-import-url",
           "source": "reader-url",
           "args": [],
@@ -59,7 +61,7 @@
       "name": "completed",
       "job": {
         "id": 903,
-        "job_run_id": 503,
+        "job_run_id": null,
         "job_type": "paper-report",
         "status": "completed",
         "payload": { "command": "paper-report", "source": "manual", "args": [] },
@@ -70,8 +72,9 @@
       "options": { "status": "completed", "message": "done", "result": { "ok": true, "message": "done", "ignored": "large" } },
       "expected": {
         "task": {
-          "id": 503,
+          "id": 903,
           "worker_job_id": 903,
+          "job_run_id": null,
           "command": "paper-report",
           "source": "manual",
           "args": [],
@@ -87,7 +90,7 @@
       "name": "failed",
       "job": {
         "id": 904,
-        "job_run_id": 504,
+        "job_run_id": null,
         "job_type": "reader-import-web",
         "status": "failed",
         "payload": { "command": "reader-import-web", "source": "reader-web", "args": [] },
@@ -98,8 +101,9 @@
       "options": { "status": "failed", "message": "HTTP 403" },
       "expected": {
         "task": {
-          "id": 504,
+          "id": 904,
           "worker_job_id": 904,
+          "job_run_id": null,
           "command": "reader-import-web",
           "source": "reader-web",
           "args": [],
@@ -114,7 +118,7 @@
       "name": "requeued",
       "job": {
         "id": 905,
-        "job_run_id": 505,
+        "job_run_id": null,
         "job_type": "artifact-index",
         "status": "queued",
         "payload": { "command": "artifact-index", "source": "recovery", "args": [] },
@@ -125,8 +129,9 @@
       "options": { "status": "queued", "message": "Requeued stale worker job", "stale": true },
       "expected": {
         "task": {
-          "id": 505,
+          "id": 905,
           "worker_job_id": 905,
+          "job_run_id": null,
           "command": "artifact-index",
           "source": "recovery",
           "args": [],
@@ -143,9 +148,9 @@
       "job": {
         "id": 906,
         "job_run_id": 506,
-        "job_type": "reader-import-url",
+        "job_type": "run-daily",
         "status": "cancelled",
-        "payload": { "command": "reader-import-url", "source": "manual", "args": [] },
+        "payload": { "command": "run-daily", "source": "manual", "args": [] },
         "started_at": "2026-08-05T10:05:00+00:00",
         "finished_at": "2026-08-05T10:05:03+00:00",
         "error_message": ""
@@ -155,7 +160,8 @@
         "task": {
           "id": 506,
           "worker_job_id": 906,
-          "command": "reader-import-url",
+          "job_run_id": 506,
+          "command": "run-daily",
           "source": "manual",
           "args": [],
           "status": "cancelled",

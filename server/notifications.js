@@ -123,22 +123,30 @@ function compareNotificationsDesc(left, right) {
 async function activityRows(limit = 20) {
   const result = await query(
     `
-      SELECT id, job_type, status, started_at, finished_at, message, meta_json
-      FROM job_runs
+      SELECT id, job_type, status, created_at, started_at, finished_at,
+             error_message, result_json
+      FROM worker_jobs
+      WHERE job_type NOT IN ('run-daily', 'resume-daily', 'retry-daily')
       ORDER BY id DESC
       LIMIT $1
     `,
     [limit]
   );
-  return result.rows.map((row) => ({
-    id: Number(row.id),
-    job_type: row.job_type,
-    status: row.status,
-    started_at: row.started_at,
-    finished_at: row.finished_at,
-    message: row.message,
-    meta: parseJson(row.meta_json, {})
-  }));
+  return result.rows.map((row) => {
+    const meta = parseJson(row.result_json, {});
+    return {
+      id: Number(row.id),
+      record_type: "worker_job",
+      job_type: row.job_type,
+      status: row.status,
+      started_at: row.started_at || row.created_at,
+      finished_at: row.finished_at,
+      message: row.status === "failed"
+        ? String(row.error_message || meta?.message || "")
+        : String(meta?.message || ""),
+      meta: meta && typeof meta === "object" && !Array.isArray(meta) ? meta : {}
+    };
+  });
 }
 
 async function latestDailyRun() {
@@ -153,6 +161,7 @@ async function latestDailyRun() {
   if (!row) return null;
   return {
     id: Number(row.id),
+    record_type: "daily_run",
     job_type: row.job_type,
     status: row.status,
     started_at: row.started_at,
@@ -160,6 +169,44 @@ async function latestDailyRun() {
     message: row.message,
     meta: parseJson(row.meta_json, {})
   };
+}
+
+function workerActivitySource(item, extra = {}) {
+  return {
+    worker_job_id: item.id,
+    job_id: item.id,
+    job_type: item.job_type,
+    ...extra
+  };
+}
+
+function dailyRunSource(item, extra = {}) {
+  return {
+    job_run_id: item.id,
+    job_id: item.id,
+    job_type: item.job_type,
+    ...extra
+  };
+}
+
+function compareActivityOrder(left, right) {
+  const timeOrder = activityTime(left).localeCompare(activityTime(right));
+  if (timeOrder) return timeOrder;
+  const recordOrder = String(left?.record_type || "").localeCompare(String(right?.record_type || ""));
+  if (recordOrder) return recordOrder;
+  return Number(left?.id || 0) - Number(right?.id || 0);
+}
+
+function newestUnsupersededRateLimitFailure(context) {
+  const activities = [...context.activities, context.latest_daily_run].filter(Boolean);
+  return activities
+    .filter((item) => item.status === "failed" && jobStructuredError(item)?.type === ARXIV_RATE_LIMITED)
+    .filter((failed) => !activities.some((later) => (
+      later.job_type === failed.job_type
+      && later.status === "completed"
+      && compareActivityOrder(later, failed) > 0
+    )))
+    .sort((left, right) => compareActivityOrder(right, left))[0] || null;
 }
 
 async function paperReportStats() {
@@ -264,6 +311,7 @@ function dailyRecoveryPayload(job) {
   const total = Number.parseInt(progress.total || steps.length || 0, 10) || 0;
   return {
     resumable: true,
+    job_run_id: Number(job.id),
     job_id: Number(job.id),
     failed_step: String(failedStep.key || progress.current_key || ""),
     failed_label: String(failedStep.label || progress.current_label || "未知阶段"),
@@ -298,10 +346,11 @@ function jobStructuredError(item = {}) {
 }
 
 function arxivRateLimitedNotification(failed = {}) {
-  const error = jobStructuredError(failed);
+  const current = failed || {};
+  const error = jobStructuredError(current);
   if (!error || error.type !== ARXIV_RATE_LIMITED) return null;
-  const progress = failed.meta?.daily_progress && typeof failed.meta.daily_progress === "object"
-    ? failed.meta.daily_progress
+  const progress = current.meta?.daily_progress && typeof current.meta.daily_progress === "object"
+    ? current.meta.daily_progress
     : {};
   const failedStep = String(progress.current_label || "抓取 arXiv");
   const retryAfter = safeInt(error.retry_after_seconds);
@@ -309,21 +358,20 @@ function arxivRateLimitedNotification(failed = {}) {
     ? `arXiv 建议等待 ${retryAfter} 秒后再试。`
     : "建议稍后再试。";
   return notification(
-    `arxiv-rate-limited-${failed.id}`,
+    `arxiv-rate-limited-${current.id}`,
     ARXIV_RATE_LIMITED,
     "warn",
     String(error.title || "arXiv 暂时限流"),
     `${failedStep} 时触发 arXiv 限流，系统已重试但仍失败。${retryNote}也可以在设置中调大 arXiv 请求间隔秒数。`,
     {
-      createdAt: activityTime(failed),
+      createdAt: activityTime(current),
       source: {
-        job_id: failed.id,
-        job_type: failed.job_type,
+        ...(current.record_type === "daily_run" ? dailyRunSource(current) : workerActivitySource(current)),
         error_type: ARXIV_RATE_LIMITED,
         failed_step: failedStep,
         retry_after_seconds: retryAfter,
         suggested_action: String(error.suggested_action || ""),
-        technical_message: String(error.technical_message || failed.message || "")
+        technical_message: String(error.technical_message || current.message || "")
       },
       data: {
         failed_step: String(progress.current_key || ""),
@@ -395,9 +443,7 @@ function updateNotification(status = {}) {
 }
 
 registerNotificationBuilder("daily_run_progress", "每日流程运行中的步骤进度", async (context) => {
-  const runningDaily = context.activities.find(
-    (item) => DAILY_JOB_TYPES.has(item.job_type) && item.status === "running"
-  );
+  const runningDaily = context.latest_daily_run?.status === "running" ? context.latest_daily_run : null;
   const progress = runningDaily?.meta?.daily_progress;
   if (!runningDaily || !progress) return [];
   return [
@@ -413,7 +459,7 @@ registerNotificationBuilder("daily_run_progress", "每日流程运行中的步�
           current_key: String(progress.current_key || ""),
           current_label: String(progress.current_label || "")
         },
-        source: { job_id: runningDaily.id, job_type: runningDaily.job_type },
+        source: dailyRunSource(runningDaily),
         progress
       }
     )
@@ -435,11 +481,7 @@ registerNotificationBuilder("daily_run_recoverable", "可恢复的失败每日�
       `上次流程失败在：${recovery.failed_label}，已完成 ${count}，建议继续上次流程。`,
       {
         createdAt: activityTime(recoverable),
-        source: {
-          job_id: recoverable.id,
-          job_type: recoverable.job_type,
-          recovery
-        },
+        source: dailyRunSource(recoverable, { recovery }),
         data: {
           completed: recovery.completed,
           failed_label: recovery.failed_label,
@@ -456,14 +498,7 @@ registerNotificationBuilder("arxiv_rate_limited", "arXiv 限流导致任务失�
   if (context.items.some((item) => item.type === "daily_run_progress" || item.type === "daily_run_recoverable")) {
     return [];
   }
-  const failed = context.activities.find((item) => (
-    item.status === "failed"
-    && !context.activities.some((later) => (
-      later.job_type === item.job_type
-      && later.status === "completed"
-      && later.id > item.id
-    ))
-  ));
+  const failed = newestUnsupersededRateLimitFailure(context);
   const built = arxivRateLimitedNotification(failed);
   return built ? [built] : [];
 });
@@ -482,7 +517,7 @@ registerNotificationBuilder("job_running", "非每日流程任务运行中", asy
       {
         createdAt: running.started_at,
         data: { job_type: running.job_type },
-        source: { job_id: running.id, job_type: running.job_type }
+        source: workerActivitySource(running)
       }
     )
   ];
@@ -514,7 +549,7 @@ registerNotificationBuilder("job_failed", "最近失败任务", async (context) 
           job_type: failed.job_type,
           message: String(failed.message || "")
         },
-        source: { job_id: failed.id, job_type: failed.job_type }
+        source: workerActivitySource(failed)
       }
     )
   ];
@@ -554,11 +589,7 @@ registerNotificationBuilder("daily_run_completed", "每日流程完成摘要", a
           paper_reports: paperReports,
           project_matches: projectMatches
         },
-        source: {
-          job_id: completedDaily.id,
-          job_type: completedDaily.job_type,
-          ...(artifactId ? { artifact_id: artifactId } : {})
-        }
+        source: dailyRunSource(completedDaily, artifactId ? { artifact_id: artifactId } : {})
       }
     )
   ];
@@ -581,7 +612,7 @@ registerNotificationBuilder("arxiv_papers_arrived", "新 arXiv 论文入库", as
       {
         createdAt: paperJob.finished_at,
         data: { count },
-        source: { job_id: paperJob.id, job_type: paperJob.job_type }
+        source: workerActivitySource(paperJob)
       }
     )
   ];
@@ -605,7 +636,7 @@ registerNotificationBuilder("obsidian_sync_completed", "Obsidian 同步完成", 
       {
         createdAt: syncJob.finished_at,
         data: { chunks, indexed },
-        source: { job_id: syncJob.id, job_type: syncJob.job_type }
+        source: workerActivitySource(syncJob)
       }
     )
   ];
@@ -638,7 +669,7 @@ registerNotificationBuilder("paper_text_cached", "PDF/TXT 缓存完成", async (
           pdf_count: pdfCount,
           text_count: textCount
         },
-        source: { job_id: textJob.id, job_type: textJob.job_type }
+        source: workerActivitySource(textJob)
       }
     )
   ];
@@ -661,7 +692,7 @@ registerNotificationBuilder("paper_matching_completed", "论文匹配完成", as
       {
         createdAt: rankJob.finished_at,
         data: { count },
-        source: { job_id: rankJob.id, job_type: rankJob.job_type }
+        source: workerActivitySource(rankJob)
       }
     )
   ];
@@ -729,7 +760,7 @@ registerNotificationBuilder("paper_report_completed", "最近全文报告生成�
       {
         createdAt: reportJob.finished_at,
         data: { count },
-        source: { job_id: reportJob.id, job_type: reportJob.job_type }
+        source: workerActivitySource(reportJob)
       }
     )
   ];

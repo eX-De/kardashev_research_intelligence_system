@@ -622,7 +622,7 @@ function jobPriority(command) {
 
 function queuedTaskResponse(command, source, args, queued) {
   const workerJob = queued.worker_job || {};
-  const jobRun = queued.job_run || {};
+  const jobRun = queued.job_run || null;
   return {
     ok: true,
     queued: true,
@@ -630,8 +630,9 @@ function queuedTaskResponse(command, source, args, queued) {
     command,
     source,
     args,
-    job_id: jobRun.id || workerJob.job_run_id || null,
+    job_id: jobRun?.id || workerJob.id || null,
     worker_job_id: workerJob.id || null,
+    job_run_id: jobRun?.id || workerJob.job_run_id || null,
     job_run: jobRun,
     worker_job: workerJob
   };
@@ -666,15 +667,16 @@ async function enqueueProjectWorkerJob(command, projectId, payload = {}, { sourc
     project_id: normalizedProjectId
   };
   jobRuntime.lastJob = {
-    id: response.job_id,
+    id: response.job_run_id || response.worker_job_id,
     command,
     source,
     args: [],
     status: "queued",
-    started_at: queued.job_run?.started_at || new Date().toISOString(),
+    started_at: queued.job_run?.started_at || queued.worker_job?.created_at || new Date().toISOString(),
     finished_at: null,
     message: response.message,
     worker_job_id: response.worker_job_id,
+    job_run_id: response.job_run_id,
     project_id: normalizedProjectId
   };
   return response;
@@ -696,15 +698,16 @@ async function enqueueActionWorkerJob(command, payload = {}, { source = "action"
   });
   const response = queuedTaskResponse(command, source, args, queued);
   jobRuntime.lastJob = {
-    id: response.job_id,
+    id: response.job_run_id || response.worker_job_id,
     command,
     source,
     args,
     status: "queued",
-    started_at: queued.job_run?.started_at || new Date().toISOString(),
+    started_at: queued.job_run?.started_at || queued.worker_job?.created_at || new Date().toISOString(),
     finished_at: null,
     message: response.message,
     worker_job_id: response.worker_job_id,
+    job_run_id: response.job_run_id,
     ...payload
   };
   return response;
@@ -1097,15 +1100,16 @@ async function enqueueManagedJob(command, source = "manual", args = []) {
   });
   const response = queuedTaskResponse(command, source, args, queued);
   jobRuntime.lastJob = {
-    id: response.job_id,
+    id: response.job_run_id || response.worker_job_id,
     command,
     source,
     args,
     status: "queued",
-    started_at: queued.job_run?.started_at || new Date().toISOString(),
+    started_at: queued.job_run?.started_at || queued.worker_job?.created_at || new Date().toISOString(),
     finished_at: null,
     message: response.message,
-    worker_job_id: response.worker_job_id
+    worker_job_id: response.worker_job_id,
+    job_run_id: response.job_run_id
   };
   return response;
 }
@@ -2412,7 +2416,8 @@ async function routeApi(req, res, url) {
     sendJson(res, 200, {
       ok: workerJob.status !== "failed",
       worker_job_id: workerJob.id,
-      job_id: workerJob.job_run_id,
+      job_run_id: workerJob.job_run_id,
+      job_id: workerJob.job_run_id || workerJob.id,
       status: workerJob.status,
       result: workerJob.status === "completed" ? workerJob.result : null,
       error: workerJob.status === "failed" ? workerJob.error_message : ""

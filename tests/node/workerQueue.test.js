@@ -58,7 +58,7 @@ function createWorkerQueuePool() {
     if (normalized.startsWith("INSERT INTO WORKER_JOBS")) {
       const row = workerJobRow({
         id: String(workerJobs.length + 1),
-        job_run_id: String(params[0]),
+        job_run_id: params[0] === null ? null : String(params[0]),
         job_type: params[1],
         status: "queued",
         priority: String(params[2]),
@@ -179,7 +179,7 @@ async function withWorkerQueuePool(fn) {
   }
 }
 
-test("enqueueWorkerJob creates task state and queued outbox event transactionally", async () => {
+test("ordinary enqueue creates only worker task state and queued outbox event transactionally", async () => {
   await withWorkerQueuePool(async (fake) => {
     const result = await enqueueWorkerJob({
       jobType: "generate-reports",
@@ -189,8 +189,9 @@ test("enqueueWorkerJob creates task state and queued outbox event transactionall
       now: "2026-07-06T10:00:00.000Z"
     });
     assert.deepEqual(fake.txCalls, ["BEGIN", "COMMIT", "RELEASE"]);
-    assert.equal(result.job_run.id, 1);
-    assert.equal(result.worker_job.job_run_id, 1);
+    assert.equal(result.job_run, null);
+    assert.equal(result.worker_job.job_run_id, null);
+    assert.equal(fake.jobRuns.length, 0);
     assert.equal(result.worker_job.priority, 3);
     assert.deepEqual(result.worker_job.payload, { scope: "daily" });
     assert.equal(result.worker_job.max_attempts, 2);
@@ -198,7 +199,26 @@ test("enqueueWorkerJob creates task state and queued outbox event transactionall
     assert.equal(fake.appEvents[0].event_type, "task.started");
     const payload = JSON.parse(fake.appEvents[0].payload_json);
     assert.equal(payload.task.worker_job_id, result.worker_job.id);
+    assert.equal(payload.task.job_run_id, null);
     assert.equal(payload.task.status, "queued");
+  });
+});
+
+test("daily enqueue creates and links the business job_run", async () => {
+  await withWorkerQueuePool(async (fake) => {
+    const result = await enqueueWorkerJob({
+      jobType: "run-daily",
+      now: "2026-07-06T10:00:00.000Z"
+    });
+
+    assert.equal(fake.jobRuns.length, 1);
+    assert.equal(result.job_run.id, 1);
+    assert.equal(result.worker_job.job_run_id, 1);
+    assert.equal(result.job_run.meta.daily_run, true);
+    assert.equal(result.job_run.meta.worker_job, undefined);
+    const payload = JSON.parse(fake.appEvents[0].payload_json);
+    assert.equal(payload.task.worker_job_id, result.worker_job.id);
+    assert.equal(payload.task.job_run_id, result.job_run.id);
   });
 });
 
@@ -233,7 +253,7 @@ test("queued cancellation becomes terminal with task.cancelled in one transactio
     assert.deepEqual(fake.txCalls, ["BEGIN", "COMMIT", "RELEASE"]);
     assert.equal(result.cancelled, true);
     assert.equal(result.worker_job.status, "cancelled");
-    assert.equal(result.job_run.status, "cancelled");
+    assert.equal(result.job_run, null);
     assert.equal(fake.appEvents[0].event_type, "task.cancelled");
     assert.equal(JSON.parse(fake.appEvents[0].payload_json).task.status, "cancelled");
   });
@@ -244,7 +264,6 @@ test("running cancellation records a request without taking lifecycle ownership"
     const queued = await enqueueWorkerJob({ jobType: "generate-reports", now: "2026-07-06T10:00:00.000Z" });
     fake.workerJobs[0].status = "running";
     fake.workerJobs[0].locked_by = "worker-a";
-    fake.jobRuns[0].status = "running";
     fake.appEvents.length = 0;
 
     const result = await requestWorkerJobCancellation(queued.worker_job.id, {
@@ -256,7 +275,7 @@ test("running cancellation records a request without taking lifecycle ownership"
     assert.equal(result.cancellation_requested, true);
     assert.equal(result.worker_job.status, "running");
     assert.equal(result.worker_job.cancel_requested_at, "2026-07-06T10:01:00.000Z");
-    assert.equal(result.job_run.status, "running");
+    assert.equal(result.job_run, null);
     assert.equal(fake.appEvents[0].event_type, "task.cancel_requested");
     assert.equal(JSON.parse(fake.appEvents[0].payload_json).task.status, "cancel_requested");
   });

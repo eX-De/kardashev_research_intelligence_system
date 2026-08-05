@@ -778,7 +778,13 @@ def dispatch_worker_job(conn: Any, settings: Any, worker_job: dict[str, Any]) ->
 
     if job_type == "generate-paper-reports":
         limit = _optional_int(payload.get("limit")) or _optional_int(_arg_value(args, "--limit"))
-        return run_generate_paper_reports_job(conn, settings, limit=limit, job_id=job_run_id)
+        return run_generate_paper_reports_job(
+            conn,
+            settings,
+            limit=limit,
+            job_id=job_run_id,
+            track_job_run=bool(job_run_id),
+        )
 
     if job_type in {"run-daily", "resume-daily", "retry-daily"}:
         requested_job_id = _optional_int(payload.get("job_id")) or _optional_int(_arg_value(args, "--job-id")) or 0
@@ -834,7 +840,12 @@ def dispatch_worker_job(conn: Any, settings: Any, worker_job: dict[str, Any]) ->
     dispatcher = DISPATCHERS.get(job_type)
     if not dispatcher:
         raise RuntimeError(f"Unsupported worker job type: {job_type}")
-    return dispatcher(conn, settings, job_id=job_run_id)
+    return dispatcher(
+        conn,
+        settings,
+        job_id=job_run_id,
+        track_job_run=bool(job_run_id),
+    )
 
 
 def run_once(worker_id: str, on_job_change=None) -> dict[str, Any]:

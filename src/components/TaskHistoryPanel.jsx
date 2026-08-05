@@ -21,7 +21,7 @@ function HistoryTable({ history }) {
         </thead>
         <tbody>
           {history.map((item) => (
-            <tr key={item.id}>
+            <tr key={`${item.record_type || "worker_job"}:${item.worker_job_id || item.job_run_id || item.id}`}>
               <td>{jobTitle(item.job_type, t)}</td>
               <td><span className={`pill ${item.status === "failed" ? "bad-pill" : ""}`}>{t(`common:jobStatus.${item.status}`, { defaultValue: item.status })}</span></td>
               <td>{fmtDate(item.started_at, i18n.resolvedLanguage || i18n.language)}</td>

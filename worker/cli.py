@@ -8,6 +8,7 @@ from .db_types import DbConnection, DbRow
 import sys
 import time
 import traceback
+from contextlib import nullcontext
 from dataclasses import replace
 from typing import Any, Callable
 
@@ -1530,15 +1531,24 @@ def cmd_init_db(_: argparse.Namespace) -> None:
         _emit_worker_timing("init-db", timings)
 
 
-def _job_context(conn: DbConnection, job_type: str, job_id: int | None = None):
-    return existing_job_run(conn, job_type, int(job_id)) if job_id else job_run(conn, job_type)
+def _job_context(
+    conn: DbConnection,
+    job_type: str,
+    job_id: int | None = None,
+    *,
+    track_job_run: bool = True,
+):
+    if job_id:
+        return existing_job_run(conn, job_type, int(job_id))
+    return job_run(conn, job_type) if track_job_run else nullcontext(None)
 
 
-def run_sync_obsidian_job(conn: DbConnection, settings, *, job_id: int | None = None) -> dict[str, Any]:
-    with _job_context(conn, "sync-obsidian", job_id) as active_job_id:
+def run_sync_obsidian_job(conn: DbConnection, settings, *, job_id: int | None = None, track_job_run: bool = True) -> dict[str, Any]:
+    with _job_context(conn, "sync-obsidian", job_id, track_job_run=track_job_run) as active_job_id:
         result = sync_obsidian(conn, settings)
         message = str(result.get("message") or "Obsidian sync completed")
-        update_job_meta(conn, active_job_id, message, result)
+        if active_job_id:
+            update_job_meta(conn, active_job_id, message, result)
     return {"message": message, **result}
 
 
@@ -1547,8 +1557,8 @@ def cmd_sync_obsidian(_: argparse.Namespace) -> None:
     _print_json({"ok": True, **result})
 
 
-def run_fetch_arxiv_job(conn: DbConnection, settings, *, job_id: int | None = None) -> dict[str, Any]:
-    with _job_context(conn, "fetch-arxiv", job_id) as active_job_id:
+def run_fetch_arxiv_job(conn: DbConnection, settings, *, job_id: int | None = None, track_job_run: bool = True) -> dict[str, Any]:
+    with _job_context(conn, "fetch-arxiv", job_id, track_job_run=track_job_run) as active_job_id:
         result = fetch_arxiv(conn, settings)
         selected_papers: list[Any] = []
         prefilter_result = _prefilter_daily_papers(
@@ -1568,7 +1578,8 @@ def run_fetch_arxiv_job(conn: DbConnection, settings, *, job_id: int | None = No
                 ).items()
             }
         )
-        update_job_meta(conn, active_job_id, "arXiv fetch and filtered text cache completed", result)
+        if active_job_id:
+            update_job_meta(conn, active_job_id, "arXiv fetch and filtered text cache completed", result)
     return result
 
 
@@ -1577,10 +1588,11 @@ def cmd_fetch_arxiv(_: argparse.Namespace) -> None:
     _print_json({"ok": True, "message": "arXiv fetch and filtered text cache completed", **result})
 
 
-def run_cache_arxiv_text_job(conn: DbConnection, settings, *, job_id: int | None = None) -> dict[str, Any]:
-    with _job_context(conn, "cache-arxiv-text", job_id) as active_job_id:
+def run_cache_arxiv_text_job(conn: DbConnection, settings, *, job_id: int | None = None, track_job_run: bool = True) -> dict[str, Any]:
+    with _job_context(conn, "cache-arxiv-text", job_id, track_job_run=track_job_run) as active_job_id:
         result = cache_arxiv_full_texts(conn, settings)
-        update_job_meta(conn, active_job_id, "arXiv PDF text cache completed", result)
+        if active_job_id:
+            update_job_meta(conn, active_job_id, "arXiv PDF text cache completed", result)
     return result
 
 
@@ -1589,15 +1601,16 @@ def cmd_cache_arxiv_text(_: argparse.Namespace) -> None:
     _print_json({"ok": True, "message": "arXiv PDF text cache completed", **result})
 
 
-def run_rank_job(conn: DbConnection, settings, *, job_id: int | None = None) -> dict[str, Any]:
-    with _job_context(conn, "rank-papers", job_id) as active_job_id:
+def run_rank_job(conn: DbConnection, settings, *, job_id: int | None = None, track_job_run: bool = True) -> dict[str, Any]:
+    with _job_context(conn, "rank-papers", job_id, track_job_run=track_job_run) as active_job_id:
         result = rank_unmatched_papers(conn, settings)
         result.update(rank_project_papers(conn, settings))
         result.update(generate_missing_project_judgments(conn, settings))
         result.update(sync_project_paper_recommendations(conn))
         result.update(ensure_paper_reports_for_recommendations(conn, settings=settings))
         result.update(process_paper_report_queue(conn, settings))
-        update_job_meta(conn, active_job_id, "Ranking completed", result)
+        if active_job_id:
+            update_job_meta(conn, active_job_id, "Ranking completed", result)
     return result
 
 
@@ -1606,10 +1619,11 @@ def cmd_rank(_: argparse.Namespace) -> None:
     _print_json({"ok": True, "message": "Ranking completed", **result})
 
 
-def run_generate_reports_job(conn: DbConnection, settings, *, job_id: int | None = None) -> dict[str, Any]:
-    with _job_context(conn, "generate-reports", job_id) as active_job_id:
+def run_generate_reports_job(conn: DbConnection, settings, *, job_id: int | None = None, track_job_run: bool = True) -> dict[str, Any]:
+    with _job_context(conn, "generate-reports", job_id, track_job_run=track_job_run) as active_job_id:
         result = generate_daily_report(conn, settings)
-        update_job_meta(conn, active_job_id, "Daily research report generated", result)
+        if active_job_id:
+            update_job_meta(conn, active_job_id, "Daily research report generated", result)
     return result
 
 
@@ -1624,11 +1638,13 @@ def run_generate_paper_reports_job(
     *,
     limit: int | None = None,
     job_id: int | None = None,
+    track_job_run: bool = True,
 ) -> dict[str, Any]:
-    with _job_context(conn, "generate-paper-reports", job_id) as active_job_id:
+    with _job_context(conn, "generate-paper-reports", job_id, track_job_run=track_job_run) as active_job_id:
         result = ensure_paper_reports_for_recommendations(conn, settings=settings)
         result.update(process_paper_report_queue(conn, settings, limit=limit))
-        update_job_meta(conn, active_job_id, "Full paper reports generated", result)
+        if active_job_id:
+            update_job_meta(conn, active_job_id, "Full paper reports generated", result)
     return result
 
 

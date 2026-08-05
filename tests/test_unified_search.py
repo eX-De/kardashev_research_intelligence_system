@@ -46,7 +46,12 @@ def connection() -> sqlite3.Connection:
           id INTEGER PRIMARY KEY AUTOINCREMENT, job_type TEXT, status TEXT, priority INTEGER,
           payload_json TEXT, result_json TEXT DEFAULT '{}', error_message TEXT DEFAULT '', attempts INTEGER DEFAULT 0,
           max_attempts INTEGER, run_after TEXT, locked_by TEXT DEFAULT '', locked_at TEXT,
-          created_at TEXT, updated_at TEXT, started_at TEXT, finished_at TEXT, job_run_id INTEGER
+          created_at TEXT, updated_at TEXT, started_at TEXT, finished_at TEXT, job_run_id INTEGER,
+          cancel_requested_at TEXT, cancel_reason TEXT DEFAULT ''
+        );
+        CREATE TABLE app_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL,
+          payload_json TEXT NOT NULL, created_at TEXT NOT NULL, published_at TEXT
         );
         """
     )

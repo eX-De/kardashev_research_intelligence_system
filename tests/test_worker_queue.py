@@ -319,6 +319,7 @@ class WorkerQueueTests(unittest.TestCase):
 
         self.assertEqual(payload["task"]["id"], 42)
         self.assertEqual(payload["task"]["worker_job_id"], 7)
+        self.assertEqual(payload["task"]["job_run_id"], 42)
         self.assertEqual(payload["task"]["command"], "generate-reports")
         self.assertEqual(payload["task"]["source"], "manual")
         self.assertEqual(payload["task"]["args"], ["--limit", "1"])
@@ -352,6 +353,7 @@ class WorkerQueueTests(unittest.TestCase):
         self.assertTrue(event_payload["stale"])
         self.assertEqual(event_payload["task"]["id"], 42)
         self.assertEqual(event_payload["task"]["worker_job_id"], 7)
+        self.assertEqual(event_payload["task"]["job_run_id"], 42)
         self.assertEqual(event_payload["task"]["status"], "queued")
 
     def test_cleanup_stale_worker_jobs_rolls_back_when_event_insert_fails(self) -> None:

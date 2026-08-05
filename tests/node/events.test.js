@@ -80,6 +80,8 @@ test("publishSettingsChanged compacts scheduler payload", () => {
   assert.equal(event.type, SERVER_EVENTS.SETTINGS_CHANGED);
   assert.deepEqual(event.data.scheduler.current_job, {
     id: null,
+    worker_job_id: null,
+    job_run_id: null,
     command: "run-daily",
     source: null,
     args: ["--x"],

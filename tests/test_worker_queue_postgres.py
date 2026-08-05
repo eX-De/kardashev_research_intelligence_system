@@ -5,6 +5,7 @@ import unittest
 import uuid
 
 from worker.db import init_db, to_json
+from worker.cli import _job_context
 from worker.pg import connect_postgres
 from worker.queue import (
     cancel_worker_job_before_dispatch,
@@ -70,6 +71,14 @@ class WorkerQueuePostgresTests(unittest.TestCase):
         ).fetchone()["id"])
         self.conn.commit()
         return worker_job_id
+
+    def test_worker_runtime_job_context_does_not_create_job_run(self) -> None:
+        with _job_context(self.conn, "sync-obsidian", track_job_run=False) as job_run_id:
+            self.assertIsNone(job_run_id)
+        self.assertEqual(
+            int(self.conn.execute("SELECT COUNT(1) AS count FROM job_runs").fetchone()["count"]),
+            0,
+        )
 
     def test_stale_worker_is_requeued_and_old_lease_cannot_complete(self) -> None:
         worker_job_id = self._enqueue(max_attempts=2)

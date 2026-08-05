@@ -36,6 +36,19 @@ function createNotificationsPool({
         if (normalized.includes("WHERE JOB_TYPE IN ('RUN-DAILY', 'RESUME-DAILY', 'RETRY-DAILY')") && normalized.includes("LIMIT 1")) {
           return { rows: resolvedLatestDailyRun ? [resolvedLatestDailyRun] : [] };
         }
+        if (normalized.includes("FROM WORKER_JOBS") && normalized.includes("RESULT_JSON")) {
+          return {
+            rows: activities
+              .filter((item) => !["run-daily", "resume-daily", "retry-daily"].includes(item.job_type))
+              .slice(0, Number(params[0] || 0))
+              .map((item) => ({
+                created_at: item.created_at || item.started_at,
+                error_message: item.error_message ?? (item.status === "failed" ? item.message : ""),
+                result_json: item.result_json ?? item.meta_json ?? toJson(item.message ? { message: item.message } : {}),
+                ...item
+              }))
+          };
+        }
         if (normalized.includes("FROM JOB_RUNS") && normalized.includes("META_JSON") && normalized.includes("ORDER BY ID DESC")) {
           return { rows: activities.slice(0, Number(params[0] || 0)) };
         }
@@ -123,7 +136,7 @@ test("running daily progress is surfaced and suppresses generic running job", as
       current_key: "fetch_arxiv",
       current_label: "抓取 arXiv"
     });
-    assert.deepEqual(result.items[0].source, { job_id: 9, job_type: "run-daily" });
+    assert.deepEqual(result.items[0].source, { job_run_id: 9, job_id: 9, job_type: "run-daily" });
     assert.equal(itemTypes.includes("job_running"), false);
   });
 });
@@ -146,6 +159,7 @@ test("completed daily report stays pinned until the next daily run starts", asyn
     const result = await getNotifications(1);
     assert.equal(result.items[0].type, "daily_run_completed");
     assert.equal(result.items[0].source.artifact_id, 77);
+    assert.equal(result.items[0].source.job_run_id, 11);
     assert.equal(result.items[0].source.job_id, 11);
     assert.equal(result.items[0].data.new_papers, 20);
   });
@@ -186,9 +200,78 @@ test("arXiv rate limit failure is actionable and suppresses generic failure", as
     assert.equal(rateLimited.severity, "warn");
     assert.equal(rateLimited.requires_action, true);
     assert.equal(rateLimited.source.error_type, "arxiv_rate_limited");
+    assert.equal(rateLimited.source.worker_job_id, 10);
+    assert.equal(rateLimited.source.job_id, 10);
     assert.equal(rateLimited.data.failed_step, "");
     assert.match(rateLimited.source.technical_message, /HTTP Error 429/);
     assert.equal(itemTypes.includes("job_failed"), false);
+  });
+});
+
+test("ordinary activity notifications read worker_jobs result and error fields", async () => {
+  await withNotificationsPool({
+    activities: [
+      {
+        id: "31",
+        job_type: "sync-obsidian",
+        status: "completed",
+        created_at: "2026-08-05T09:00:00+00:00",
+        started_at: "2026-08-05T09:00:01+00:00",
+        finished_at: "2026-08-05T09:00:05+00:00",
+        result_json: toJson({ indexed: 4, chunks_created: 12 })
+      },
+      {
+        id: "32",
+        job_type: "reader-import-url",
+        status: "failed",
+        created_at: "2026-08-05T10:00:00+00:00",
+        started_at: "2026-08-05T10:00:01+00:00",
+        finished_at: "2026-08-05T10:00:05+00:00",
+        error_message: "Download failed",
+        result_json: "{}"
+      }
+    ]
+  }, async (fake) => {
+    const result = await getNotifications(10);
+    const sync = result.items.find((item) => item.type === "obsidian_sync_completed");
+    const failed = result.items.find((item) => item.type === "job_failed");
+    assert.equal(sync.detail, "4 篇笔记更新，12 个 chunk 入库");
+    assert.deepEqual(sync.source, { worker_job_id: 31, job_id: 31, job_type: "sync-obsidian" });
+    assert.match(failed.detail, /Download failed/);
+    assert.deepEqual(failed.source, { worker_job_id: 32, job_id: 32, job_type: "reader-import-url" });
+    const activityQuery = fake.calls.find((call) => call.sql.includes("FROM worker_jobs"));
+    assert.match(activityQuery.sql, /job_type NOT IN/);
+    assert.match(activityQuery.sql, /result_json/);
+  });
+});
+
+test("later successful job suppresses an older arXiv rate-limit failure", async () => {
+  await withNotificationsPool({
+    activities: [
+      {
+        id: "11",
+        job_type: "fetch-arxiv",
+        status: "completed",
+        created_at: "2026-06-06T03:00:00+00:00",
+        started_at: "2026-06-06T03:00:00+00:00",
+        finished_at: "2026-06-06T03:02:00+00:00",
+        result_json: toJson({ message: "Fetch completed" })
+      },
+      {
+        id: "10",
+        job_type: "fetch-arxiv",
+        status: "failed",
+        created_at: "2026-06-06T02:00:00+00:00",
+        started_at: "2026-06-06T02:00:00+00:00",
+        finished_at: "2026-06-06T02:03:00+00:00",
+        error_message: "HTTP Error 429: Too Many Requests",
+        result_json: "{}"
+      }
+    ]
+  }, async () => {
+    const result = await getNotifications(10);
+    assert.equal(result.items.some((item) => item.type === "arxiv_rate_limited"), false);
+    assert.equal(result.items.some((item) => item.type === "job_failed"), false);
   });
 });
 

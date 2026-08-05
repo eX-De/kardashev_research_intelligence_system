@@ -104,25 +104,34 @@ def _notification_sort_key(item: dict[str, Any]) -> tuple[int, str, int]:
 def _activity_rows(conn: DbConnection, limit: int = 20) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
-        SELECT id, job_type, status, started_at, finished_at, message, meta_json
-        FROM job_runs
+        SELECT id, job_type, status, created_at, started_at, finished_at,
+               error_message, result_json
+        FROM worker_jobs
+        WHERE job_type NOT IN ('run-daily', 'resume-daily', 'retry-daily')
         ORDER BY id DESC
         LIMIT ?
         """,
         (limit,),
     ).fetchall()
-    return [
-        {
+    activities = []
+    for row in rows:
+        parsed_result = from_json(row["result_json"], {})
+        meta = parsed_result if isinstance(parsed_result, dict) else {}
+        activities.append({
             "id": int(row["id"]),
+            "record_type": "worker_job",
             "job_type": row["job_type"],
             "status": row["status"],
-            "started_at": row["started_at"],
+            "started_at": row["started_at"] or row["created_at"],
             "finished_at": row["finished_at"],
-            "message": row["message"],
-            "meta": from_json(row["meta_json"], {}),
-        }
-        for row in rows
-    ]
+            "message": str(
+                (row["error_message"] or meta.get("message") or "")
+                if row["status"] == "failed"
+                else (meta.get("message") or "")
+            ),
+            "meta": meta,
+        })
+    return activities
 
 
 def _latest_daily_run(conn: DbConnection) -> dict[str, Any] | None:
@@ -139,6 +148,7 @@ def _latest_daily_run(conn: DbConnection) -> dict[str, Any] | None:
         return None
     return {
         "id": int(row["id"]),
+        "record_type": "daily_run",
         "job_type": row["job_type"],
         "status": row["status"],
         "started_at": row["started_at"],
@@ -146,6 +156,49 @@ def _latest_daily_run(conn: DbConnection) -> dict[str, Any] | None:
         "message": row["message"],
         "meta": from_json(row["meta_json"], {}),
     }
+
+
+def _worker_activity_source(item: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    return {
+        "worker_job_id": item["id"],
+        "job_id": item["id"],
+        "job_type": item["job_type"],
+        **extra,
+    }
+
+
+def _daily_run_source(item: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    return {
+        "job_run_id": item["id"],
+        "job_id": item["id"],
+        "job_type": item["job_type"],
+        **extra,
+    }
+
+
+def _activity_order(item: dict[str, Any]) -> tuple[str, str, int]:
+    return (
+        _activity_time(item),
+        str(item.get("record_type") or ""),
+        int(item.get("id") or 0),
+    )
+
+
+def _newest_unsuperseded_rate_limit_failure(context: dict[str, Any]) -> dict[str, Any] | None:
+    activities = [item for item in [*context["activities"], context.get("latest_daily_run")] if item]
+    failures = [
+        failed
+        for failed in activities
+        if failed.get("status") == "failed"
+        and (_job_structured_error(failed) or {}).get("type") == ARXIV_RATE_LIMITED
+        and not any(
+            later.get("job_type") == failed.get("job_type")
+            and later.get("status") == "completed"
+            and _activity_order(later) > _activity_order(failed)
+            for later in activities
+        )
+    ]
+    return max(failures, key=_activity_order, default=None)
 
 
 def _paper_report_stats(conn: DbConnection) -> dict[str, int]:
@@ -265,6 +318,7 @@ def _daily_recovery_payload(job: dict[str, Any]) -> dict[str, Any]:
     total = int(progress.get("total") or len(steps) or 0)
     return {
         "resumable": True,
+        "job_run_id": int(job["id"]),
         "job_id": int(job["id"]),
         "failed_step": str((failed_step or {}).get("key") or progress.get("current_key") or ""),
         "failed_label": str((failed_step or {}).get("label") or progress.get("current_label") or "未知阶段"),
@@ -317,8 +371,11 @@ def _arxiv_rate_limited_notification(failed: dict[str, Any]) -> dict[str, Any] |
         detail,
         created_at=_activity_time(failed),
         source={
-            "job_id": failed["id"],
-            "job_type": failed["job_type"],
+            **(
+                _daily_run_source(failed)
+                if failed.get("record_type") == "daily_run"
+                else _worker_activity_source(failed)
+            ),
             "error_type": ARXIV_RATE_LIMITED,
             "failed_step": failed_step,
             "retry_after_seconds": retry_after,
@@ -331,14 +388,8 @@ def _arxiv_rate_limited_notification(failed: dict[str, Any]) -> dict[str, Any] |
 
 @register_notification_builder("daily_run_progress", "每日流程运行中的步骤进度")
 def _daily_run_progress(context: dict[str, Any]) -> list[dict[str, Any]]:
-    running_daily = next(
-        (
-            item
-            for item in context["activities"]
-            if item["job_type"] in DAILY_JOB_TYPES and item["status"] == "running"
-        ),
-        None,
-    )
+    latest_daily = context.get("latest_daily_run")
+    running_daily = latest_daily if latest_daily and latest_daily["status"] == "running" else None
     progress = (running_daily or {}).get("meta", {}).get("daily_progress")
     if not running_daily or not progress:
         return []
@@ -351,7 +402,7 @@ def _daily_run_progress(context: dict[str, Any]) -> list[dict[str, Any]]:
             "每日流程运行中",
             current,
             created_at=running_daily["started_at"],
-            source={"job_id": running_daily["id"], "job_type": running_daily["job_type"]},
+            source=_daily_run_source(running_daily),
             progress=progress,
         )
     ]
@@ -375,11 +426,7 @@ def _daily_run_recoverable(context: dict[str, Any]) -> list[dict[str, Any]]:
             "每日流程可继续",
             f"上次流程失败在：{step_label}，已完成 {count}，建议继续上次流程。",
             created_at=_activity_time(recoverable),
-            source={
-                "job_id": recoverable["id"],
-                "job_type": recoverable["job_type"],
-                "recovery": recovery,
-            },
+            source=_daily_run_source(recoverable, recovery=recovery),
             requires_action=True,
         )
     ]
@@ -389,20 +436,7 @@ def _daily_run_recoverable(context: dict[str, Any]) -> list[dict[str, Any]]:
 def _arxiv_rate_limited(context: dict[str, Any]) -> list[dict[str, Any]]:
     if any(item.get("type") in {"daily_run_progress", "daily_run_recoverable"} for item in context["items"]):
         return []
-    failed = next(
-        (
-            item
-            for item in context["activities"]
-            if item["status"] == "failed"
-            and not any(
-                later["job_type"] == item["job_type"]
-                and later["status"] == "completed"
-                and later["id"] > item["id"]
-                for later in context["activities"]
-            )
-        ),
-        None,
-    )
+    failed = _newest_unsuperseded_rate_limit_failure(context)
     notification = _arxiv_rate_limited_notification(failed or {})
     return [notification] if notification else []
 
@@ -422,7 +456,7 @@ def _job_running(context: dict[str, Any]) -> list[dict[str, Any]]:
             "任务运行中",
             _job_title(running["job_type"]),
             created_at=running["started_at"],
-            source={"job_id": running["id"], "job_type": running["job_type"]},
+            source=_worker_activity_source(running),
         )
     ]
 
@@ -455,7 +489,7 @@ def _job_failed(context: dict[str, Any]) -> list[dict[str, Any]]:
             "任务失败",
             f"{_job_title(failed['job_type'])} · {failed['message'] or '未记录错误信息'}",
             created_at=_activity_time(failed),
-            source={"job_id": failed["id"], "job_type": failed["job_type"]},
+            source=_worker_activity_source(failed),
         )
     ]
 
@@ -493,11 +527,10 @@ def _daily_run_completed(context: dict[str, Any]) -> list[dict[str, Any]]:
             "每日流程已完成",
             "，".join(parts) if parts else completed_daily["message"] or "流程已完成",
             created_at=completed_daily["finished_at"],
-            source={
-                "job_id": completed_daily["id"],
-                "job_type": completed_daily["job_type"],
+            source=_daily_run_source(
+                completed_daily,
                 **({"artifact_id": artifact_id} if artifact_id else {}),
-            },
+            ),
         )
     ]
 
@@ -519,7 +552,7 @@ def _arxiv_papers_arrived(context: dict[str, Any]) -> list[dict[str, Any]]:
             "新论文到了",
             f"{count} 篇新 arXiv 论文已入库",
             created_at=paper_job["finished_at"],
-            source={"job_id": paper_job["id"], "job_type": paper_job["job_type"]},
+            source=_worker_activity_source(paper_job),
         )
     ]
 
@@ -547,7 +580,7 @@ def _obsidian_sync_completed(context: dict[str, Any]) -> list[dict[str, Any]]:
             "Obsidian 已同步",
             detail,
             created_at=sync_job["finished_at"],
-            source={"job_id": sync_job["id"], "job_type": sync_job["job_type"]},
+            source=_worker_activity_source(sync_job),
         )
     ]
 
@@ -578,7 +611,7 @@ def _paper_text_cached(context: dict[str, Any]) -> list[dict[str, Any]]:
             "论文正文已缓存",
             "，".join(parts),
             created_at=text_job["finished_at"],
-            source={"job_id": text_job["id"], "job_type": text_job["job_type"]},
+            source=_worker_activity_source(text_job),
         )
     ]
 
@@ -600,7 +633,7 @@ def _paper_matching_completed(context: dict[str, Any]) -> list[dict[str, Any]]:
             "论文匹配完成",
             f"{count} 条匹配结果",
             created_at=rank_job["finished_at"],
-            source={"job_id": rank_job["id"], "job_type": rank_job["job_type"]},
+            source=_worker_activity_source(rank_job),
         )
     ]
 
@@ -670,7 +703,7 @@ def _paper_report_completed(context: dict[str, Any]) -> list[dict[str, Any]]:
             "全文报告已生成",
             f"{count} 篇全文报告完成",
             created_at=report_job["finished_at"],
-            source={"job_id": report_job["id"], "job_type": report_job["job_type"]},
+            source=_worker_activity_source(report_job),
         )
     ]
 
