@@ -245,6 +245,8 @@ python -m worker.cli generate-paper-reports --limit 10
 - `KRIS_WORKER_HEARTBEAT_INTERVAL_SECONDS` / `KRIS_WORKER_HEARTBEAT_TTL_SECONDS`：Worker 默认每 5 秒写入实例及当前任务心跳；Node 在 15 秒无心跳后将其判定为离线。
 - `KRIS_WORKER_MONITOR_INTERVAL_MS`：Node 检查 Worker 和停滞队列的间隔，默认 5000ms。
 - `KRIS_WORKER_JOB_STALE_AFTER_SECONDS`：`worker_jobs.running` 的租约恢复阈值，默认 90 秒；Worker 会持续续期，失联超时后 attempts 未耗尽会重排队，耗尽则失败并同步 `job_runs`。
+- `GLOBAL_LLM_REQUEST_CONCURRENCY`：所有 Worker/compute 进程合计的 LLM 外部请求上限，默认 `4`。
+- `GLOBAL_EMBEDDING_REQUEST_CONCURRENCY`：所有 Worker/compute 进程合计的 embedding 外部请求上限，默认 `4`。`embedding_concurrency`、项目判定和 Chat profile 并发是单批次局部上限，保存时不会超过对应全局上限。
 - `KRIS_JOB_BACKEND`：任务执行后端，默认 `queue`。Node 会写入 `worker_jobs`，由 `python -m worker.service` 常驻 worker 执行；设为 `cli` 可临时回退旧的 Node spawn CLI 行为。
 - `KRIS_COMPUTE_BACKEND`：交互计算后端，默认 `service`。deep search、Reader Chat 和追问建议直接调用常驻 compute service，不写入 `worker_jobs` / `job_runs`；设为 `legacy` 可在一个发布周期内回退旧队列/CLI 路径。
 - `KRIS_PROJECT_CONTEXT_BACKEND`：项目上下文保存后端，默认 `node`。Node 在项目保存事务内持久化原文并提交 `knowledge-document-index`；仅在迁移回滚时设为 `legacy`，两条路径不会同时处理同一次保存。
@@ -373,6 +375,8 @@ Payload 约束：
 - `db`：`pgvector/pgvector:pg17`，数据在 named volume `pgdata17`。
 - `app`：Node 22 + Python venv，启动时先执行 `python -m worker.cli init-db`，再运行 `node server.js`。
 - `worker`：与 app 使用同一镜像，运行 `python -m worker.service`，消费 `worker_jobs` 并写入 `app_events` outbox。
+- 默认启动 1 个 Worker；已完成并发策略迁移的部署可用 `docker compose up -d --scale worker=2` 启动 2 个实例。Worker 服务没有固定容器名或宿主机端口。估算供应商容量时，应按全局 LLM/embedding 上限计算，而不是用“实例数 × 单批次并发”；若供应商额度为每秒 `R` 个请求，建议全局并发从不高于 `R × 平均请求秒数` 的保守值开始。
+- `paper_report_queue_concurrency` / `PAPER_REPORT_QUEUE_CONCURRENCY` 已弃用；单篇报告现在是扁平 `paper-report` job，并由共享 policy 的 `paper-report` group（当前上限 2）控制。
 - `./data:/data`：PDF/TXT 缓存、远端 Obsidian 镜像等文件数据。
 - 密钥只以 `_FILE` 路径形式注入容器；非密钥配置仍通过环境变量传入。
 

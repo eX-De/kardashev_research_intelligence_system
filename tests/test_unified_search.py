@@ -47,6 +47,7 @@ def connection() -> sqlite3.Connection:
           id INTEGER PRIMARY KEY AUTOINCREMENT, job_type TEXT, status TEXT, priority INTEGER,
           payload_json TEXT, result_json TEXT DEFAULT '{}', error_message TEXT DEFAULT '', attempts INTEGER DEFAULT 0,
           max_attempts INTEGER, run_after TEXT, locked_by TEXT DEFAULT '', locked_at TEXT,
+          concurrency_group TEXT DEFAULT '', concurrency_key TEXT DEFAULT '', policy_version INTEGER DEFAULT 0,
           created_at TEXT, updated_at TEXT, started_at TEXT, finished_at TEXT, job_run_id INTEGER,
           cancel_requested_at TEXT, cancel_reason TEXT DEFAULT ''
         );

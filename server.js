@@ -611,11 +611,6 @@ function isQueueJobBackend() {
   return JOB_BACKEND !== "cli";
 }
 
-function jobPriority(command) {
-  if (isDailyJobCommand(command)) return 20;
-  return 10;
-}
-
 function queuedTaskResponse(command, source, args, queued) {
   const workerJob = queued.worker_job || {};
   const jobRun = queued.job_run || null;
@@ -629,6 +624,7 @@ function queuedTaskResponse(command, source, args, queued) {
     job_id: jobRun?.id || workerJob.id || null,
     worker_job_id: workerJob.id || null,
     job_run_id: jobRun?.id || workerJob.job_run_id || null,
+    deduplicated: Boolean(queued.deduplicated),
     job_run: jobRun,
     worker_job: workerJob
   };
@@ -651,7 +647,6 @@ async function enqueueProjectWorkerJob(command, projectId, payload = {}, { sourc
       project_id: normalizedProjectId,
       ...payload
     },
-    priority: jobPriority(command),
     message: `${command} queued`
   });
   const response = {
@@ -674,7 +669,7 @@ async function enqueueProjectWorkerJob(command, projectId, payload = {}, { sourc
   return response;
 }
 
-async function enqueueActionWorkerJob(command, payload = {}, { source = "action", args = [], priority = null, maxAttempts = 1 } = {}) {
+async function enqueueActionWorkerJob(command, payload = {}, { source = "action", args = [] } = {}) {
   await requireAvailableWorker();
   const queued = await enqueueWorkerJob({
     jobType: command,
@@ -684,8 +679,6 @@ async function enqueueActionWorkerJob(command, payload = {}, { source = "action"
       args,
       ...payload
     },
-    priority: priority ?? jobPriority(command),
-    maxAttempts,
     message: `${command} queued`
   });
   const response = queuedTaskResponse(command, source, args, queued);
@@ -876,8 +869,7 @@ function scheduleOutboxPoller(delayMs = OUTBOX_POLL_INTERVAL_MS) {
 
 function startOutboxPoller() {
   if (!OUTBOX_POLLER_ENABLED) return;
-  pollOutboxOnce()
-    .finally(() => scheduleOutboxPoller());
+  scheduleOutboxPoller();
 }
 
 function projectContextText(payload = {}) {
@@ -1089,19 +1081,9 @@ async function runManagedJob(command, source = "manual", args = []) {
 
 async function enqueueManagedJob(command, source = "manual", args = []) {
   await requireAvailableWorker();
-  const isDailyJob = isDailyJobCommand(command);
-  const active = await activeDatabaseJob({
-    includeQueued: true
-  });
-  if (active) {
-    const err = new Error(`Database job is already active: ${active.job_type} #${active.id}`);
-    err.statusCode = 409;
-    throw err;
-  }
   const queued = await enqueueWorkerJob({
     jobType: command,
     payload: { command, source, args },
-    priority: jobPriority(command),
     message: `${command} queued`
   });
   const response = queuedTaskResponse(command, source, args, queued);
@@ -2147,7 +2129,7 @@ async function routeApi(req, res, url) {
         const data = await enqueueActionWorkerJob(
           "reader-import-upload",
           { body },
-          { source: "reader-upload", maxAttempts: 2 }
+          { source: "reader-upload" }
         );
         sendJson(res, 202, data);
         return;
@@ -2247,7 +2229,7 @@ async function routeApi(req, res, url) {
       const data = await enqueueActionWorkerJob(
         "reader-import-url",
         { body },
-        { source: "reader-url", maxAttempts: 2 }
+          { source: "reader-url" }
       );
       sendJson(res, 202, data);
       return;
@@ -2272,7 +2254,7 @@ async function routeApi(req, res, url) {
       const data = await enqueueActionWorkerJob(
         "reader-import-web",
         { body },
-        { source: "reader-web", priority: 8, maxAttempts: 2 }
+        { source: "reader-web" }
       );
       sendJson(res, 202, data);
       return;

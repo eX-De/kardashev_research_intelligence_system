@@ -95,8 +95,9 @@ export const INT_FIELDS = new Set([
   "rag_prefilter_min_keep",
   "rag_prefilter_max_keep",
   "scheduler_interval_hours",
-  "paper_report_queue_concurrency",
   "embedding_concurrency",
+  "global_llm_request_concurrency",
+  "global_embedding_request_concurrency",
   "project_chat_profile_concurrency",
   "project_judgment_concurrency"
 ]);
@@ -210,6 +211,8 @@ const DATACLASS_SETTING_FIELDS = new Set([
   "obsidian_remote_output_prefix",
   "obsidian_remote_append_only",
   "embedding_concurrency",
+  "global_llm_request_concurrency",
+  "global_embedding_request_concurrency",
   "paper_reader_prompt_mode",
   "paper_reader_prompt_locale",
   "paper_reader_default_prompt",
@@ -505,7 +508,12 @@ export function loadBaseSettingsFromEnv() {
       "Research Intelligence"
     ),
     obsidian_remote_append_only: envBoolean("OBSIDIAN_REMOTE_APPEND_ONLY", true),
-    embedding_concurrency: positiveInteger(envValue("EMBEDDING_CONCURRENCY", "2"), 2, "embedding_concurrency"),
+    embedding_concurrency: Math.min(
+      positiveInteger(envValue("EMBEDDING_CONCURRENCY", "2"), 2, "embedding_concurrency"),
+      positiveInteger(envValue("GLOBAL_EMBEDDING_REQUEST_CONCURRENCY", "4"), 4, "global_embedding_request_concurrency")
+    ),
+    global_llm_request_concurrency: positiveInteger(envValue("GLOBAL_LLM_REQUEST_CONCURRENCY", "4"), 4, "global_llm_request_concurrency"),
+    global_embedding_request_concurrency: positiveInteger(envValue("GLOBAL_EMBEDDING_REQUEST_CONCURRENCY", "4"), 4, "global_embedding_request_concurrency"),
     paper_reader_prompt_mode: inferPaperReaderPromptMode(
       envValue("PAPER_READER_PROMPT_MODE", ""),
       paperReaderCustomPrompt
@@ -574,6 +582,9 @@ export function applyStoredSettings(stored, baseSettings = loadBaseSettingsFromE
       }
     }
   }
+  settings.embedding_concurrency = Math.min(settings.embedding_concurrency, settings.global_embedding_request_concurrency);
+  settings.project_chat_profile_concurrency = Math.min(settings.project_chat_profile_concurrency, settings.global_llm_request_concurrency);
+  settings.project_judgment_concurrency = Math.min(settings.project_judgment_concurrency, settings.global_llm_request_concurrency);
   for (const field of FLOAT_FIELDS) {
     if (hasOwn(stored, field)) settings[field] = parseFloatValue(stored[field], field);
   }
@@ -610,6 +621,14 @@ export function settingsPayloadFromStored(stored = {}) {
   const paperReaderCustomPromptPayload = paperReaderPromptMode === "default" && isBuiltInPaperReaderPrompt(paperReaderCustomPrompt)
     ? ""
     : paperReaderCustomPrompt;
+  const globalLlmConcurrency = positiveInteger(
+    storedOr(stored, "global_llm_request_concurrency", envValue("GLOBAL_LLM_REQUEST_CONCURRENCY", "4")), 4,
+    "global_llm_request_concurrency"
+  );
+  const globalEmbeddingConcurrency = positiveInteger(
+    storedOr(stored, "global_embedding_request_concurrency", envValue("GLOBAL_EMBEDDING_REQUEST_CONCURRENCY", "4")), 4,
+    "global_embedding_request_concurrency"
+  );
   return {
     obsidian_vault_path: String(settings.obsidian_vault_path || ""),
     obsidian_storage_backend: settings.obsidian_storage_backend,
@@ -667,7 +686,7 @@ export function settingsPayloadFromStored(stored = {}) {
     project_chat_profile_model: String(
       storedOr(stored, "project_chat_profile_model", settings.project_chat_profile_model || "")
     ),
-    project_chat_profile_concurrency: positiveInteger(
+    project_chat_profile_concurrency: Math.min(positiveInteger(
       storedOr(
         stored,
         "project_chat_profile_concurrency",
@@ -676,8 +695,8 @@ export function settingsPayloadFromStored(stored = {}) {
       settings.project_chat_profile_concurrency || 2,
       "project_chat_profile_concurrency",
       8
-    ),
-    project_judgment_concurrency: positiveInteger(
+    ), globalLlmConcurrency),
+    project_judgment_concurrency: Math.min(positiveInteger(
       storedOr(
         stored,
         "project_judgment_concurrency",
@@ -686,7 +705,7 @@ export function settingsPayloadFromStored(stored = {}) {
       settings.project_judgment_concurrency || 3,
       "project_judgment_concurrency",
       8
-    ),
+    ), globalLlmConcurrency),
     reader_chat_provider_id: String(storedOr(stored, "reader_chat_provider_id", settings.reader_chat_provider_id || "")),
     reader_chat_model: String(storedOr(stored, "reader_chat_model", settings.reader_chat_model || "")),
     reader_smart_save_provider_id: String(
@@ -699,11 +718,13 @@ export function settingsPayloadFromStored(stored = {}) {
       storedOr(stored, "reader_question_provider_id", settings.reader_question_provider_id || "")
     ),
     reader_question_model: String(storedOr(stored, "reader_question_model", settings.reader_question_model || "")),
-    embedding_concurrency: positiveInteger(
+    global_llm_request_concurrency: globalLlmConcurrency,
+    global_embedding_request_concurrency: globalEmbeddingConcurrency,
+    embedding_concurrency: Math.min(positiveInteger(
       storedOr(stored, "embedding_concurrency", envValue("EMBEDDING_CONCURRENCY", String(settings.embedding_concurrency || 2))),
       settings.embedding_concurrency || 2,
       "embedding_concurrency"
-    ),
+    ), globalEmbeddingConcurrency),
     scheduler_enabled: boolValue(storedOr(stored, "scheduler_enabled", envValue("SCHEDULER_ENABLED", false))),
     run_daily_on_startup_enabled: boolValue(
       storedOr(stored, "run_daily_on_startup_enabled", envValue("RUN_DAILY_ON_STARTUP_ENABLED", false))
@@ -713,21 +734,6 @@ export function settingsPayloadFromStored(stored = {}) {
       pythonOr(storedOr(stored, "scheduler_interval_hours", envValue("SCHEDULER_INTERVAL_HOURS", 24)), 24),
       24,
       "scheduler_interval_hours"
-    ),
-    paper_report_queue_concurrency: Math.max(
-      1,
-      integerOrDefault(
-        pythonOr(
-          storedOr(
-            stored,
-            "paper_report_queue_concurrency",
-            envValue("PAPER_REPORT_QUEUE_CONCURRENCY", envValue("PAPER_REPORT_QUEUE_LIMIT", 1))
-          ),
-          1
-        ),
-        1,
-        "paper_report_queue_concurrency"
-      )
     ),
     onboarding_completed: boolValue(storedOr(stored, "onboarding_completed", false)),
     onboarding_project_source: String(storedOr(stored, "onboarding_project_source", ""))
@@ -779,6 +785,9 @@ export function normalizeSettingsPayload(payload = {}, currentSettings = {}) {
       if (key === "embedding_concurrency" && value < 1) {
         throw new ValidationError("embedding_concurrency must be at least 1");
       }
+      if (["global_llm_request_concurrency", "global_embedding_request_concurrency"].includes(key) && value < 1) {
+        throw new ValidationError(`${key} must be at least 1`);
+      }
       if (key === "project_chat_profile_concurrency" && (value < 1 || value > 8)) {
         throw new ValidationError("project_chat_profile_concurrency must be between 1 and 8");
       }
@@ -820,6 +829,18 @@ export function normalizeSettingsPayload(payload = {}, currentSettings = {}) {
   }
   if (normalized.scheduler_enabled) normalized.run_daily_on_startup_enabled = false;
   if (normalized.run_daily_on_startup_enabled) normalized.scheduler_enabled = false;
+  const llmGlobal = Number(normalized.global_llm_request_concurrency
+    ?? currentSettings.global_llm_request_concurrency ?? 4);
+  const embeddingGlobal = Number(normalized.global_embedding_request_concurrency
+    ?? currentSettings.global_embedding_request_concurrency ?? 4);
+  for (const field of ["project_chat_profile_concurrency", "project_judgment_concurrency"]) {
+    if (Object.hasOwn(normalized, field) || Object.hasOwn(normalized, "global_llm_request_concurrency")) {
+      normalized[field] = Math.min(Number(normalized[field] ?? currentSettings[field] ?? 1), llmGlobal);
+    }
+  }
+  if (Object.hasOwn(normalized, "embedding_concurrency") || Object.hasOwn(normalized, "global_embedding_request_concurrency")) {
+    normalized.embedding_concurrency = Math.min(Number(normalized.embedding_concurrency ?? currentSettings.embedding_concurrency ?? 1), embeddingGlobal);
+  }
   return normalized;
 }
 

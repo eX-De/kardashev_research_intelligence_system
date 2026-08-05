@@ -85,6 +85,8 @@ class Settings:
     obsidian_remote_output_prefix: str = "Research Intelligence"
     obsidian_remote_append_only: bool = True
     embedding_concurrency: int = 2
+    global_llm_request_concurrency: int = 4
+    global_embedding_request_concurrency: int = 4
     paper_reader_prompt_mode: str = "default"
     paper_reader_prompt_locale: str = "zh-CN"
     paper_reader_default_prompt: str = ""
@@ -293,7 +295,12 @@ def load_settings() -> Settings:
             "Research Intelligence",
         ).strip().replace("\\", "/").strip("/") or "Research Intelligence",
         obsidian_remote_append_only=_bool("OBSIDIAN_REMOTE_APPEND_ONLY", "true"),
-        embedding_concurrency=_positive_int("EMBEDDING_CONCURRENCY", 2),
+        embedding_concurrency=min(
+            _positive_int("EMBEDDING_CONCURRENCY", 2),
+            _positive_int("GLOBAL_EMBEDDING_REQUEST_CONCURRENCY", 4),
+        ),
+        global_llm_request_concurrency=_positive_int("GLOBAL_LLM_REQUEST_CONCURRENCY", 4),
+        global_embedding_request_concurrency=_positive_int("GLOBAL_EMBEDDING_REQUEST_CONCURRENCY", 4),
         paper_reader_prompt_mode=paper_reader_prompt_mode,
         paper_reader_prompt_locale=env_value("PAPER_READER_PROMPT_LOCALE", "zh-CN").strip() or "zh-CN",
         paper_reader_default_prompt=paper_reader_custom_prompt,
@@ -301,8 +308,14 @@ def load_settings() -> Settings:
         paper_report_model=env_value("PAPER_REPORT_MODEL", ""),
         project_chat_profile_provider_id=env_value("PROJECT_CHAT_PROFILE_PROVIDER_ID", ""),
         project_chat_profile_model=env_value("PROJECT_CHAT_PROFILE_MODEL", ""),
-        project_chat_profile_concurrency=_positive_int("PROJECT_CHAT_PROFILE_CONCURRENCY", 2, maximum=8),
-        project_judgment_concurrency=_positive_int("PROJECT_JUDGMENT_CONCURRENCY", 3, maximum=8),
+        project_chat_profile_concurrency=min(
+            _positive_int("PROJECT_CHAT_PROFILE_CONCURRENCY", 2, maximum=8),
+            _positive_int("GLOBAL_LLM_REQUEST_CONCURRENCY", 4),
+        ),
+        project_judgment_concurrency=min(
+            _positive_int("PROJECT_JUDGMENT_CONCURRENCY", 3, maximum=8),
+            _positive_int("GLOBAL_LLM_REQUEST_CONCURRENCY", 4),
+        ),
         reader_chat_provider_id=env_value("READER_CHAT_PROVIDER_ID", ""),
         reader_chat_model=env_value("READER_CHAT_MODEL", ""),
         reader_smart_save_provider_id=env_value("READER_SMART_SAVE_PROVIDER_ID", ""),

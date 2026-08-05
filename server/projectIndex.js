@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { NotFoundError, parseJson, toJson, withTransaction } from "./db.js";
 import { SERVER_EVENTS } from "./events.js";
 import { insertAppEvent } from "./outbox.js";
-import { enqueueWorkerJobInTransaction } from "./workerQueue.js";
+import { enqueueWorkerJobInTransaction, rebindWorkerJobPolicyInTransaction } from "./workerQueue.js";
 
 const PROJECT_INDEX_LOCK_NAMESPACE = 724022;
 
@@ -196,17 +196,12 @@ async function enqueueArtifactIndex(client, artifact, now) {
     model: ""
   };
   if (queued) {
-    await client.query(
-      "UPDATE worker_jobs SET payload_json = $1, updated_at = $2 WHERE id = $3",
-      [toJson(payload), now, queued.id]
-    );
+    await rebindWorkerJobPolicyInTransaction(client, queued.id, "artifact-index", payload, now);
     return { queued: true, reused: true, superseded: true, worker_job_id: Number(queued.id), artifact_id: artifact.id };
   }
   const created = await enqueueWorkerJobInTransaction(client, {
     jobType: "artifact-index",
     payload,
-    priority: 15,
-    maxAttempts: 3,
     message: "artifact-index queued",
     now
   });
@@ -238,17 +233,12 @@ async function enqueueArtifactExport(client, artifact, relativePath, now) {
   }
   const queued = active.rows.find((row) => row.status === "queued");
   if (queued) {
-    await client.query(
-      "UPDATE worker_jobs SET payload_json = $1, updated_at = $2 WHERE id = $3",
-      [toJson(payload), now, queued.id]
-    );
+    await rebindWorkerJobPolicyInTransaction(client, queued.id, "artifact-export-obsidian", payload, now);
     return { queued: true, reused: true, superseded: true, worker_job_id: Number(queued.id), artifact_id: artifact.id };
   }
   const created = await enqueueWorkerJobInTransaction(client, {
     jobType: "artifact-export-obsidian",
     payload,
-    priority: 10,
-    maxAttempts: 1,
     message: "artifact-export-obsidian queued",
     now
   });

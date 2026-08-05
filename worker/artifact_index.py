@@ -274,8 +274,6 @@ def enqueue_artifact_index(
             "content_hash": digest,
             "model": model,
         },
-        priority=15,
-        max_attempts=3,
         commit=commit,
     )
     return {"queued": True, "worker_job_id": int(worker_job["id"]), "artifact_id": artifact_id, "action": action}

@@ -29,7 +29,11 @@ def worker_job_definition(job_type: str) -> dict[str, Any] | None:
 
 
 def worker_job_concurrency_group(job_type: str) -> str:
-    return str((worker_job_definition(job_type) or {}).get("concurrency_group") or "unclassified")
+    try:
+        from .job_policy import worker_job_policy
+        return str(worker_job_policy(job_type)["concurrency_group"])
+    except RuntimeError:
+        return "unclassified"
 
 
 def worker_job_title(job_type: str) -> str:

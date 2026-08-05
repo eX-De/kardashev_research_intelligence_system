@@ -154,9 +154,10 @@ export function DailyTasksSettingsView({
           <CheckboxField label={t("daily.fields.cacheFullText")} name="arxiv_cache_full_text" checked={settings.arxiv_cache_full_text} onChange={onSettingChange} />
           <TextField label={t("daily.fields.pdfDirectory")} name="arxiv_pdf_dir" placeholder="./data/arxiv_pdfs" value={settings.arxiv_pdf_dir} onChange={onSettingChange} />
           <TextField label={t("daily.fields.txtDirectory")} name="arxiv_text_dir" placeholder="./data/arxiv_text" value={settings.arxiv_text_dir} onChange={onSettingChange} />
+          <NumberField label={t("daily.fields.globalLlmConcurrency")} name="global_llm_request_concurrency" min="1" step="1" value={settings.global_llm_request_concurrency ?? 4} onChange={onSettingChange} />
+          <NumberField label={t("daily.fields.globalEmbeddingConcurrency")} name="global_embedding_request_concurrency" min="1" step="1" value={settings.global_embedding_request_concurrency ?? 4} onChange={onSettingChange} />
           <NumberField label={t("daily.fields.embeddingConcurrency")} name="embedding_concurrency" min="1" step="1" value={settings.embedding_concurrency} onChange={onSettingChange} />
           <NumberField label={t("daily.fields.judgmentConcurrency")} name="project_judgment_concurrency" min="1" max="8" step="1" value={settings.project_judgment_concurrency ?? 3} onChange={onSettingChange} />
-          <NumberField label={t("daily.fields.reportConcurrency")} name="paper_report_queue_concurrency" min="1" max="8" step="1" value={settings.paper_report_queue_concurrency} onChange={onSettingChange} />
           <NumberField label={t("daily.fields.retryLimit")} name="retry_daily_max_results" min="1" step="1" value={settings.retry_daily_max_results} onChange={onSettingChange} />
         </SettingsSection>
 

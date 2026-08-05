@@ -1,0 +1,265 @@
+﻿{
+    "version":  1,
+    "aging_seconds":  60,
+    "jobs":  {
+                 "sync-obsidian":  {
+                                       "execution_mode":  "background",
+                                       "concurrency_group":  "obsidian",
+                                       "max_running":  1,
+                                       "key_fields":  [],
+                                       "fixed_key":  "global:obsidian-sync",
+                                       "priority":  20,
+                                       "default_max_attempts":  1,
+                                       "user_visible":  true
+                                   },
+                 "fetch-arxiv":  {
+                                     "execution_mode":  "background",
+                                     "concurrency_group":  "arxiv",
+                                     "max_running":  2,
+                                     "key_fields":  [
+
+                                                    ],
+                                     "priority":  5,
+                                     "default_max_attempts":  1,
+                                     "user_visible":  true
+                                 },
+                 "cache-arxiv-text":  {
+                                          "execution_mode":  "background",
+                                          "concurrency_group":  "ingest",
+                                          "max_running":  2,
+                                          "key_fields":  [
+                                                             "paper_id",
+                                                             "arxiv_id"
+                                                         ],
+                                          "key_prefix":  "paper-text",
+                                          "priority":  10,
+                                          "default_max_attempts":  1,
+                                          "user_visible":  true
+                                      },
+                 "rank-papers":  {
+                                     "execution_mode":  "background",
+                                     "concurrency_group":  "llm",
+                                     "max_running":  2,
+                                     "key_fields":  [
+                                                        "job_run_id",
+                                                        "project_id"
+                                                    ],
+                                     "key_prefix":  "rank",
+                                     "priority":  5,
+                                     "default_max_attempts":  1,
+                                     "user_visible":  true
+                                 },
+                 "generate-reports":  {
+                                          "execution_mode":  "background",
+                                          "concurrency_group":  "llm",
+                                          "max_running":  2,
+                                          "key_fields":  [
+                                                             "job_run_id"
+                                                         ],
+                                          "key_prefix":  "daily-report",
+                                          "priority":  5,
+                                          "default_max_attempts":  1,
+                                          "user_visible":  true
+                                      },
+                 "artifact-index":  {
+                                        "execution_mode":  "background",
+                                        "concurrency_group":  "artifact-index",
+                                        "max_running":  2,
+                                        "key_fields":  [
+                                                           "artifact_id"
+                                                       ],
+                                        "key_format":  "artifact:{value}",
+                                        "priority":  15,
+                                        "default_max_attempts":  3,
+                                        "user_visible":  true
+                                    },
+                 "artifact-index-backfill":  {
+                                                 "execution_mode":  "background",
+                                                 "concurrency_group":  "artifact-backfill",
+                                                 "max_running":  1,
+                                                 "key_fields":  [
+
+                                                                ],
+                                                 "fixed_key":  "global:artifact-backfill",
+                                                 "priority":  -10,
+                                                 "default_max_attempts":  3,
+                                                 "user_visible":  true
+                                             },
+                 "experiment-report-index":  {
+                                                 "execution_mode":  "background",
+                                                 "concurrency_group":  "artifact-index",
+                                                 "max_running":  2,
+                                                 "key_fields":  [
+                                                                    "experiment_report_id",
+                                                                    "artifact_id"
+                                                                ],
+                                                 "key_prefix":  "experiment-report",
+                                                 "priority":  15,
+                                                 "default_max_attempts":  3,
+                                                 "user_visible":  true
+                                             },
+                 "library-paper-index":  {
+                                             "execution_mode":  "background",
+                                             "concurrency_group":  "library-paper-index",
+                                             "max_running":  2,
+                                             "key_fields":  [
+                                                                "paper_id"
+                                                            ],
+                                             "key_format":  "paper:{value}:index",
+                                             "priority":  15,
+                                             "default_max_attempts":  3,
+                                             "user_visible":  true
+                                         },
+                 "run-daily":  {
+                                   "execution_mode":  "background",
+                                   "concurrency_group":  "daily",
+                                   "max_running":  1,
+                                   "key_fields":  [
+
+                                                  ],
+                                   "fixed_key":  "global:daily",
+                                   "priority":  0,
+                                   "default_max_attempts":  1,
+                                   "user_visible":  true
+                               },
+                 "resume-daily":  {
+                                      "execution_mode":  "background",
+                                      "concurrency_group":  "daily",
+                                      "max_running":  1,
+                                      "key_fields":  [
+
+                                                     ],
+                                      "fixed_key":  "global:daily",
+                                      "priority":  10,
+                                      "default_max_attempts":  1,
+                                      "user_visible":  true
+                                  },
+                 "retry-daily":  {
+                                     "execution_mode":  "background",
+                                     "concurrency_group":  "daily",
+                                     "max_running":  1,
+                                     "key_fields":  [
+
+                                                    ],
+                                     "fixed_key":  "global:daily",
+                                     "priority":  10,
+                                     "default_max_attempts":  1,
+                                     "user_visible":  true
+                                 },
+                 "knowledge-document-index":  {
+                                                  "execution_mode":  "background",
+                                                  "concurrency_group":  "knowledge-index",
+                                                  "max_running":  2,
+                                                  "key_fields":  [
+                                                                     "document_id"
+                                                                 ],
+                                                  "key_prefix":  "document",
+                                                  "priority":  15,
+                                                  "default_max_attempts":  1,
+                                                  "user_visible":  true
+                                              },
+                 "project-context":  {
+                                         "execution_mode":  "background",
+                                         "concurrency_group":  "knowledge-index",
+                                         "max_running":  2,
+                                         "key_fields":  [
+                                                            "project_id"
+                                                        ],
+                                         "key_prefix":  "project-context",
+                                         "priority":  10,
+                                         "default_max_attempts":  1,
+                                         "user_visible":  true
+                                     },
+                 "artifact-export-obsidian":  {
+                                                  "execution_mode":  "background",
+                                                  "concurrency_group":  "obsidian",
+                                                  "max_running":  1,
+                                                  "key_fields":  [
+                                                                     "resolved_destination_path",
+                                                                     "destination_path",
+                                                                     "path",
+                                                                     "artifact_id"
+                                                                 ],
+                                                  "key_format":  "obsidian-path:{value}",
+                                                  "priority":  20,
+                                                  "default_max_attempts":  1,
+                                                  "user_visible":  true
+                                              },
+                 "reader-import-upload":  {
+                                              "execution_mode":  "background",
+                                              "concurrency_group":  "reader-import",
+                                              "max_running":  2,
+                                              "key_fields":  [
+                                                                 "source_hash",
+                                                                 "body.files.0.sha256",
+                                                                 "body.files.0.path"
+                                                             ],
+                                              "key_format":  "reader-import:{value}",
+                                              "priority":  20,
+                                              "default_max_attempts":  2,
+                                              "user_visible":  true
+                                          },
+                 "reader-import-url":  {
+                                           "execution_mode":  "background",
+                                           "concurrency_group":  "reader-import",
+                                           "max_running":  2,
+                                           "key_fields":  [
+                                                              "source_url",
+                                                              "url",
+                                                              "body.url",
+                                                              "body.urls"
+                                                          ],
+                                           "key_format":  "reader-import:{value}",
+                                           "key_transform":  "canonical_url_set_sha256",
+                                           "deduplicate_active":  true,
+                                           "priority":  20,
+                                           "default_max_attempts":  2,
+                                           "user_visible":  true
+                                       },
+                 "reader-import-web":  {
+                                           "execution_mode":  "background",
+                                           "concurrency_group":  "reader-import",
+                                           "max_running":  2,
+                                           "key_fields":  [
+                                                              "source_url",
+                                                              "url",
+                                                              "body.url",
+                                                              "body.urls"
+                                                          ],
+                                           "key_format":  "reader-import:{value}",
+                                           "key_transform":  "canonical_url_set_sha256",
+                                           "deduplicate_active":  true,
+                                           "priority":  20,
+                                           "default_max_attempts":  2,
+                                           "user_visible":  true
+                                       },
+                 "reader-save-obsidian":  {
+                                              "execution_mode":  "background",
+                                              "concurrency_group":  "obsidian",
+                                              "max_running":  1,
+                                              "key_fields":  [
+                                                                 "resolved_destination_path",
+                                                                 "destination_path",
+                                                                 "path",
+                                                                 "artifact_id",
+                                                                 "paper_id"
+                                                             ],
+                                              "key_format":  "obsidian-path:{value}",
+                                              "priority":  20,
+                                              "default_max_attempts":  1,
+                                              "user_visible":  true
+                                          },
+                 "paper-report":  {
+                                      "execution_mode":  "background",
+                                      "concurrency_group":  "paper-report",
+                                      "max_running":  2,
+                                      "key_fields":  [
+                                                         "paper_id"
+                                                     ],
+                                      "key_format":  "paper:{value}:report",
+                                      "priority":  20,
+                                      "default_max_attempts":  2,
+                                      "user_visible":  true
+                                  }
+             }
+}

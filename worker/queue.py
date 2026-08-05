@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import threading
 from typing import Any
 
 from .db import from_json, to_json, utc_now
+from .job_policy import policy_aging_seconds, resolve_worker_job_policy, worker_job_policy
+
+
+_LOCAL_CLAIM_LOCK = threading.RLock()
 
 
 def _sync_stale_paper_report_domain(
@@ -80,17 +85,30 @@ def _sync_stale_paper_report_domain(
 def _row_to_worker_job(row: Any | None) -> dict[str, Any] | None:
     if not row:
         return None
+    def optional(key: str, default: Any = None) -> Any:
+        try:
+            return row[key]
+        except (KeyError, IndexError):
+            return default
+    payload = from_json(row["payload_json"], {})
+    try:
+        fallback_policy = resolve_worker_job_policy(str(row["job_type"] or ""), payload)
+    except RuntimeError:
+        fallback_policy = {}
     return {
         "id": int(row["id"]),
         "job_run_id": int(row["job_run_id"]) if row["job_run_id"] is not None else None,
         "job_type": row["job_type"],
         "status": row["status"],
         "priority": int(row["priority"] or 0),
-        "payload": from_json(row["payload_json"], {}),
+        "payload": payload,
         "result": from_json(row["result_json"], {}),
         "error_message": row["error_message"] or "",
         "attempts": int(row["attempts"] or 0),
         "max_attempts": int(row["max_attempts"] or 1),
+        "concurrency_group": optional("concurrency_group", fallback_policy.get("concurrency_group", "")) or "",
+        "concurrency_key": optional("concurrency_key", fallback_policy.get("concurrency_key", "")) or "",
+        "policy_version": int(optional("policy_version", fallback_policy.get("policy_version", 0)) or 0),
         "run_after": row["run_after"],
         "locked_by": row["locked_by"] or "",
         "locked_at": row["locked_at"],
@@ -123,6 +141,7 @@ def _worker_job_select_columns() -> str:
     return """
       id, job_run_id, job_type, status, priority, payload_json, result_json,
       error_message, attempts, max_attempts, run_after, locked_by, locked_at,
+      concurrency_group, concurrency_key, policy_version,
       cancel_requested_at, cancel_reason, created_at, updated_at, started_at, finished_at
     """
 
@@ -225,8 +244,6 @@ def enqueue_worker_job(
     job_type: str,
     payload: dict[str, Any],
     *,
-    priority: int = 0,
-    max_attempts: int = 1,
     message: str | None = None,
     now: str | None = None,
     commit: bool = False,
@@ -236,20 +253,46 @@ def enqueue_worker_job(
     normalized_job_type = str(job_type or "").strip()
     if not normalized_job_type:
         raise ValueError("job_type is required")
+    resolved = resolve_worker_job_policy(normalized_job_type, payload)
     try:
+        if resolved.get("deduplicate_active") and resolved.get("concurrency_key"):
+            if getattr(conn, "dialect", "") == "postgres":
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+                    (f"worker-enqueue:{resolved['concurrency_key']}",),
+                )
+            existing_row = conn.execute(
+                f"""
+                SELECT {_worker_job_select_columns()}
+                FROM worker_jobs
+                WHERE job_type = ? AND concurrency_key = ? AND status IN ('queued', 'running')
+                ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, id
+                LIMIT 1
+                """,
+                (normalized_job_type, str(resolved["concurrency_key"])),
+            ).fetchone()
+            existing = _row_to_worker_job(existing_row)
+            if existing:
+                existing["deduplicated"] = True
+                if commit:
+                    conn.commit()
+                return existing
         row = conn.execute(
             f"""
             INSERT INTO worker_jobs(
               job_run_id, job_type, status, priority, payload_json, max_attempts,
-              created_at, updated_at
-            ) VALUES (NULL, ?, 'queued', ?, ?, ?, ?, ?)
+              concurrency_group, concurrency_key, policy_version, created_at, updated_at
+            ) VALUES (NULL, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING {_worker_job_select_columns()}
             """,
             (
                 normalized_job_type,
-                int(priority),
+                int(resolved["priority"]),
                 to_json(payload or {}),
-                max(1, int(max_attempts)),
+                int(resolved["default_max_attempts"]),
+                str(resolved["concurrency_group"]),
+                str(resolved["concurrency_key"]),
+                int(resolved["policy_version"]),
                 queued_at,
                 queued_at,
             ),
@@ -257,6 +300,7 @@ def enqueue_worker_job(
         worker_job = _row_to_worker_job(row)
         if not worker_job:
             raise RuntimeError(f"Failed to enqueue worker job: {normalized_job_type}")
+        worker_job["deduplicated"] = False
         insert_app_event(
             conn,
             "task.started",
@@ -277,6 +321,31 @@ def enqueue_worker_job(
         except Exception:
             pass
         raise
+
+
+def rebind_worker_job_policy(
+    conn: Any, worker_job_id: int, job_type: str, payload: dict[str, Any], *, now: str | None = None,
+    status_scope: str = "queued",
+) -> bool:
+    if status_scope not in {"queued", "active"}:
+        raise ValueError(f"Unsupported worker job policy rebind scope: {status_scope}")
+    resolved = resolve_worker_job_policy(job_type, payload)
+    status_filter = "AND status = 'queued'" if status_scope == "queued" else "AND status IN ('queued', 'running')"
+    changed = conn.execute(
+        f"""
+        UPDATE worker_jobs
+        SET payload_json = ?, priority = ?, max_attempts = ?, concurrency_group = ?,
+            concurrency_key = ?, policy_version = ?, updated_at = ?
+        WHERE id = ? {status_filter}
+        RETURNING id
+        """,
+        (
+            to_json(payload or {}), int(resolved["priority"]), int(resolved["default_max_attempts"]),
+            str(resolved["concurrency_group"]), str(resolved["concurrency_key"]),
+            int(resolved["policy_version"]), now or utc_now(), int(worker_job_id),
+        ),
+    ).fetchone()
+    return bool(changed)
 
 
 def insert_app_event(
@@ -400,21 +469,119 @@ def heartbeat_worker_job(
 def claim_next_worker_job(conn: Any, worker_id: str, *, now: str | None = None) -> dict[str, Any] | None:
     claimed_at = now or utc_now()
     normalized_worker_id = _required_worker_id(worker_id)
+    is_postgres = getattr(conn, "dialect", "") == "postgres"
+    is_sqlite = conn.__class__.__module__ == "sqlite3"
+    if not is_postgres:
+        _LOCAL_CLAIM_LOCK.acquire()
     try:
-        row = conn.execute(
-            f"""
-            SELECT {_worker_job_select_columns()}
-            FROM worker_jobs
-            WHERE status = 'queued'
-              AND cancel_requested_at IS NULL
-              AND attempts < max_attempts
-              AND (run_after IS NULL OR run_after <= ?)
-            ORDER BY priority DESC, run_after NULLS FIRST, id
-            FOR UPDATE SKIP LOCKED
-            LIMIT 1
-            """,
-            (claimed_at,),
-        ).fetchone()
+        def candidates():
+            if not is_postgres and not is_sqlite:
+                item = conn.execute(
+                    f"""SELECT {_worker_job_select_columns()} FROM worker_jobs
+                    WHERE status = 'queued' AND cancel_requested_at IS NULL AND attempts < max_attempts
+                      AND (run_after IS NULL OR run_after <= ?)
+                    ORDER BY priority DESC, run_after NULLS FIRST, id LIMIT 1""",
+                    (claimed_at,),
+                ).fetchone()
+                if item:
+                    yield item
+                return
+            if not is_postgres:
+                for item in conn.execute(
+                f"""
+                SELECT {_worker_job_select_columns()} FROM worker_jobs
+                WHERE status = 'queued' AND cancel_requested_at IS NULL AND attempts < max_attempts
+                  AND (run_after IS NULL OR run_after <= ?)
+                ORDER BY (priority + CAST(((julianday(?) - julianday(created_at)) * 86400) / ? AS INTEGER)) DESC,
+                         priority DESC, id
+                """,
+                    (claimed_at, claimed_at, policy_aging_seconds()),
+                ).fetchall():
+                    yield item
+                return
+            offset = 0
+            while True:
+                page = conn.execute(
+                    f"""
+                    SELECT {_worker_job_select_columns()}
+                    FROM worker_jobs
+                    WHERE status = 'queued' AND cancel_requested_at IS NULL AND attempts < max_attempts
+                      AND (run_after IS NULL OR run_after <= ?)
+                    ORDER BY (priority + FLOOR(EXTRACT(EPOCH FROM (?::timestamptz - NULLIF(created_at, '')::timestamptz)) / ?)) DESC,
+                             priority DESC, run_after NULLS FIRST, id
+                    LIMIT 100 OFFSET ?
+                    """,
+                    (claimed_at, claimed_at, policy_aging_seconds(), offset),
+                ).fetchall()
+                if not page:
+                    break
+                yield from page
+                offset += len(page)
+                if len(page) < 100:
+                    break
+        row = None
+        for candidate in candidates():
+            candidate_job = _row_to_worker_job(candidate) or {}
+            group = str(candidate_job.get("concurrency_group") or "")
+            key = str(candidate_job.get("concurrency_key") or "")
+            try:
+                policy = worker_job_policy(str(candidate_job.get("job_type") or ""))
+            except RuntimeError:
+                continue
+            if not is_postgres and not is_sqlite:
+                row = candidate
+                break
+            if not is_postgres:
+                occupied = conn.execute(
+                    "SELECT COUNT(*) AS count FROM worker_jobs WHERE status = 'running' AND concurrency_group = ?",
+                    (group,),
+                ).fetchone()
+                duplicate = key and conn.execute(
+                    "SELECT 1 AS present FROM worker_jobs WHERE status = 'running' AND concurrency_key = ? LIMIT 1",
+                    (key,),
+                ).fetchone()
+                if int(occupied["count"] or 0) < int(policy["max_running"]) and not duplicate:
+                    row = candidate
+                    break
+                continue
+            conn.execute("SAVEPOINT claim_candidate")
+            def abandon_candidate() -> None:
+                conn.execute("ROLLBACK TO SAVEPOINT claim_candidate")
+                conn.execute("RELEASE SAVEPOINT claim_candidate")
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(?, 76103))",
+                (f"worker-group:{group}",),
+            )
+            if key:
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(?, 76104))",
+                    (f"worker-key:{key}",),
+                )
+            locked = conn.execute(
+                f"SELECT {_worker_job_select_columns()} FROM worker_jobs WHERE id = ? AND status = 'queued' FOR UPDATE SKIP LOCKED",
+                (int(candidate["id"]),),
+            ).fetchone()
+            if not locked:
+                abandon_candidate()
+                continue
+            occupied = conn.execute(
+                "SELECT COUNT(*) AS count FROM worker_jobs WHERE status = 'running' AND concurrency_group = ?",
+                (group,),
+            ).fetchone()
+            if int(occupied["count"] or 0) >= int(policy["max_running"]):
+                abandon_candidate()
+                continue
+            if key:
+                duplicate = conn.execute(
+                    "SELECT 1 AS present FROM worker_jobs WHERE status = 'running' AND concurrency_key = ? LIMIT 1",
+                    (key,),
+                ).fetchone()
+                if duplicate:
+                    abandon_candidate()
+                    continue
+            conn.execute("RELEASE SAVEPOINT claim_candidate")
+            row = locked
+            break
         if not row:
             conn.commit()
             return None
@@ -470,6 +637,10 @@ def claim_next_worker_job(conn: Any, worker_id: str, *, now: str | None = None) 
         except Exception:
             pass
         raise
+
+    finally:
+        if not is_postgres:
+            _LOCAL_CLAIM_LOCK.release()
 
 
 def cleanup_stale_worker_jobs(
@@ -768,8 +939,6 @@ def cancel_worker_job_before_dispatch(
         except Exception:
             pass
         raise
-
-
 def complete_worker_job(
     conn: Any,
     worker_job_id: int,

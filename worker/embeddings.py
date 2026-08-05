@@ -10,6 +10,7 @@ from .db_types import DbConnection, DbRow
 
 from .config import Settings
 from .db import from_json, to_json, utc_now
+from .resource_limiter import outbound_request_slot
 
 
 def cosine(left: list[float], right: list[float]) -> float:
@@ -41,8 +42,9 @@ def embed_text(settings: Settings, text: str) -> list[float] | None:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=45) as response:
-            body = json.loads(response.read().decode("utf-8"))
+        with outbound_request_slot("embedding", getattr(settings, "global_embedding_request_concurrency", 4)):
+            with urllib.request.urlopen(request, timeout=45) as response:
+                body = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"Embedding request failed: {exc}") from exc
     data = body.get("data") or []
@@ -77,6 +79,7 @@ def _embedding_concurrency(settings: Settings, item_count: int | None = None) ->
         raise RuntimeError("embedding_concurrency must be at least 1")
     if item_count is None:
         return configured
+    configured = min(configured, max(1, int(settings.global_embedding_request_concurrency)))
     return min(configured, max(1, item_count))
 
 

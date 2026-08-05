@@ -1,0 +1,24 @@
+{
+  "cases": [
+    { "job_type": "sync-obsidian", "payload": {}, "key": "global:obsidian-sync" },
+    { "job_type": "fetch-arxiv", "payload": {}, "key": "" },
+    { "job_type": "cache-arxiv-text", "payload": { "paper_id": 11 }, "key": "paper-text:11" },
+    { "job_type": "rank-papers", "payload": { "job_run_id": 12 }, "key": "rank:12" },
+    { "job_type": "generate-reports", "payload": { "job_run_id": 13 }, "key": "daily-report:13" },
+    { "job_type": "artifact-index", "payload": { "artifact_id": 14 }, "key": "artifact:14" },
+    { "job_type": "artifact-index-backfill", "payload": {}, "key": "global:artifact-backfill" },
+    { "job_type": "experiment-report-index", "payload": { "artifact_id": 15 }, "key": "experiment-report:15" },
+    { "job_type": "library-paper-index", "payload": { "paper_id": 16 }, "key": "paper:16:index" },
+    { "job_type": "run-daily", "payload": {}, "key": "global:daily" },
+    { "job_type": "resume-daily", "payload": {}, "key": "global:daily" },
+    { "job_type": "retry-daily", "payload": {}, "key": "global:daily" },
+    { "job_type": "knowledge-document-index", "payload": { "document_id": 17 }, "key": "document:17" },
+    { "job_type": "project-context", "payload": { "project_id": 18 }, "key": "project-context:18" },
+    { "job_type": "artifact-export-obsidian", "payload": { "destination_path": "C:\\Vault\\研究.md" }, "key": "obsidian-path:C:/Vault/研究.md" },
+    { "job_type": "reader-import-upload", "payload": { "body": { "files": [{ "sha256": "abc" }, { "sha256": "def" }] } }, "key": "reader-import:abc" },
+    { "job_type": "reader-import-url", "payload": { "body": { "urls": ["https://a.test/x", "https://b.test/y"] } }, "key": "reader-import:9344f18d6c7767593701631363063fcc6fbaaa282aec664939354e2dc6be9a64" },
+    { "job_type": "reader-import-web", "payload": { "body": { "urls": ["https://例子.test/a"] } }, "key": "reader-import:2d470871db71a97b9d7a57e5a97c74ea235a243dff1448b96b73e6ec8fa81c7b" },
+    { "job_type": "reader-save-obsidian", "payload": { "paper_id": 19 }, "key": "obsidian-path:19" },
+    { "job_type": "paper-report", "payload": { "paper_id": 20 }, "key": "paper:20:report" }
+  ]
+}

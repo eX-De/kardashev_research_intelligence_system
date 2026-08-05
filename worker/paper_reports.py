@@ -20,13 +20,14 @@ from .artifacts import PAPER_REPORT_ARTIFACT_TYPE, content_hash, upsert_artifact
 from .artifact_index import enqueue_artifact_index
 from .library_search_index import enqueue_library_paper_index
 from .db import clean_unicode, from_json, to_json, utc_now
-from .queue import enqueue_worker_job, insert_app_event, task_event_payload
+from .queue import enqueue_worker_job, insert_app_event, rebind_worker_job_policy, task_event_payload
 from .papers import (
     replace_paper_chunks,
     upsert_paper_asset,
 )
 from .paper_prompts import PAPER_READER_DEFAULT_PROMPT, resolve_paper_reader_prompt
 from .project_status import run_daily_project_status_sql
+from .resource_limiter import outbound_request_slot
 
 
 PAPER_READER_ANALYSIS_SYSTEM = (
@@ -464,31 +465,36 @@ def _active_paper_report_jobs(conn: DbConnection, paper_id: int) -> list[DbRow]:
     if getattr(conn, "dialect", "") == "postgres":
         return conn.execute(
             """
-            SELECT id, status, payload_json
+            SELECT id, status, payload_json, concurrency_key
             FROM worker_jobs
             WHERE job_type = 'paper-report'
               AND status IN ('queued', 'running')
               AND (
-                payload_json::jsonb ->> 'dedupe_key' = ?
-                OR payload_json::jsonb ->> 'paper_id' = ?
+                concurrency_key = ?
+                OR (concurrency_key = '' AND (
+                  payload_json::jsonb ->> 'dedupe_key' = ?
+                  OR payload_json::jsonb ->> 'paper_id' = ?
+                ))
               )
             ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, id DESC
             FOR UPDATE
             """,
-            (key, str(int(paper_id))),
+            (key, key, str(int(paper_id))),
         ).fetchall()
     rows = conn.execute(
         """
-        SELECT id, status, payload_json FROM worker_jobs
+        SELECT id, status, payload_json, concurrency_key FROM worker_jobs
         WHERE job_type = 'paper-report' AND status IN ('queued', 'running')
         ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, id DESC
         """
     ).fetchall()
     return [
         row for row in rows
-        if (lambda payload: payload.get("dedupe_key") == key or int(payload.get("paper_id") or 0) == int(paper_id))(
-            from_json(row["payload_json"], {})
-        )
+        if str(row["concurrency_key"] or "") == key
+        or (not str(row["concurrency_key"] or "") and
+            (lambda payload: payload.get("dedupe_key") == key or int(payload.get("paper_id") or 0) == int(paper_id))(
+                from_json(row["payload_json"], {})
+            ))
     ]
 
 
@@ -551,11 +557,14 @@ def ensure_paper_report_worker_job(
         if running:
             running_payload = from_json(running["payload_json"], {})
             key = paper_report_concurrency_key(paper_id)
-            if running_payload.get("dedupe_key") != key or running_payload.get("concurrency_key") != key:
-                running_payload.update({"paper_id": int(paper_id), "dedupe_key": key, "concurrency_key": key})
-                conn.execute(
-                    "UPDATE worker_jobs SET payload_json = ?, updated_at = ? WHERE id = ?",
-                    (to_json(running_payload), utc_now(), int(running["id"])),
+            had_legacy_policy_keys = "dedupe_key" in running_payload or "concurrency_key" in running_payload
+            running_payload.update({"paper_id": int(paper_id)})
+            running_payload.pop("dedupe_key", None)
+            running_payload.pop("concurrency_key", None)
+            if str(running["concurrency_key"] or "") != key or had_legacy_policy_keys:
+                rebind_worker_job_policy(
+                    conn, int(running["id"]), "paper-report", running_payload,
+                    now=utc_now(), status_scope="active",
                 )
             if commit:
                 conn.commit()
@@ -599,21 +608,16 @@ def ensure_paper_report_worker_job(
             "args": [str(int(paper_id))],
             "paper_id": int(paper_id),
             "generation_id": generation_id,
-            "concurrency_key": key,
-            "dedupe_key": key,
             "force": bool(force),
             "body": {**(body or {}), "prompt": prompt_text, "force": bool(force)},
         }
         created = False
         if queued:
+            now = utc_now()
+            rebind_worker_job_policy(conn, int(queued["id"]), "paper-report", payload, now=now)
             conn.execute(
-                """
-                UPDATE worker_jobs
-                SET payload_json = ?, priority = GREATEST(priority, 10), updated_at = ?,
-                    cancel_requested_at = NULL, cancel_reason = ''
-                WHERE id = ?
-                """,
-                (to_json(payload), utc_now(), int(queued["id"])),
+                "UPDATE worker_jobs SET cancel_requested_at = NULL, cancel_reason = '' WHERE id = ?",
+                (int(queued["id"]),),
             )
             worker_job_id = int(queued["id"])
         else:
@@ -621,8 +625,6 @@ def ensure_paper_report_worker_job(
                 conn,
                 "paper-report",
                 payload,
-                priority=10,
-                max_attempts=2,
                 message=f"paper-report queued for paper {int(paper_id)}",
                 commit=False,
             )
@@ -885,8 +887,9 @@ def _call_chat_text(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=180) as response:
-            body = json.loads(response.read().decode("utf-8"))
+        with outbound_request_slot("llm", getattr(settings, "global_llm_request_concurrency", 4)):
+            with urllib.request.urlopen(request, timeout=180) as response:
+                body = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"Full paper report LLM request failed: {exc}") from exc
     content = (
@@ -935,7 +938,7 @@ def _iter_chat_text_chunks(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=180) as response:
+        with outbound_request_slot("llm", getattr(settings, "global_llm_request_concurrency", 4)), urllib.request.urlopen(request, timeout=180) as response:
             saw_stream_chunk = False
             body_parts: list[bytes] = []
             for raw_line in response:
@@ -1229,7 +1232,6 @@ def _materialize_legacy_paper_report_worker_job(
         }
     )
     _save_paper_report_state(conn, state, commit=False)
-    key = paper_report_concurrency_key(paper_id)
     normalized_payload = {
         "command": "paper-report",
         "source": payload.get("source") or "paper-report-legacy-worker",
@@ -1237,13 +1239,13 @@ def _materialize_legacy_paper_report_worker_job(
         **payload,
         "paper_id": paper_id,
         "generation_id": generation_id,
-        "concurrency_key": key,
-        "dedupe_key": key,
     }
+    normalized_payload.pop("concurrency_key", None)
+    normalized_payload.pop("dedupe_key", None)
     now = utc_now()
-    conn.execute(
-        "UPDATE worker_jobs SET payload_json = ?, updated_at = ? WHERE id = ? AND status = 'running'",
-        (to_json(normalized_payload), now, int(worker_job["id"])),
+    rebind_worker_job_policy(
+        conn, int(worker_job["id"]), "paper-report", normalized_payload,
+        now=now, status_scope="active",
     )
     event = _paper_report_event(state, "queued")
     event["payload"].update(

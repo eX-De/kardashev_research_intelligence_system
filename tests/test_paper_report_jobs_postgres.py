@@ -185,13 +185,15 @@ class PaperReportJobPostgresTests(unittest.TestCase):
             "SELECT status, content_markdown, content_json FROM artifacts WHERE scope_id = ? AND artifact_type = 'paper_report'",
             (paper_id,),
         ).fetchone()
-        normalized = self.conn.execute("SELECT status, payload_json FROM worker_jobs WHERE id = ?", (job["id"],)).fetchone()
+        normalized = self.conn.execute("SELECT status, payload_json, concurrency_key FROM worker_jobs WHERE id = ?", (job["id"],)).fetchone()
         payload = json.loads(normalized["payload_json"])
         content = json.loads(artifact["content_json"])
         self.assertEqual(normalized["status"], "completed")
         self.assertEqual(artifact["status"], "done")
         self.assertEqual(artifact["content_markdown"], "# Migrated")
-        self.assertEqual(payload["dedupe_key"], f"paper:{paper_id}:report")
+        self.assertNotIn("dedupe_key", payload)
+        self.assertNotIn("concurrency_key", payload)
+        self.assertEqual(normalized["concurrency_key"], f"paper:{paper_id}:report")
         self.assertEqual(payload["generation_id"], content["generation_id"])
 
         duplicate_now = utc_now()

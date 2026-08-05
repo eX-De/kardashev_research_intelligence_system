@@ -3275,7 +3275,8 @@ class WorkerTests(unittest.TestCase):
         save_app_settings(
             conn,
             {
-                "paper_report_queue_concurrency": 3,
+                "global_embedding_request_concurrency": 12,
+                "global_llm_request_concurrency": 4,
                 "embedding_concurrency": 12,
                 "project_judgment_concurrency": 4,
             },
@@ -3283,12 +3284,16 @@ class WorkerTests(unittest.TestCase):
         payload = get_app_settings(conn, test_settings())["settings"]
         applied = apply_stored_settings(conn, test_settings())
 
-        self.assertEqual(payload["paper_report_queue_concurrency"], 3)
         self.assertEqual(payload["embedding_concurrency"], 12)
         self.assertEqual(payload["project_judgment_concurrency"], 4)
         self.assertEqual(applied.embedding_concurrency, 12)
         self.assertEqual(applied.project_judgment_concurrency, 4)
         self.assertEqual(_embedding_concurrency(applied), 12)
+
+        save_app_settings(conn, {"global_embedding_request_concurrency": 3})
+        lowered = apply_stored_settings(conn, test_settings())
+        self.assertEqual(lowered.global_embedding_request_concurrency, 3)
+        self.assertEqual(lowered.embedding_concurrency, 3)
 
     def test_stored_path_settings_remain_paths(self) -> None:
         conn = connect_test_db()

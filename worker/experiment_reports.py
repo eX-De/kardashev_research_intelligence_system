@@ -127,8 +127,6 @@ def enqueue_experiment_report_index(
             "content_hash": digest,
             "model": model,
         },
-        priority=15,
-        max_attempts=3,
         commit=True,
     )
     return {"queued": True, "worker_job_id": int(worker_job["id"])}

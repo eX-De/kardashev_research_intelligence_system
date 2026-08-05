@@ -1,5 +1,4 @@
 import { query } from "./db.js";
-import { workerJobConcurrencyGroup } from "./workerJobInventory.js";
 
 const DEFAULT_HEARTBEAT_TTL_SECONDS = 15;
 
@@ -27,13 +26,15 @@ export async function getWorkerStatus(options = {}, db = { query }) {
   const [instancesResult, queueResult, queueBreakdownResult] = await Promise.all([
     db.query(
       `
-        SELECT worker_id, status, started_at, heartbeat_at, current_job_id, pid,
+        SELECT wi.worker_id, wi.status, wi.started_at, wi.heartbeat_at, wi.current_job_id, wi.pid,
+               wj.job_type AS current_job_type, wj.concurrency_group AS current_job_group,
                (
-                 status <> 'stopped'
-                 AND NULLIF(heartbeat_at, '')::timestamptz >= NOW() - $1::interval
+                 wi.status <> 'stopped'
+                 AND NULLIF(wi.heartbeat_at, '')::timestamptz >= NOW() - $1::interval
                ) AS is_live
-        FROM worker_instances
-        ORDER BY NULLIF(heartbeat_at, '')::timestamptz DESC NULLS LAST, worker_id
+        FROM worker_instances wi
+        LEFT JOIN worker_jobs wj ON wj.id = wi.current_job_id
+        ORDER BY NULLIF(wi.heartbeat_at, '')::timestamptz DESC NULLS LAST, wi.worker_id
       `,
       [`${ttlSeconds} seconds`]
     ),
@@ -52,7 +53,7 @@ export async function getWorkerStatus(options = {}, db = { query }) {
     db.query(
       `
         SELECT
-          job_type,
+          job_type, concurrency_group,
           status,
           COUNT(*) AS count,
           MIN(NULLIF(created_at, '')::timestamptz) FILTER (WHERE status = 'queued') AS oldest_queued_at,
@@ -61,8 +62,8 @@ export async function getWorkerStatus(options = {}, db = { query }) {
           )) AS oldest_queued_seconds
         FROM worker_jobs
         WHERE status IN ('queued', 'running')
-        GROUP BY job_type, status
-        ORDER BY job_type, status
+        GROUP BY job_type, concurrency_group, status
+        ORDER BY job_type, concurrency_group, status
       `
     )
   ]);
@@ -73,7 +74,12 @@ export async function getWorkerStatus(options = {}, db = { query }) {
     heartbeat_at: row.heartbeat_at || null,
     current_job_id: row.current_job_id === null || row.current_job_id === undefined ? null : Number(row.current_job_id),
     pid: row.pid === null || row.pid === undefined ? null : Number(row.pid),
-    live: row.is_live === true || row.is_live === "t" || row.is_live === 1
+    live: row.is_live === true || row.is_live === "t" || row.is_live === 1,
+    current_job: row.current_job_id === null || row.current_job_id === undefined ? null : {
+      id: Number(row.current_job_id),
+      job_type: String(row.current_job_type || ""),
+      concurrency_group: String(row.current_job_group || "")
+    }
   }));
   const liveInstances = instances.filter((item) => item.live);
   const queueRow = queueResult.rows?.[0] || {};
@@ -85,7 +91,7 @@ export async function getWorkerStatus(options = {}, db = { query }) {
     const jobType = String(row.job_type || "unknown");
     const status = String(row.status || "");
     const count = numberValue(row.count);
-    const group = workerJobConcurrencyGroup(jobType);
+    const group = String(row.concurrency_group || "unclassified");
     const typeStats = byType[jobType] || {
       queued: 0,
       running: 0,
@@ -118,11 +124,12 @@ export async function getWorkerStatus(options = {}, db = { query }) {
     }
     byGroup[group] = groupStats;
   }
-  const available = !required || liveInstances.length > 0;
+  const effectivelyRequired = required || queued + running > 0;
+  const available = !effectivelyRequired || liveInstances.length > 0;
   return {
-    required,
+    required: effectivelyRequired,
     available,
-    state: required ? (available ? "online" : "offline") : "not_required",
+    state: effectivelyRequired ? (available ? "online" : "offline") : "not_required",
     heartbeat_ttl_seconds: ttlSeconds,
     online_workers: liveInstances.length,
     registered_workers: instances.length,
@@ -136,13 +143,15 @@ export async function getWorkerStatus(options = {}, db = { query }) {
       by_type: byType,
       by_group: byGroup
     },
-    stalled: required && !available && queued + running > 0
+    instances,
+    group_occupancy: byGroup,
+    stalled: effectivelyRequired && !available && queued + running > 0
   };
 }
 
 export async function requireAvailableWorker(options = {}, db = { query }) {
   const status = await getWorkerStatus(options, db);
-  if (status.available) return status;
+  if (status.online_workers > 0) return status;
   const error = new Error("Background worker service is unavailable");
   error.statusCode = 503;
   error.structuredCode = "worker_unavailable";

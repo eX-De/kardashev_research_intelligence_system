@@ -24,6 +24,7 @@ from .queue import (
     task_event_payload,
 )
 from .settings_store import apply_stored_settings
+from .job_policy import resolve_worker_job_policy
 from .api import export_artifact, project_detail
 from .cli import (
     run_cache_arxiv_text_job,
@@ -39,7 +40,6 @@ from .artifact_index import index_artifact, remove_artifact_index
 from .search_backfill import backfill_search_indexes
 from .experiment_reports import index_experiment_report
 from .library_search_index import index_library_paper
-from .job_inventory import worker_job_concurrency_group
 from .paper_reports import (
     run_paper_report_worker_job,
     stage_paper_report_terminal_failure,
@@ -158,7 +158,11 @@ def _log_job_observation(
         "job_type": str(worker_job.get("job_type") or ""),
         "worker_id": worker_id,
         "attempt": int(worker_job.get("attempts") or 0),
-        "concurrency_group": worker_job_concurrency_group(str(worker_job.get("job_type") or "")),
+        "concurrency_group": str(
+            worker_job.get("concurrency_group")
+            or resolve_worker_job_policy(str(worker_job.get("job_type") or ""), worker_job.get("payload") or {}).get("concurrency_group")
+            or "unclassified"
+        ),
         "queue_wait_seconds": _queue_wait_seconds(worker_job),
         "handler_duration_seconds": (
             round(max(0.0, handler_duration_seconds), 3)

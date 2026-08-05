@@ -64,9 +64,12 @@ function createWorkerQueuePool() {
         priority: String(params[2]),
         payload_json: params[3],
         max_attempts: String(params[4]),
-        run_after: params[5],
-        created_at: params[6],
-        updated_at: params[6]
+        concurrency_group: params[5],
+        concurrency_key: params[6],
+        policy_version: String(params[7]),
+        run_after: params[8],
+        created_at: params[9],
+        updated_at: params[9]
       });
       workerJobs.push(row);
       return { rows: [row] };
@@ -188,17 +191,17 @@ test("ordinary enqueue creates only worker task state and queued outbox event tr
     const result = await enqueueWorkerJob({
       jobType: "generate-reports",
       payload: { scope: "daily" },
-      priority: 3,
-      maxAttempts: 2,
       now: "2026-07-06T10:00:00.000Z"
     });
     assert.deepEqual(fake.txCalls, ["BEGIN", "COMMIT", "RELEASE"]);
     assert.equal(result.job_run, null);
     assert.equal(result.worker_job.job_run_id, null);
     assert.equal(fake.jobRuns.length, 0);
-    assert.equal(result.worker_job.priority, 3);
+    assert.equal(result.worker_job.priority, 5);
     assert.deepEqual(result.worker_job.payload, { scope: "daily" });
-    assert.equal(result.worker_job.max_attempts, 2);
+    assert.equal(result.worker_job.max_attempts, 1);
+    assert.equal(result.worker_job.concurrency_group, "llm");
+    assert.equal(result.worker_job.policy_version, 1);
     assert.equal(fake.appEvents.length, 1);
     assert.equal(fake.appEvents[0].event_type, "task.started");
     const payload = JSON.parse(fake.appEvents[0].payload_json);

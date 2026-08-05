@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from worker import service
-from worker.job_inventory import worker_job_inventory
+from worker.job_inventory import worker_job_concurrency_group, worker_job_inventory
 from worker.paper_reports import _paper_report_result
 from worker.queue import task_event_payload
 
@@ -28,7 +28,7 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         self.assertEqual(len(entries), 20)
         for entry in entries:
             self.assertTrue(str(entry.get("label") or "").strip(), entry["type"])
-            self.assertTrue(str(entry.get("concurrency_group") or "").strip(), entry["type"])
+            self.assertTrue(worker_job_concurrency_group(str(entry["type"])).strip(), entry["type"])
 
     def test_python_task_event_payloads_match_shared_cross_language_contract(self) -> None:
         fixture_path = Path(__file__).parent / "fixtures" / "task-event-contract.json"

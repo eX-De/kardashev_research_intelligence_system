@@ -63,8 +63,6 @@ def enqueue_library_paper_index(
             "paper_id": int(paper_id),
             "model": model,
         },
-        priority=14,
-        max_attempts=3,
         commit=commit,
     )
     return {"queued": True, "worker_job_id": int(worker_job["id"]), "paper_id": int(paper_id)}

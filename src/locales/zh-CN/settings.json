@@ -118,9 +118,10 @@
       "cacheFullText": "缓存 PDF 并提取 TXT",
       "pdfDirectory": "PDF 缓存目录",
       "txtDirectory": "TXT 输出目录",
+      "globalLlmConcurrency": "全局 LLM 请求并发上限",
+      "globalEmbeddingConcurrency": "全局 Embedding 请求并发上限",
       "embeddingConcurrency": "Embedding 请求并发数",
       "judgmentConcurrency": "项目级判定并发数",
-      "reportConcurrency": "报告队列并发数",
       "retryLimit": "历史补洞上限"
     }
   },

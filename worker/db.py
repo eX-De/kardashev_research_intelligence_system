@@ -266,6 +266,9 @@ CREATE TABLE IF NOT EXISTS worker_jobs (
   error_message TEXT NOT NULL DEFAULT '',
   attempts INTEGER NOT NULL DEFAULT 0,
   max_attempts INTEGER NOT NULL DEFAULT 1,
+  concurrency_group TEXT NOT NULL DEFAULT '',
+  concurrency_key TEXT NOT NULL DEFAULT '',
+  policy_version INTEGER NOT NULL DEFAULT 0,
   run_after TEXT,
   locked_by TEXT NOT NULL DEFAULT '',
   locked_at TEXT,
@@ -522,6 +525,8 @@ CREATE INDEX IF NOT EXISTS idx_paper_prefilter_runs_paper ON paper_prefilter_run
 CREATE INDEX IF NOT EXISTS idx_matches_paper_score ON matches(paper_id, score DESC);
 CREATE INDEX IF NOT EXISTS idx_worker_jobs_claim ON worker_jobs(status, priority DESC, run_after, id);
 CREATE INDEX IF NOT EXISTS idx_worker_jobs_job_run ON worker_jobs(job_run_id);
+CREATE INDEX IF NOT EXISTS idx_worker_jobs_group_running ON worker_jobs(concurrency_group, status);
+CREATE INDEX IF NOT EXISTS idx_worker_jobs_key_running ON worker_jobs(concurrency_key, status) WHERE concurrency_key <> '';
 CREATE INDEX IF NOT EXISTS idx_worker_instances_heartbeat ON worker_instances(heartbeat_at DESC);
 CREATE INDEX IF NOT EXISTS idx_app_events_unpublished ON app_events(published_at, id);
 CREATE INDEX IF NOT EXISTS idx_daily_run_meta_mode ON daily_run_meta(mode, created_at DESC);
@@ -640,6 +645,8 @@ POSTGRES_REQUIRED_INDEXES = REQUIRED_INDEXES | {
     "idx_paper_sources_unique",
     "idx_paper_chunks_unique",
     "idx_artifact_chunks_unique",
+    "idx_worker_jobs_group_running",
+    "idx_worker_jobs_key_running",
 }
 
 REQUIRED_COLUMNS = {
@@ -691,6 +698,9 @@ REQUIRED_COLUMNS = {
         "error_message",
         "attempts",
         "max_attempts",
+        "concurrency_group",
+        "concurrency_key",
+        "policy_version",
         "run_after",
         "locked_by",
         "locked_at",
@@ -769,7 +779,7 @@ REQUIRED_FOREIGN_KEYS = {
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
 def clean_unicode(value: Any) -> Any:
@@ -883,11 +893,13 @@ def init_db(conn) -> None:
     if getattr(conn, "dialect", "") != "postgres":
         raise RuntimeError("PostgreSQL connection required")
     if _postgres_schema_current(conn):
+        _refresh_active_worker_job_policies(conn)
         conn.commit()
         return
     try:
         conn.execute("SELECT pg_advisory_xact_lock(?)", (POSTGRES_INIT_LOCK_KEY,))
         if _postgres_schema_current(conn):
+            _refresh_active_worker_job_policies(conn)
             conn.commit()
             return
         conn.executescript(postgres_schema_sql(include_indexes=False))
@@ -900,6 +912,42 @@ def init_db(conn) -> None:
         except Exception:
             pass
         raise
+
+
+def _refresh_active_worker_job_policies(conn: Any) -> None:
+    """Rebind queued jobs to the current policy; preserve already-running policy facts."""
+    from .job_policy import resolve_worker_job_policy
+
+    for row in conn.execute(
+        """SELECT id, job_run_id, job_type, status, payload_json FROM worker_jobs
+           WHERE status = 'queued'
+              OR (status = 'running' AND (policy_version = 0 OR concurrency_group = ''))"""
+    ).fetchall():
+        try:
+            resolved = resolve_worker_job_policy(str(row["job_type"]), from_json(row["payload_json"], {}))
+        except RuntimeError:
+            failed_at = utc_now()
+            message = f"Unknown legacy worker job type: {row['job_type']}"
+            conn.execute(
+                """UPDATE worker_jobs SET status = 'failed', error_message = ?, finished_at = COALESCE(finished_at, ?),
+                       updated_at = ?, locked_by = '', locked_at = NULL
+                   WHERE id = ? AND status IN ('queued', 'running')""",
+                (message, failed_at, failed_at, int(row["id"])),
+            )
+            if row["job_run_id"] is not None:
+                conn.execute(
+                    """UPDATE job_runs SET status = 'failed', finished_at = COALESCE(finished_at, ?),
+                           heartbeat_at = ?, message = ? WHERE id = ? AND status IN ('queued', 'running')""",
+                    (failed_at, failed_at, message, int(row["job_run_id"])),
+                )
+            continue
+        conn.execute(
+            """UPDATE worker_jobs SET priority = ?, max_attempts = ?, concurrency_group = ?,
+                   concurrency_key = ?, policy_version = ? WHERE id = ?""",
+            (int(resolved["priority"]), int(resolved["default_max_attempts"]),
+             str(resolved["concurrency_group"]), str(resolved["concurrency_key"]),
+             int(resolved["policy_version"]), int(row["id"])),
+        )
 
 
 def _postgres_columns(conn, table: str) -> dict[str, dict[str, Any]]:
@@ -1168,6 +1216,9 @@ def _migrate_postgres_db(conn) -> None:
             "payload_json": "payload_json TEXT NOT NULL DEFAULT '{}'",
             "result_json": "result_json TEXT NOT NULL DEFAULT '{}'",
             "error_message": "error_message TEXT NOT NULL DEFAULT ''",
+            "concurrency_group": "concurrency_group TEXT NOT NULL DEFAULT ''",
+            "concurrency_key": "concurrency_key TEXT NOT NULL DEFAULT ''",
+            "policy_version": "policy_version INTEGER NOT NULL DEFAULT 0",
             "attempts": "attempts INTEGER NOT NULL DEFAULT 0",
             "max_attempts": "max_attempts INTEGER NOT NULL DEFAULT 1",
             "run_after": "run_after TEXT",
@@ -1279,6 +1330,8 @@ def _migrate_postgres_db(conn) -> None:
         for column, definition in columns.items():
             if column not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
+
+    _refresh_active_worker_job_policies(conn)
 
     _migrate_user_paper_relations_to_canonical(conn)
 
@@ -1463,6 +1516,8 @@ def _migrate_postgres_db(conn) -> None:
     for sql in (
         "CREATE INDEX IF NOT EXISTS idx_worker_jobs_claim ON worker_jobs(status, priority DESC, run_after, id)",
         "CREATE INDEX IF NOT EXISTS idx_worker_jobs_job_run ON worker_jobs(job_run_id)",
+        "CREATE INDEX IF NOT EXISTS idx_worker_jobs_group_running ON worker_jobs(concurrency_group, status)",
+        "CREATE INDEX IF NOT EXISTS idx_worker_jobs_key_running ON worker_jobs(concurrency_key, status) WHERE concurrency_key <> ''",
         "CREATE INDEX IF NOT EXISTS idx_worker_instances_heartbeat ON worker_instances(heartbeat_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_app_events_unpublished ON app_events(published_at, id)",
     ):

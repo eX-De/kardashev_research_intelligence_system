@@ -8,7 +8,7 @@ function workerHealthDb({ instances = [], queued = "0", running = "0", breakdown
     async query(sql) {
       if (String(sql).includes("FROM worker_instances")) return { rows: instances };
       if (String(sql).includes("FROM worker_jobs")) {
-        if (String(sql).includes("GROUP BY job_type, status")) return { rows: breakdown };
+        if (String(sql).includes("GROUP BY job_type, concurrency_group, status")) return { rows: breakdown };
         return {
           rows: [{
             queued,
@@ -37,8 +37,8 @@ test("getWorkerStatus reports a live worker and queue capacity separately", asyn
     queued: "2",
     running: "1",
     breakdown: [
-      { job_type: "run-daily", status: "running", count: "1", oldest_queued_at: null, oldest_queued_seconds: null },
-      { job_type: "reader-import-url", status: "queued", count: "2", oldest_queued_at: "queued", oldest_queued_seconds: "20" }
+      { job_type: "run-daily", concurrency_group: "daily", status: "running", count: "1", oldest_queued_at: null, oldest_queued_seconds: null },
+      { job_type: "reader-import-url", concurrency_group: "reader-import", status: "queued", count: "2", oldest_queued_at: "queued", oldest_queued_seconds: "20" }
     ]
   }));
   assert.equal(status.available, true);
@@ -56,10 +56,10 @@ test("queue baseline distinguishes manual work waiting behind a running daily jo
     queued: "3",
     running: "1",
     breakdown: [
-      { job_type: "run-daily", status: "running", count: "1", oldest_queued_at: null, oldest_queued_seconds: null },
-      { job_type: "reader-import-url", status: "queued", count: "1", oldest_queued_at: "reader", oldest_queued_seconds: "31" },
-      { job_type: "paper-report", status: "queued", count: "1", oldest_queued_at: "report", oldest_queued_seconds: "22" },
-      { job_type: "artifact-index", status: "queued", count: "1", oldest_queued_at: "artifact", oldest_queued_seconds: "13" }
+      { job_type: "run-daily", concurrency_group: "daily", status: "running", count: "1", oldest_queued_at: null, oldest_queued_seconds: null },
+      { job_type: "reader-import-url", concurrency_group: "reader-import", status: "queued", count: "1", oldest_queued_at: "reader", oldest_queued_seconds: "31" },
+      { job_type: "paper-report", concurrency_group: "paper-report", status: "queued", count: "1", oldest_queued_at: "report", oldest_queued_seconds: "22" },
+      { job_type: "artifact-index", concurrency_group: "artifact-index", status: "queued", count: "1", oldest_queued_at: "artifact", oldest_queued_seconds: "13" }
     ]
   }));
 
@@ -67,7 +67,7 @@ test("queue baseline distinguishes manual work waiting behind a running daily jo
   assert.equal(status.queue.by_type["paper-report"].oldest_queued_seconds, 22);
   assert.equal(status.queue.by_type["artifact-index"].oldest_queued_seconds, 13);
   assert.equal(status.queue.by_group["paper-report"].queued, 1);
-  assert.equal(status.queue.by_group.embedding.queued, 1);
+  assert.equal(status.queue.by_group["artifact-index"].queued, 1);
 });
 
 test("getWorkerStatus identifies a stalled queue without a live worker", async () => {

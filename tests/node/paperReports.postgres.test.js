@@ -76,8 +76,9 @@ test("paper reports materialize, deduplicate, migrate, cancel, and roll back ato
     assert.equal(Number((await admin.query("SELECT COUNT(*) AS count FROM artifacts WHERE scope_id = $1 AND artifact_type = 'paper_report'", [paperId])).rows[0].count), 1);
     assert.equal(Number((await admin.query("SELECT COUNT(*) AS count FROM worker_jobs WHERE job_type = 'paper-report' AND status IN ('queued', 'running')", [])).rows[0].count), 1);
     assert.equal(Number((await admin.query("SELECT COUNT(*) AS count FROM job_runs")).rows[0].count), 0);
-    const firstJob = (await admin.query("SELECT payload_json FROM worker_jobs WHERE id = $1", [concurrent[0].worker_job_id])).rows[0];
-    assert.equal(JSON.parse(firstJob.payload_json).dedupe_key, paperReportConcurrencyKey(paperId));
+    const firstJob = (await admin.query("SELECT payload_json, concurrency_key FROM worker_jobs WHERE id = $1", [concurrent[0].worker_job_id])).rows[0];
+    assert.equal(firstJob.concurrency_key, paperReportConcurrencyKey(paperId));
+    assert.equal(Object.hasOwn(JSON.parse(firstJob.payload_json), "dedupe_key"), false);
 
     const beforeBulk = (await admin.query("SELECT updated_at, content_json FROM artifacts WHERE scope_id = $1 AND artifact_type = 'paper_report'", [paperId])).rows[0];
     const bulk = await materializeRecommendedPaperReports();
@@ -158,12 +159,13 @@ test("paper reports materialize, deduplicate, migrate, cancel, and roll back ato
     for (const id of [legacyArtifactPaper, legacyJobPaper]) {
       assert.equal(Number((await admin.query("SELECT COUNT(*) AS count FROM artifacts WHERE scope_id = $1 AND artifact_type = 'paper_report'", [id])).rows[0].count), 1);
       const rows = await admin.query(
-        `SELECT payload_json FROM worker_jobs WHERE job_type = 'paper-report' AND status IN ('queued', 'running')
+        `SELECT payload_json, concurrency_key FROM worker_jobs WHERE job_type = 'paper-report' AND status IN ('queued', 'running')
          AND (payload_json::jsonb ->> 'paper_id') = $1`,
         [String(id)]
       );
       assert.equal(rows.rows.length, 1);
-      assert.equal(JSON.parse(rows.rows[0].payload_json).dedupe_key, paperReportConcurrencyKey(id));
+      assert.equal(rows.rows[0].concurrency_key, paperReportConcurrencyKey(id));
+      assert.equal(Object.hasOwn(JSON.parse(rows.rows[0].payload_json), "dedupe_key"), false);
     }
     assert.equal(Number((await admin.query(
       `SELECT COUNT(*) AS count FROM worker_jobs WHERE job_type = 'paper-report' AND status = 'cancelled'

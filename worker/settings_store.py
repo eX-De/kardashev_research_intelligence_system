@@ -41,8 +41,9 @@ INT_FIELDS = {
     "rag_prefilter_min_keep",
     "rag_prefilter_max_keep",
     "scheduler_interval_hours",
-    "paper_report_queue_concurrency",
     "embedding_concurrency",
+    "global_llm_request_concurrency",
+    "global_embedding_request_concurrency",
     "project_chat_profile_concurrency",
     "project_judgment_concurrency",
 }
@@ -226,6 +227,16 @@ def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, An
         if paper_reader_prompt_mode == "default" and is_builtin_paper_reader_prompt(paper_reader_custom_prompt)
         else paper_reader_custom_prompt
     )
+    llm_global = _positive_int(
+        stored.get("global_llm_request_concurrency", env_value("GLOBAL_LLM_REQUEST_CONCURRENCY", "4")),
+        settings.global_llm_request_concurrency or 4,
+        "global_llm_request_concurrency",
+    )
+    embedding_global = _positive_int(
+        stored.get("global_embedding_request_concurrency", env_value("GLOBAL_EMBEDDING_REQUEST_CONCURRENCY", "4")),
+        settings.global_embedding_request_concurrency or 4,
+        "global_embedding_request_concurrency",
+    )
     return {
         "obsidian_vault_path": str(settings.obsidian_vault_path or ""),
         "obsidian_storage_backend": settings.obsidian_storage_backend,
@@ -284,7 +295,9 @@ def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, An
         "project_chat_profile_model": str(
             stored.get("project_chat_profile_model", settings.project_chat_profile_model or "")
         ),
-        "project_chat_profile_concurrency": _positive_int(
+        "global_llm_request_concurrency": llm_global,
+        "global_embedding_request_concurrency": embedding_global,
+        "project_chat_profile_concurrency": min(_positive_int(
             stored.get(
                 "project_chat_profile_concurrency",
                 env_value(
@@ -295,8 +308,8 @@ def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, An
             settings.project_chat_profile_concurrency or 2,
             "project_chat_profile_concurrency",
             maximum=8,
-        ),
-        "project_judgment_concurrency": _positive_int(
+        ), llm_global),
+        "project_judgment_concurrency": min(_positive_int(
             stored.get(
                 "project_judgment_concurrency",
                 env_value(
@@ -307,7 +320,7 @@ def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, An
             settings.project_judgment_concurrency or 3,
             "project_judgment_concurrency",
             maximum=8,
-        ),
+        ), llm_global),
         "reader_chat_provider_id": str(
             stored.get("reader_chat_provider_id", settings.reader_chat_provider_id or "")
         ),
@@ -322,14 +335,14 @@ def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, An
             stored.get("reader_question_provider_id", settings.reader_question_provider_id or "")
         ),
         "reader_question_model": str(stored.get("reader_question_model", settings.reader_question_model or "")),
-        "embedding_concurrency": _positive_int(
+        "embedding_concurrency": min(_positive_int(
             stored.get(
                 "embedding_concurrency",
                 env_value("EMBEDDING_CONCURRENCY", str(settings.embedding_concurrency or 2)),
             ),
             settings.embedding_concurrency or 2,
             "embedding_concurrency",
-        ),
+        ), embedding_global),
         "scheduler_enabled": _bool(stored.get("scheduler_enabled", env_value("SCHEDULER_ENABLED", False))),
         "run_daily_on_startup_enabled": _bool(
             stored.get(
@@ -340,19 +353,6 @@ def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, An
         "scheduler_run_time": str(stored.get("scheduler_run_time", env_value("SCHEDULER_RUN_TIME", "09:00"))),
         "scheduler_interval_hours": int(
             stored.get("scheduler_interval_hours", env_value("SCHEDULER_INTERVAL_HOURS", 24)) or 24
-        ),
-        "paper_report_queue_concurrency": max(
-            1,
-            int(
-                stored.get(
-                    "paper_report_queue_concurrency",
-                    env_value(
-                        "PAPER_REPORT_QUEUE_CONCURRENCY",
-                        env_value("PAPER_REPORT_QUEUE_LIMIT", 1),
-                    ),
-                )
-                or 1
-            ),
         ),
         "onboarding_completed": _bool(stored.get("onboarding_completed", False)),
         "onboarding_project_source": str(stored.get("onboarding_project_source", "")),
@@ -399,6 +399,17 @@ def apply_stored_settings(conn: Any, settings: Settings) -> Settings:
     for field in FLOAT_FIELDS:
         if field in stored:
             updates[field] = float(stored[field])
+    llm_global = int(updates.get("global_llm_request_concurrency", settings.global_llm_request_concurrency))
+    embedding_global = int(updates.get("global_embedding_request_concurrency", settings.global_embedding_request_concurrency))
+    updates["project_chat_profile_concurrency"] = min(
+        int(updates.get("project_chat_profile_concurrency", settings.project_chat_profile_concurrency)), llm_global
+    )
+    updates["project_judgment_concurrency"] = min(
+        int(updates.get("project_judgment_concurrency", settings.project_judgment_concurrency)), llm_global
+    )
+    updates["embedding_concurrency"] = min(
+        int(updates.get("embedding_concurrency", settings.embedding_concurrency)), embedding_global
+    )
     for field in BOOL_FIELDS:
         if field in stored and hasattr(settings, field):
             updates[field] = _bool(stored[field])
@@ -463,6 +474,8 @@ def save_app_settings(conn: Any, payload: dict[str, Any]) -> dict[str, Any]:
             value = [_provider_to_store(provider) for provider in _providers_from_value(raw_value, existing_providers)]
         elif key in INT_FIELDS:
             value = int(raw_value or 0)
+            if key in {"global_llm_request_concurrency", "global_embedding_request_concurrency"} and value < 1:
+                raise RuntimeError(f"{key} must be at least 1")
             if key == "embedding_concurrency" and value < 1:
                 raise RuntimeError("embedding_concurrency must be at least 1")
             if key == "project_chat_profile_concurrency" and not 1 <= value <= 8:
@@ -490,6 +503,23 @@ def save_app_settings(conn: Any, payload: dict[str, Any]) -> dict[str, Any]:
 
         normalized[key] = value
         store_setting(key, value)
+
+    llm_global = int(normalized.get(
+        "global_llm_request_concurrency", current_settings.get("global_llm_request_concurrency", 4)
+    ))
+    embedding_global = int(normalized.get(
+        "global_embedding_request_concurrency", current_settings.get("global_embedding_request_concurrency", 4)
+    ))
+    for field in ("project_chat_profile_concurrency", "project_judgment_concurrency"):
+        if field in normalized or "global_llm_request_concurrency" in normalized:
+            normalized[field] = min(int(normalized.get(field, current_settings.get(field, 1))), llm_global)
+            store_setting(field, normalized[field])
+    if "embedding_concurrency" in normalized or "global_embedding_request_concurrency" in normalized:
+        normalized["embedding_concurrency"] = min(
+            int(normalized.get("embedding_concurrency", current_settings.get("embedding_concurrency", 1))),
+            embedding_global,
+        )
+        store_setting("embedding_concurrency", normalized["embedding_concurrency"])
 
     if normalized.get("scheduler_enabled") and normalized.get("run_daily_on_startup_enabled"):
         raise RuntimeError("scheduler_enabled and run_daily_on_startup_enabled are mutually exclusive")

@@ -1,7 +1,7 @@
 import { parseJson, query, toJson, ValidationError, withTransaction } from "./db.js";
 import { SERVER_EVENTS, compactTaskEventPayload } from "./events.js";
 import { insertAppEvent } from "./outbox.js";
-import { workerJobConcurrencyGroup } from "./workerJobInventory.js";
+import { resolveWorkerJobPolicy } from "./workerJobPolicy.js";
 
 const WORKER_JOB_STATUSES = new Set(["queued", "running", "completed", "failed", "cancelled"]);
 const DAILY_JOB_TYPES = new Set(["run-daily", "resume-daily", "retry-daily"]);
@@ -20,20 +20,6 @@ function cleanStatus(value) {
   const status = String(value || "").trim();
   if (!WORKER_JOB_STATUSES.has(status)) throw new ValidationError("invalid worker job status");
   return status;
-}
-
-function cleanPriority(value) {
-  const priority = Number.parseInt(String(value ?? 0), 10);
-  if (!Number.isInteger(priority)) throw new ValidationError("priority must be an integer");
-  return priority;
-}
-
-function cleanMaxAttempts(value) {
-  const maxAttempts = Number.parseInt(String(value ?? 1), 10);
-  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
-    throw new ValidationError("max_attempts must be a positive integer");
-  }
-  return maxAttempts;
 }
 
 function cleanWorkerJobId(value) {
@@ -57,6 +43,9 @@ function workerJobRow(row) {
     error_message: row.error_message || "",
     attempts: Number(row.attempts || 0),
     max_attempts: Number(row.max_attempts || 1),
+    concurrency_group: row.concurrency_group || "",
+    concurrency_key: row.concurrency_key || "",
+    policy_version: Number(row.policy_version || 0),
     run_after: row.run_after ?? null,
     locked_by: row.locked_by || "",
     locked_at: row.locked_at ?? null,
@@ -104,15 +93,28 @@ async function updateJobRunForWorkerJob(client, workerJob, status, { now, messag
 export async function enqueueWorkerJobInTransaction(client, {
   jobType,
   payload = {},
-  priority = 0,
   runAfter = null,
-  maxAttempts = 1,
   message = "Queued",
   now = isoNow()
 } = {}) {
   const normalizedJobType = cleanJobType(jobType);
-  const normalizedPriority = cleanPriority(priority);
-  const normalizedMaxAttempts = cleanMaxAttempts(maxAttempts);
+  const policy = resolveWorkerJobPolicy(normalizedJobType, payload);
+  if (policy.deduplicate_active && policy.concurrency_key) {
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`worker-enqueue:${policy.concurrency_key}`]);
+    const existingResult = await client.query(
+      `SELECT id, job_run_id, job_type, status, priority, payload_json, result_json,
+              error_message, attempts, max_attempts, concurrency_group, concurrency_key, policy_version,
+              run_after, locked_by, locked_at, cancel_requested_at, cancel_reason,
+              created_at, updated_at, started_at, finished_at
+       FROM worker_jobs
+       WHERE job_type = $1 AND concurrency_key = $2 AND status IN ('queued', 'running')
+       ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, id
+       LIMIT 1`,
+      [normalizedJobType, policy.concurrency_key]
+    );
+    const existing = workerJobRow(existingResult.rows?.[0]);
+    if (existing) return { job_run: null, worker_job: existing, deduplicated: true };
+  }
   let jobRun = null;
   if (DAILY_JOB_TYPES.has(normalizedJobType)) {
       const jobRunResult = await client.query(
@@ -134,19 +136,23 @@ export async function enqueueWorkerJobInTransaction(client, {
       `
         INSERT INTO worker_jobs(
           job_run_id, job_type, status, priority, payload_json, max_attempts,
-          run_after, created_at, updated_at
+          concurrency_group, concurrency_key, policy_version, run_after, created_at, updated_at
         )
-        VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, $7)
+        VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, $8, $9, $10, $10)
         RETURNING id, job_run_id, job_type, status, priority, payload_json, result_json,
-                  error_message, attempts, max_attempts, run_after, locked_by, locked_at,
+                  error_message, attempts, max_attempts, concurrency_group, concurrency_key, policy_version,
+                  run_after, locked_by, locked_at,
                   cancel_requested_at, cancel_reason, created_at, updated_at, started_at, finished_at
       `,
       [
         jobRun?.id || null,
         normalizedJobType,
-        normalizedPriority,
+        policy.priority,
         toJson(payload || {}),
-        normalizedMaxAttempts,
+        policy.default_max_attempts,
+        policy.concurrency_group,
+        policy.concurrency_key,
+        policy.policy_version,
         runAfter,
         now
       ]
@@ -157,7 +163,28 @@ export async function enqueueWorkerJobInTransaction(client, {
     compactTaskEventPayload(workerJob, { status: "queued", message }),
     { createdAt: now, client }
   );
-  return { job_run: jobRun, worker_job: workerJob };
+  return { job_run: jobRun, worker_job: workerJob, deduplicated: false };
+}
+
+export async function rebindWorkerJobPolicyInTransaction(
+  client, workerJobId, jobType, payload, now = isoNow(), { statusScope = "queued" } = {}
+) {
+  if (!new Set(["queued", "active"]).has(statusScope)) {
+    throw new Error(`Unsupported worker job policy rebind scope: ${statusScope}`);
+  }
+  const normalizedJobType = cleanJobType(jobType);
+  const policy = resolveWorkerJobPolicy(normalizedJobType, payload);
+  const result = await client.query(
+    `UPDATE worker_jobs
+     SET payload_json = $1, priority = $2, max_attempts = $3,
+         concurrency_group = $4, concurrency_key = $5, policy_version = $6,
+         updated_at = $7
+     WHERE id = $8 ${statusScope === "queued" ? "AND status = 'queued'" : "AND status IN ('queued', 'running')"}
+     RETURNING id`,
+    [toJson(payload || {}), policy.priority, policy.default_max_attempts, policy.concurrency_group,
+      policy.concurrency_key, policy.policy_version, now, workerJobId]
+  );
+  return Boolean(result.rows?.[0]);
 }
 
 async function cancelPaperReportDomainInTransaction(client, workerJob, now, message) {
@@ -194,16 +221,14 @@ async function cancelPaperReportDomainInTransaction(client, workerJob, now, mess
 
 export async function enqueueWorkerJob(options = {}) {
   cleanJobType(options.jobType);
-  cleanPriority(options.priority ?? 0);
-  cleanMaxAttempts(options.maxAttempts ?? 1);
   const queued = await withTransaction((client) => enqueueWorkerJobInTransaction(client, options));
   console.info(JSON.stringify({
-    event: "worker_job.queued",
+    event: queued.deduplicated ? "worker_job.deduplicated" : "worker_job.queued",
     worker_job_id: queued.worker_job?.id || null,
     job_type: queued.worker_job?.job_type || "",
     worker_id: null,
     attempt: 0,
-    concurrency_group: workerJobConcurrencyGroup(queued.worker_job?.job_type),
+    concurrency_group: queued.worker_job?.concurrency_group || "",
     queue_wait_seconds: 0,
     handler_duration_seconds: null
   }));
@@ -234,7 +259,8 @@ export async function getWorkerJob(workerJobId) {
   const result = await query(
     `
       SELECT id, job_run_id, job_type, status, priority, payload_json, result_json,
-             error_message, attempts, max_attempts, run_after, locked_by, locked_at,
+             error_message, attempts, max_attempts, concurrency_group, concurrency_key, policy_version,
+             run_after, locked_by, locked_at,
              cancel_requested_at, cancel_reason, created_at, updated_at, started_at, finished_at
       FROM worker_jobs
       WHERE id = $1
@@ -263,7 +289,8 @@ export async function listWorkerJobs({ status = "", jobType = "", limit = 100 } 
   const result = await query(
     `
       SELECT id, job_run_id, job_type, status, priority, payload_json, result_json,
-             error_message, attempts, max_attempts, run_after, locked_by, locked_at,
+             error_message, attempts, max_attempts, concurrency_group, concurrency_key, policy_version,
+             run_after, locked_by, locked_at,
              cancel_requested_at, cancel_reason, created_at, updated_at, started_at, finished_at
       FROM worker_jobs
       ${filters.length ? `WHERE ${filters.join(" AND ")}` : ""}
@@ -297,7 +324,8 @@ export async function requestWorkerJobCancellation(
     const selected = await client.query(
       `
         SELECT id, job_run_id, job_type, status, priority, payload_json, result_json,
-               error_message, attempts, max_attempts, run_after, locked_by, locked_at,
+               error_message, attempts, max_attempts, concurrency_group, concurrency_key, policy_version,
+               run_after, locked_by, locked_at,
                cancel_requested_at, cancel_reason, created_at, updated_at, started_at, finished_at
         FROM worker_jobs
         WHERE id = $1
@@ -324,7 +352,8 @@ export async function requestWorkerJobCancellation(
               updated_at = $1
           WHERE id = $3 AND status = 'queued'
           RETURNING id, job_run_id, job_type, status, priority, payload_json, result_json,
-                    error_message, attempts, max_attempts, run_after, locked_by, locked_at,
+                    error_message, attempts, max_attempts, concurrency_group, concurrency_key, policy_version,
+                    run_after, locked_by, locked_at,
                     cancel_requested_at, cancel_reason, created_at, updated_at, started_at, finished_at
         `,
         [now, message, id]
@@ -349,7 +378,8 @@ export async function requestWorkerJobCancellation(
             updated_at = $1
         WHERE id = $3 AND status = 'running'
         RETURNING id, job_run_id, job_type, status, priority, payload_json, result_json,
-                  error_message, attempts, max_attempts, run_after, locked_by, locked_at,
+                  error_message, attempts, max_attempts, concurrency_group, concurrency_key, policy_version,
+                  run_after, locked_by, locked_at,
                   cancel_requested_at, cancel_reason, created_at, updated_at, started_at, finished_at
       `,
       [now, message, id]

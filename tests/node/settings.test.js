@@ -459,7 +459,6 @@ test("legacy stored prompts infer default or custom mode without data loss", asy
 test("SETTING_SCHEMA describes secret and worker-visible fields centrally", () => {
   assert.equal(SETTING_SCHEMA.obsidian_remote_secret_access_key.secret, true);
   assert.equal(SETTING_SCHEMA.obsidian_remote_secret_access_key.type, "string");
-  assert.equal(SETTING_SCHEMA.paper_report_queue_concurrency.type, "int");
   assert.equal(SETTING_SCHEMA.paper_report_provider_id.worker_visible, true);
   assert.equal(SETTING_SCHEMA.paper_reader_prompt_mode.worker_visible, true);
   assert.equal(SETTING_SCHEMA.paper_reader_prompt_locale.worker_visible, true);
@@ -468,4 +467,26 @@ test("SETTING_SCHEMA describes secret and worker-visible fields centrally", () =
   assert.equal(SETTING_SCHEMA.project_chat_profile_concurrency.worker_visible, true);
   assert.equal(SETTING_SCHEMA.project_judgment_concurrency.type, "int");
   assert.equal(SETTING_SCHEMA.project_judgment_concurrency.worker_visible, true);
+  assert.equal(SETTING_SCHEMA.global_llm_request_concurrency.type, "int");
+  assert.equal(SETTING_SCHEMA.global_embedding_request_concurrency.worker_visible, true);
+});
+
+test("global request limits cap persisted local batch concurrency", () => {
+  const normalized = normalizeSettingsPayload({
+    global_llm_request_concurrency: 2,
+    global_embedding_request_concurrency: 3,
+    project_judgment_concurrency: 8,
+    project_chat_profile_concurrency: 7,
+    embedding_concurrency: 9
+  }, {});
+  assert.equal(normalized.project_judgment_concurrency, 2);
+  assert.equal(normalized.project_chat_profile_concurrency, 2);
+  assert.equal(normalized.embedding_concurrency, 3);
+  const lowered = normalizeSettingsPayload({ global_llm_request_concurrency: 1 }, {
+    global_llm_request_concurrency: 4,
+    project_judgment_concurrency: 3,
+    project_chat_profile_concurrency: 2
+  });
+  assert.equal(lowered.project_judgment_concurrency, 1);
+  assert.equal(lowered.project_chat_profile_concurrency, 1);
 });

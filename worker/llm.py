@@ -13,6 +13,7 @@ from .config import Settings
 from .db import clean_unicode, from_json, to_json, utc_now
 from .db_types import DbConnection, DbRow
 from .project_status import run_daily_project_status_sql
+from .resource_limiter import outbound_request_slot
 
 
 PROJECT_JUDGMENT_PROMPT_VERSION = "project_judgment_v1"
@@ -130,8 +131,9 @@ def call_chat_json(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-            raw_body = response.read().decode("utf-8", "replace")
+        with outbound_request_slot("llm", getattr(settings, "global_llm_request_concurrency", 4)):
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                raw_body = response.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         detail = clean_unicode(exc.read().decode("utf-8", "replace")).strip()
         suffix = f": {detail[:500]}" if detail else ""

@@ -245,6 +245,8 @@ Key startup settings:
 - `KRIS_WORKER_HEARTBEAT_INTERVAL_SECONDS` / `KRIS_WORKER_HEARTBEAT_TTL_SECONDS`: the Worker writes instance and current-task heartbeats every 5 seconds by default; Node considers it offline after 15 seconds without a heartbeat.
 - `KRIS_WORKER_MONITOR_INTERVAL_MS`: interval for Node to inspect Worker availability and stalled queues, default 5,000 ms.
 - `KRIS_WORKER_JOB_STALE_AFTER_SECONDS`: lease recovery threshold for `worker_jobs.running`, default 90 seconds. The Worker renews the lease while running; after a disconnect, a timed-out job is requeued while attempts remain, or failed and synchronized to `job_runs` after exhaustion.
+- `GLOBAL_LLM_REQUEST_CONCURRENCY`: aggregate outbound LLM request limit across all Worker/compute processes, default `4`.
+- `GLOBAL_EMBEDDING_REQUEST_CONCURRENCY`: aggregate outbound embedding request limit across all Worker/compute processes, default `4`. `embedding_concurrency`, project judgment, and Chat profile concurrency remain per-batch local limits and are capped by their global limit when saved.
 - `KRIS_JOB_BACKEND`: job execution backend, default `queue`. Node writes `worker_jobs` for `python -m worker.service`; set it to `cli` only for temporary legacy fallback.
 - `KRIS_COMPUTE_BACKEND`: interactive compute backend, default `service`. Deep search, Reader Chat, and follow-up suggestions call the persistent compute service directly and do not write `worker_jobs` / `job_runs`; use `legacy` only as a one-release rollback path to the old queue/CLI behavior.
 - `KRIS_PROJECT_CONTEXT_BACKEND`: project-context persistence backend, default `node`. Node persists raw context and enqueues `knowledge-document-index` in the project-save transaction; use `legacy` only for migration rollback, and the two paths never process the same save.
@@ -373,6 +375,8 @@ The default published image is `exde1968/kardashev-research-intelligence-system:
 - `db`: `pgvector/pgvector:pg17`, storing data in the named volume `pgdata17`.
 - `app`: Node 22 plus a Python virtual environment. It runs `python -m worker.cli init-db` before starting `node server.js`.
 - `worker`: the same image running `python -m worker.service`, consuming `worker_jobs` and writing the `app_events` outbox.
+- One Worker starts by default. Deployments that have adopted the concurrency policy can run two instances with `docker compose up -d --scale worker=2`. The Worker service has no fixed container name or host port. Size provider capacity from the global LLM/embedding limits, not “replicas × local batch concurrency”; for a provider allowance of `R` requests per second, start conservatively at no more than `R × average request duration in seconds`.
+- `paper_report_queue_concurrency` / `PAPER_REPORT_QUEUE_CONCURRENCY` is deprecated. Each paper is now a flat `paper-report` job controlled by the shared policy's `paper-report` group (currently limited to 2).
 - `./data:/data`: PDF/TXT caches, the remote Obsidian mirror, and other file data.
 - Secrets are mounted only through `_FILE` paths; non-secret configuration remains in environment variables.
 

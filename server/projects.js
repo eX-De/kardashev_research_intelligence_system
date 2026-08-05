@@ -720,7 +720,6 @@ async function saveManualProjectContext(client, projectId, projectName, rawConte
       queued = await enqueueWorkerJobInTransaction(client, {
         jobType: "knowledge-document-index",
         payload: { document_id: documentId, project_id: projectId, content_hash: digest },
-        priority: 10,
         message: "knowledge-document-index queued",
         now
       });

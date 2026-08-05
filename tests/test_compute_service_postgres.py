@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import os
+import http.client
+import json
 import threading
+import time
 import unittest
 import uuid
 from types import SimpleNamespace
@@ -11,6 +14,7 @@ from worker.db import init_db
 from worker.paper_reader import paper_reader_chat_stream
 from worker.pg import connect_postgres
 from worker.compute_contract import ComputeRequestCancelled
+from worker.compute_service import create_server
 from worker.unified_search import deep_search
 
 
@@ -163,6 +167,40 @@ class ComputeServicePostgresTests(unittest.TestCase):
         self.assertEqual(result["results"], [])
         self.assertEqual((int(before["worker_jobs"]), int(before["job_runs"])), (1, 1))
         self.assertEqual((int(after["worker_jobs"]), int(after["job_runs"])), (1, 1))
+
+        def request_connection():
+            conn = connect_postgres(self.database_url)
+            conn.execute(f'SET search_path TO "{self.schema}"')
+            conn.commit()
+            return conn
+
+        server = create_server("127.0.0.1", 0, "benchmark-secret")
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with (
+                patch("worker.compute_service.connect", side_effect=request_connection),
+                patch("worker.compute_service.load_settings", return_value=SimpleNamespace()),
+                patch("worker.compute_service.apply_stored_settings", return_value=SimpleNamespace(llm_embedding_model="test-embedding")),
+                patch("worker.unified_search.embed_text", return_value=[1.0, 0.0]),
+                patch("worker.unified_search._ensure_search_pgvector_indexes", return_value={}),
+                patch("worker.unified_search._library_paper_reader_message_lexical_results"),
+            ):
+                client = http.client.HTTPConnection("127.0.0.1", int(server.server_address[1]), timeout=5)
+                started = time.perf_counter()
+                client.request("POST", "/v1/search/deep", body=json.dumps({"query": "retrieval", "types": ["conversation"]}),
+                               headers={"authorization": "Bearer benchmark-secret", "content-type": "application/json"})
+                response = client.getresponse()
+                ttfb_ms = (time.perf_counter() - started) * 1000
+                payload = json.loads(response.read())
+                total_ms = (time.perf_counter() - started) * 1000
+                client.close()
+            print(f"STAGE6_DEEP_SEARCH_REAL ttfb_ms={ttfb_ms:.1f} total_ms={total_ms:.1f}")
+            self.assertEqual(response.status, 200)
+            self.assertEqual(payload["mode"], "deep")
+            self.assertLess(total_ms, 1000)
+        finally:
+            server.shutdown(); server.server_close(); thread.join(2)
 
 
 if __name__ == "__main__":

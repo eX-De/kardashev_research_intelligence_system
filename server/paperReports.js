@@ -4,7 +4,7 @@ import { ConflictError, NotFoundError, ValidationError, parseJson, toJson, withT
 import { SERVER_EVENTS, compactTaskEventPayload } from "./events.js";
 import { insertAppEvent } from "./outbox.js";
 import { getAppSettings, resolvePaperReaderPrompt } from "./settings.js";
-import { enqueueWorkerJobInTransaction } from "./workerQueue.js";
+import { enqueueWorkerJobInTransaction, rebindWorkerJobPolicyInTransaction } from "./workerQueue.js";
 
 const PAPER_REPORT_ARTIFACT_TYPE = "paper_report";
 const PAPER_READER_ANALYSIS_SYSTEM = "You are a research document reading assistant. Read the supplied cleaned document text and answer accurately from it.";
@@ -107,13 +107,14 @@ async function sourceProjectIds(client, paperId) {
 async function activeReportJobs(client, paperId) {
   const key = paperReportConcurrencyKey(paperId);
   const result = await client.query(
-    `SELECT id, job_run_id, job_type, status, payload_json, created_at, updated_at,
+    `SELECT id, job_run_id, job_type, status, payload_json, concurrency_key, created_at, updated_at,
             started_at, finished_at, error_message
      FROM worker_jobs
      WHERE job_type = 'paper-report' AND status = ANY($1::text[])
        AND (
-         (payload_json::jsonb ->> 'dedupe_key') = $2
-         OR (payload_json::jsonb ->> 'paper_id') = $3
+         concurrency_key = $2
+         OR (concurrency_key = '' AND ((payload_json::jsonb ->> 'dedupe_key') = $2
+           OR (payload_json::jsonb ->> 'paper_id') = $3))
        )
      ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, id DESC
      FOR UPDATE`,
@@ -259,17 +260,20 @@ async function materializeOneInTransaction(client, paperId, {
     if (!row) return null;
     const currentPayload = parseJson(row.payload_json, {});
     const key = paperReportConcurrencyKey(id);
-    if (currentPayload.dedupe_key === key && currentPayload.concurrency_key === key) return currentPayload;
     const normalized = {
       command: "paper-report",
       source: currentPayload.source || source,
       args: Array.isArray(currentPayload.args) ? currentPayload.args : [String(id)],
       ...currentPayload,
-      paper_id: id,
-      concurrency_key: key,
-      dedupe_key: key
+      paper_id: id
     };
-    await client.query("UPDATE worker_jobs SET payload_json = $1, updated_at = $2 WHERE id = $3", [toJson(normalized), now, row.id]);
+    delete normalized.concurrency_key;
+    delete normalized.dedupe_key;
+    if (row.concurrency_key !== key || currentPayload.concurrency_key || currentPayload.dedupe_key) {
+      await rebindWorkerJobPolicyInTransaction(
+        client, row.id, "paper-report", normalized, now, { statusScope: "active" }
+      );
+    }
     return normalized;
   }
 
@@ -340,35 +344,25 @@ async function materializeOneInTransaction(client, paperId, {
     generationId,
     now
   });
-  const key = paperReportConcurrencyKey(id);
   const payload = {
     command: "paper-report",
     source,
     args: [String(id)],
     paper_id: id,
     generation_id: generationId,
-    concurrency_key: key,
-    dedupe_key: key,
     force: Boolean(force),
     body: { ...body, prompt: text(prompt) || text(body.prompt), force: Boolean(force) }
   };
   let workerJobId;
   let created = false;
   if (queued) {
-    await client.query(
-      `UPDATE worker_jobs
-       SET payload_json = $1, priority = GREATEST(priority, 10), updated_at = $2,
-           cancel_requested_at = NULL, cancel_reason = ''
-       WHERE id = $3`,
-      [toJson(payload), now, queued.id]
-    );
+    await rebindWorkerJobPolicyInTransaction(client, queued.id, "paper-report", payload, now);
+    await client.query("UPDATE worker_jobs SET cancel_requested_at = NULL, cancel_reason = '' WHERE id = $1", [queued.id]);
     workerJobId = Number(queued.id);
   } else {
     const enqueued = await enqueueWorkerJobInTransaction(client, {
       jobType: "paper-report",
       payload,
-      priority: 10,
-      maxAttempts: 2,
       message: `paper-report queued for paper ${id}`,
       now
     });
