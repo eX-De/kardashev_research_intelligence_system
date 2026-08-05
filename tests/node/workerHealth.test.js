@@ -66,7 +66,7 @@ test("queue baseline distinguishes manual work waiting behind a running daily jo
   assert.equal(status.queue.by_type["reader-import-url"].oldest_queued_seconds, 31);
   assert.equal(status.queue.by_type["paper-report"].oldest_queued_seconds, 22);
   assert.equal(status.queue.by_type["artifact-index"].oldest_queued_seconds, 13);
-  assert.equal(status.queue.by_group.llm.queued, 1);
+  assert.equal(status.queue.by_group["paper-report"].queued, 1);
   assert.equal(status.queue.by_group.embedding.queued, 1);
 });
 

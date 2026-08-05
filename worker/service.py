@@ -24,12 +24,11 @@ from .queue import (
     task_event_payload,
 )
 from .settings_store import apply_stored_settings
-from .api import export_artifact, generate_paper_reading_report, project_detail
+from .api import export_artifact, project_detail
 from .cli import (
     run_cache_arxiv_text_job,
     run_daily_job,
     run_fetch_arxiv_job,
-    run_generate_paper_reports_job,
     run_generate_reports_job,
     run_rank_job,
     run_sync_obsidian_job,
@@ -41,6 +40,10 @@ from .search_backfill import backfill_search_indexes
 from .experiment_reports import index_experiment_report
 from .library_search_index import index_library_paper
 from .job_inventory import worker_job_concurrency_group
+from .paper_reports import (
+    run_paper_report_worker_job,
+    stage_paper_report_terminal_failure,
+)
 
 
 DISPATCHERS = {
@@ -74,17 +77,6 @@ PAPER_RESULT_CHANGE_KEYS = (
     "paper_recommendations_created",
     "paper_recommendations_refreshed",
 )
-PAPER_REPORT_RESULT_CHANGE_KEYS = (
-    "paper_reports_queued",
-    "paper_reports_requeued",
-    "paper_reports_refreshed",
-    "paper_reports_done",
-    "paper_reports_failed",
-    "paper_reports_deleted",
-    "paper_reports_removed",
-    "paper_reports_cancelled",
-)
-
 READER_IMPORT_NOTIFICATION_LABELS = {
     "reader-import-upload": "PDF 导入",
     "reader-import-url": "URL 导入",
@@ -96,7 +88,6 @@ EXPLICIT_WORKER_JOB_TYPES = {
     "artifact-index-backfill",
     "experiment-report-index",
     "library-paper-index",
-    "generate-paper-reports",
     "run-daily",
     "resume-daily",
     "retry-daily",
@@ -592,128 +583,6 @@ def _publish_reader_domain_events(conn: Any, worker_job: dict[str, Any], result:
         )
 
 
-def _publish_paper_report_domain_events(conn: Any, worker_job: dict[str, Any], result: dict[str, Any]) -> None:
-    if not isinstance(result, dict):
-        return
-    job_type = str(worker_job.get("job_type") or "")
-    if job_type == "paper-report":
-        payload = _payload(worker_job)
-        paper_id = _optional_int(payload.get("paper_id"))
-        report = result.get("paper_report") if isinstance(result.get("paper_report"), dict) else {}
-        insert_app_event(
-            conn,
-            "paper_report.updated",
-            {
-                "paper": {
-                    "paper_id": paper_id,
-                    "id": paper_id,
-                    "report_status": report.get("status") if isinstance(report, dict) else None,
-                    "updated_at": report.get("updated_at") if isinstance(report, dict) else None,
-                },
-                "paper_id": paper_id,
-                "artifact_id": report.get("artifact_id") or report.get("id") if isinstance(report, dict) else None,
-                "status": report.get("status") if isinstance(report, dict) else None,
-                "project_ids": [],
-                "force": bool(payload.get("force")),
-            },
-        )
-        return
-
-    completed_reports = result.get("paper_reports_completed")
-    failed_reports = result.get("paper_reports_failures")
-    detailed_reports = [
-        report
-        for reports in (completed_reports, failed_reports)
-        if isinstance(reports, list)
-        for report in reports
-        if isinstance(report, dict)
-    ]
-    for report in detailed_reports:
-        paper_id = _optional_int(report.get("paper_id"))
-        artifact_id = _optional_int(report.get("artifact_id"))
-        status = clean_unicode(str(report.get("status") or "updated")).strip() or "updated"
-        title = clean_unicode(str(report.get("title") or "")).strip()
-        updated_at = report.get("updated_at")
-        payload = {
-            "paper": {
-                "paper_id": paper_id,
-                "id": paper_id,
-                "title": title or None,
-                "report_status": status,
-                "updated_at": updated_at,
-            },
-            "paper_report": {
-                "artifact_id": artifact_id,
-                "paper_id": paper_id,
-                "status": status,
-                "updated_at": updated_at,
-            },
-            "paper_id": paper_id,
-            "artifact_id": artifact_id,
-            "status": status,
-            "source_type": report.get("source_type") or None,
-            "manual_import": bool(report.get("manual_import")),
-            "project_ids": [],
-            "job_type": job_type,
-        }
-        if status == "done" and payload["manual_import"]:
-            notification_key = artifact_id or paper_id or "unknown"
-            payload["notification"] = {
-                "id": f"manual-paper-report-completed-{notification_key}",
-                "type": "manual_paper_report_completed",
-                "severity": "ok",
-                "title": "论文报告生成完成",
-                "detail": title or (f"论文 {paper_id}" if paper_id else "手动导入论文"),
-                "created_at": updated_at,
-                "source": {
-                    "paper_id": paper_id,
-                    "artifact_id": artifact_id,
-                    "source_type": report.get("source_type") or None,
-                },
-                "channels": ["toast"],
-                "requires_action": False,
-            }
-        insert_app_event(conn, "paper_report.updated", payload)
-
-    report_keys = [key for key in result if str(key).startswith("paper_reports_")]
-    result_summary = _result_summary(result, PAPER_REPORT_RESULT_CHANGE_KEYS)
-    if not report_keys or not result_summary:
-        return
-    done = int(result.get("paper_reports_done") or 0)
-    failed = int(result.get("paper_reports_failed") or 0)
-    queued = int(result.get("paper_reports_queued") or 0) + int(result.get("paper_reports_requeued") or 0)
-    deleted = int(result.get("paper_reports_deleted") or 0) + int(result.get("paper_reports_removed") or 0)
-    cancelled = int(result.get("paper_reports_cancelled") or 0)
-    detailed_done = sum(1 for report in detailed_reports if report.get("status") == "done")
-    detailed_failed = sum(1 for report in detailed_reports if report.get("status") == "failed")
-    if (
-        detailed_reports
-        and detailed_done == done
-        and detailed_failed == failed
-        and not any((queued, deleted, cancelled, int(result.get("paper_reports_refreshed") or 0)))
-    ):
-        return
-    status = "done" if done else "failed" if failed else "queued" if queued else "removed" if deleted else "cancelled" if cancelled else "updated"
-    insert_app_event(
-        conn,
-        "paper_report.updated",
-        {
-            "paper": {
-                "paper_id": None,
-                "id": None,
-                "report_status": status,
-                "updated_at": None,
-            },
-            "paper_id": None,
-            "artifact_id": None,
-            "status": status,
-            "project_ids": [],
-            "job_type": job_type,
-            "result": {key: result.get(key) for key in sorted(report_keys)},
-        },
-    )
-
-
 def _publish_paper_domain_events(conn: Any, worker_job: dict[str, Any], result: dict[str, Any]) -> None:
     if not isinstance(result, dict):
         return
@@ -783,16 +652,6 @@ def dispatch_worker_job(conn: Any, settings: Any, worker_job: dict[str, Any]) ->
         paper_id = _required_int(payload.get("paper_id"), "paper_id")
         return index_library_paper(conn, settings, paper_id)
 
-    if job_type == "generate-paper-reports":
-        limit = _optional_int(payload.get("limit")) or _optional_int(_arg_value(args, "--limit"))
-        return run_generate_paper_reports_job(
-            conn,
-            settings,
-            limit=limit,
-            job_id=job_run_id,
-            track_job_run=bool(job_run_id),
-        )
-
     if job_type in {"run-daily", "resume-daily", "retry-daily"}:
         requested_job_id = _optional_int(payload.get("job_id")) or _optional_int(_arg_value(args, "--job-id")) or 0
         return run_daily_job(
@@ -841,9 +700,7 @@ def dispatch_worker_job(conn: Any, settings: Any, worker_job: dict[str, Any]) ->
         return save_reader_note_to_obsidian(conn, settings, paper_id)
 
     if job_type == "paper-report":
-        paper_id = _required_int(payload.get("paper_id"), "paper_id")
-        body = payload.get("body") if isinstance(payload.get("body"), dict) else payload
-        return generate_paper_reading_report(conn, settings, paper_id, body)
+        return run_paper_report_worker_job(conn, settings, worker_job)
 
     dispatcher = DISPATCHERS.get(job_type)
     if not dispatcher:
@@ -890,6 +747,52 @@ def run_once(worker_id: str, on_job_change=None) -> dict[str, Any]:
             try:
                 result = dispatch_worker_job(conn, settings, worker_job)
             except Exception as exc:
+                if str(worker_job.get("job_type") or "") == "paper-report":
+                    terminal_status, domain_events = stage_paper_report_terminal_failure(conn, worker_job, exc)
+                    if terminal_status == "cancelled":
+                        cancelled = cancel_worker_job_before_dispatch(
+                            conn,
+                            int(worker_job["id"]),
+                            worker_id=worker_id,
+                            lease_attempt=lease_attempt,
+                            message=str(exc) or "Paper report generation cancelled",
+                            domain_events=domain_events,
+                        )
+                        cancelled_job = cancelled["worker_job"] or worker_job
+                        _log_job_observation(
+                            "worker_job.cancelled",
+                            cancelled_job,
+                            worker_id,
+                            handler_duration_seconds=time.perf_counter() - handler_started_at,
+                        )
+                        return {"claimed": True, "worker_job": cancelled_job, "cancelled": True}
+                    if terminal_status == "superseded":
+                        result = {"paper_id": _optional_int(_payload(worker_job).get("paper_id")), "superseded": True}
+                        completed = complete_worker_job(
+                            conn,
+                            int(worker_job["id"]),
+                            result,
+                            message="paper-report superseded",
+                            worker_id=worker_id,
+                            lease_attempt=lease_attempt,
+                        )
+                        return {"claimed": True, "worker_job": completed["worker_job"] or worker_job, "result": result}
+                    failed = fail_worker_job(
+                        conn,
+                        int(worker_job["id"]),
+                        str(exc),
+                        worker_id=worker_id,
+                        lease_attempt=lease_attempt,
+                        domain_events=domain_events,
+                    )
+                    failed_job = failed["worker_job"] or worker_job
+                    _log_job_observation(
+                        "worker_job.failed",
+                        failed_job,
+                        worker_id,
+                        handler_duration_seconds=time.perf_counter() - handler_started_at,
+                    )
+                    raise
                 notification = _reader_import_notification(worker_job, error_message=str(exc))
                 failed = fail_worker_job(
                     conn,
@@ -912,6 +815,7 @@ def run_once(worker_id: str, on_job_change=None) -> dict[str, Any]:
                     handler_duration_seconds=time.perf_counter() - handler_started_at,
                 )
                 raise
+            result_domain_events = result.pop("domain_events", []) if isinstance(result.get("domain_events"), list) else []
             completed = complete_worker_job(
                 conn,
                 int(worker_job["id"]),
@@ -919,17 +823,19 @@ def run_once(worker_id: str, on_job_change=None) -> dict[str, Any]:
                 message=str(result.get("message") or f"{worker_job['job_type']} completed"),
                 worker_id=worker_id,
                 lease_attempt=lease_attempt,
-                domain_events=_knowledge_index_domain_events(
-                    worker_job,
-                    index_status=str(result.get("index_status") or "ready"),
-                    document_id=_optional_int(result.get("document_id")),
-                ),
+                domain_events=[
+                    *_knowledge_index_domain_events(
+                        worker_job,
+                        index_status=str(result.get("index_status") or "ready"),
+                        document_id=_optional_int(result.get("document_id")),
+                    ),
+                    *result_domain_events,
+                ],
             )
             completed_job = completed["worker_job"] or worker_job
             _publish_project_domain_events(conn, worker_job, result)
             _publish_artifact_domain_events(conn, worker_job, result)
             _publish_reader_domain_events(conn, worker_job, result)
-            _publish_paper_report_domain_events(conn, worker_job, result)
             _publish_paper_domain_events(conn, worker_job, result)
             _log_job_observation(
                 "worker_job.completed",

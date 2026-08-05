@@ -10,7 +10,6 @@
     { "type": "artifact-index-backfill", "label": "产物索引回填", "concurrency_group": "embedding" },
     { "type": "experiment-report-index", "label": "实验报告索引", "concurrency_group": "embedding" },
     { "type": "library-paper-index", "label": "论文库索引", "concurrency_group": "embedding" },
-    { "type": "generate-paper-reports", "label": "全文报告生成", "concurrency_group": "llm" },
     { "type": "run-daily", "label": "每日流程", "concurrency_group": "daily" },
     { "type": "resume-daily", "label": "恢复每日流程", "concurrency_group": "daily" },
     { "type": "retry-daily", "label": "历史论文补跑", "concurrency_group": "daily" },
@@ -21,6 +20,6 @@
     { "type": "reader-import-url", "label": "URL 导入", "concurrency_group": "reader-import" },
     { "type": "reader-import-web", "label": "网页导入", "concurrency_group": "reader-import" },
     { "type": "reader-save-obsidian", "label": "Reader 保存到 Obsidian", "concurrency_group": "obsidian" },
-    { "type": "paper-report", "label": "单篇论文报告", "concurrency_group": "llm" }
+    { "type": "paper-report", "label": "单篇论文报告", "concurrency_group": "paper-report" }
   ]
 }

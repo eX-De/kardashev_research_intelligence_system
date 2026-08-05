@@ -1,10 +1,9 @@
 import { createHash } from "node:crypto";
 
-import { ConflictError, NotFoundError, ValidationError, maybeOne, parseJson, query, toJson, withTransaction } from "./db.js";
-import { getAppSettings, resolvePaperReaderPrompt } from "./settings.js";
+import { NotFoundError, ValidationError, maybeOne, parseJson, query, toJson, withTransaction } from "./db.js";
+import { cancelPaperReport, enqueuePaperReport } from "./paperReports.js";
 
 const PAPER_REPORT_ARTIFACT_TYPE = "paper_report";
-const PAPER_READER_ANALYSIS_SYSTEM = "You are a research document reading assistant. Read the supplied cleaned document text and answer accurately from it.";
 const AUTO_MATCH_NOTE = "auto_matched_by_project_context";
 const REPORT_STATUSES = ["queued", "processing", "done", "failed", "cancelled"];
 
@@ -967,117 +966,6 @@ async function paperReportPayload(db, paperId) {
   return paperReportPayloadFromRow(row, paperId);
 }
 
-async function sourceProjectIdsForPaper(db, paperId) {
-  const result = await db.query(
-    `
-      SELECT r.project_id
-      FROM project_paper_recommendations r
-      JOIN research_projects rp ON rp.id = r.project_id
-      WHERE r.paper_id = $1
-        AND r.state IN ('pending', 'accepted')
-        AND rp.status NOT IN ('paused', 'archived')
-      ORDER BY r.project_id
-    `,
-    [Number(paperId)]
-  );
-  return parseIntegerList((result.rows || []).map((row) => row.project_id));
-}
-
-function reportContentForState({ paper, paperId, prompt, sourceProjectIds, errorMessage = "", startedAt = null, finishedAt = null }) {
-  return {
-    paper_id: Number(paperId),
-    arxiv_id: paper.arxiv_id || "",
-    link: paper.link || "",
-    prompt: prompt || "",
-    system_prompt: PAPER_READER_ANALYSIS_SYSTEM,
-    source_project_ids: sourceProjectIds || [],
-    error_message: errorMessage || "",
-    started_at: startedAt,
-    finished_at: finishedAt
-  };
-}
-
-function reportSourceForState({ paperId, sourceTextHash = "" }) {
-  return {
-    source_key: `paper_report:${Number(paperId)}`,
-    generated_from: "paper_report_queue",
-    source_text_hash: sourceTextHash || ""
-  };
-}
-
-async function upsertQueuedReport(db, paperId, prompt) {
-  const paper = await findReaderPaper(db, paperId);
-  const { row } = await reportArtifactRow(db, paperId);
-  const existingContent = reportContent(row);
-  const existingSource = reportSource(row);
-  const sourceProjectIds = row
-    ? sourceProjectIdsFromContent(existingContent)
-    : await sourceProjectIdsForPaper(db, paperId);
-  const sourceTextHash = existingSource.source_text_hash || row?.input_hash || "";
-  const content = reportContentForState({
-    paper,
-    paperId,
-    prompt,
-    sourceProjectIds,
-    startedAt: null,
-    finishedAt: null
-  });
-  const source = reportSourceForState({ paperId, sourceTextHash });
-  const now = nowIso();
-  if (row) {
-    await db.query(
-      `
-        UPDATE artifacts
-        SET title = $1,
-            content_markdown = '',
-            content_json = $2,
-            status = 'queued',
-            source_json = $3,
-            model_provider_id = '',
-            model = '',
-            input_hash = $4,
-            updated_at = $5
-        WHERE id = $6
-      `,
-      [
-        paper.title || `Paper ${Number(paperId)} Full Report`,
-        toJson(content),
-        toJson(source),
-        sourceTextHash,
-        now,
-        Number(row.id)
-      ]
-    );
-    return { artifact_id: Number(row.id), paper_reports_requeued: row.status === "removed" ? 0 : 1, paper_reports_queued: row.status === "removed" ? 1 : 0 };
-  }
-  const inserted = await db.query(
-    `
-      INSERT INTO artifacts(
-        scope_type, scope_id, artifact_type, title, content_markdown,
-        content_json, status, source_json, model_provider_id, model,
-        input_hash, created_at, updated_at
-      )
-      VALUES ('paper', $1, $2, $3, '', $4, 'queued', $5, '', '', $6, $7, $7)
-      RETURNING id
-    `,
-    [
-      paperId,
-      PAPER_REPORT_ARTIFACT_TYPE,
-      paper.title || `Paper ${Number(paperId)} Full Report`,
-      toJson(content),
-      toJson(source),
-      sourceTextHash,
-      now
-    ]
-  );
-  return { artifact_id: Number(inserted.rows[0].id), paper_reports_queued: 1 };
-}
-
-async function reportPrompt(locale = "") {
-  const data = await getAppSettings();
-  return resolvePaperReaderPrompt(data?.settings || {}, { locale });
-}
-
 export async function getReaderPaperDetail(paperId, db = { query }) {
   const id = positiveId(paperId, "paper_id");
   const paper = await findReaderPaper(db, id);
@@ -1407,63 +1295,21 @@ export async function deleteReaderMessage(paperId, messageId) {
 
 export async function cancelReaderReport(paperId) {
   const id = positiveId(paperId, "paper_id");
-  await withTransaction(async (client) => {
-    const { row } = await reportArtifactRow(client, id);
-    if (!row || row.status === "removed") throw new NotFoundError("Report queue item was not found");
-    if (row.status === "processing") throw new ConflictError("Processing reports cannot be cancelled");
-    if (row.status !== "queued") return;
-    const content = { ...reportContent(row), error_message: "", finished_at: nowIso() };
-    await client.query(
-      `
-        UPDATE artifacts
-        SET status = 'cancelled',
-            content_json = $1,
-            updated_at = $2
-        WHERE id = $3
-      `,
-      [toJson(content), content.finished_at, Number(row.id)]
-    );
-  });
+  const cancellation = await cancelPaperReport(id);
   const detail = await getReaderPaperDetail(id);
-  return { ...detail, ok: true };
+  return { ...detail, ...cancellation, ok: true };
 }
 
 export async function retryReaderReport(paperId, payload = {}) {
   const id = positiveId(paperId, "paper_id");
-  const prompt = await reportPrompt(payload.locale);
-  await withTransaction(async (client) => {
-    await upsertQueuedReport(client, id, prompt);
-  });
+  const queued = await enqueuePaperReport(id, { ...payload, force: true }, { source: "reader-retry" });
   const detail = await getReaderPaperDetail(id);
-  return { ...detail, ok: true };
+  return { ...detail, ...queued, ok: true };
 }
 
 export async function deleteReaderReport(paperId) {
   const id = positiveId(paperId, "paper_id");
-  return withTransaction(async (client) => {
-    const { row } = await reportArtifactRow(client, id);
-    if (!row || row.status === "removed") {
-      return { ok: true, paper_id: id, paper_reports_removed: 0 };
-    }
-    if (row.status === "processing") throw new ConflictError("Processing reports cannot be removed from the queue");
-    const content = {
-      ...reportContent(row),
-      error_message: "",
-      started_at: null,
-      finished_at: nowIso()
-    };
-    await client.query(
-      `
-        UPDATE artifacts
-        SET status = 'removed',
-            content_json = $1,
-            updated_at = $2
-        WHERE id = $3
-      `,
-      [toJson(content), content.finished_at, Number(row.id)]
-    );
-    return { ok: true, paper_id: id, artifact_id: Number(row.id), paper_reports_removed: 1 };
-  });
+  return cancelPaperReport(id, { remove: true });
 }
 
 export const READER_REPORT_STATUSES = REPORT_STATUSES;

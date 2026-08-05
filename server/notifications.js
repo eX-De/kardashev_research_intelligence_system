@@ -737,7 +737,7 @@ registerNotificationBuilder("paper_report_queue_backlog", "全文报告队列排
       "paper_report_queue_backlog",
       "warn",
       "全文报告等待生成",
-      `${queued} 篇论文正在排队，server 运行时会按配置并发自动生成。`,
+      `${queued} 篇论文报告正在等待后台 worker 处理。`,
       { data: { queued } }
     )
   ];
@@ -746,7 +746,7 @@ registerNotificationBuilder("paper_report_queue_backlog", "全文报告队列排
 registerNotificationBuilder("paper_report_completed", "最近全文报告生成完成", async (context) => {
   const reportJob = completed(
     context.activities,
-    (meta, item) => item.job_type === "generate-paper-reports" && metaNumber(meta, ["paper_reports_done"]) > 0
+    (meta, item) => item.job_type === "paper-report" && metaNumber(meta, ["paper_reports_done"]) > 0
   );
   if (!reportJob) return [];
   const count = metaNumber(reportJob.meta, ["paper_reports_done"]);

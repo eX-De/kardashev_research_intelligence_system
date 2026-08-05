@@ -12,7 +12,6 @@ import {
   compactArtifactChangedPayload,
   compactExperimentReportPayload,
   compactPaperChangedPayload,
-  compactPaperReportChangedPayload,
   compactProjectChangedPayload,
   compactProjectPayload,
   compactSettingsChangedPayload,
@@ -77,7 +76,11 @@ import {
 } from "./server/projects.js";
 import { ensureProjectIndex } from "./server/projectIndex.js";
 import {
-  countActiveWorkerJobs,
+  enqueuePaperReport,
+  materializeLegacyQueuedPaperReports,
+  materializeRecommendedPaperReports
+} from "./server/paperReports.js";
+import {
   enqueueWorkerJob,
   requestWorkerJobCancellation
 } from "./server/workerQueue.js";
@@ -104,11 +107,6 @@ const PANEL_SESSION_SECRET = envValue("PANEL_SESSION_SECRET", "") || randomBytes
 const PANEL_SESSION_TTL_SECONDS = positiveInteger(process.env.PANEL_SESSION_TTL_SECONDS, 604800);
 const PANEL_SESSION_COOKIE_NAME = "panel_session";
 const KRIS_AGENT_TOKEN = envValue("KRIS_AGENT_TOKEN", "");
-const PAPER_REPORT_QUEUE_INTERVAL_MS = Math.max(2000, Number(process.env.PAPER_REPORT_QUEUE_INTERVAL_MS || 5000));
-const PAPER_REPORT_QUEUE_DEFAULT_CONCURRENCY = Math.max(
-  1,
-  Number(process.env.PAPER_REPORT_QUEUE_CONCURRENCY || process.env.PAPER_REPORT_QUEUE_LIMIT || 1)
-);
 const OBSIDIAN_NOT_CONFIGURED_CODE = "obsidian_not_configured";
 const IN_MEMORY_JOB_RECONCILE_GRACE_MS = Math.max(
   5000,
@@ -134,6 +132,7 @@ const JOB_BACKEND = String(envValue("KRIS_JOB_BACKEND", "queue") || "queue").tri
 const COMPUTE_BACKEND = String(envValue("KRIS_COMPUTE_BACKEND", "service") || "service").trim().toLowerCase();
 const PROJECT_CONTEXT_BACKEND = String(envValue("KRIS_PROJECT_CONTEXT_BACKEND", "node") || "node").trim().toLowerCase();
 const PROJECT_INDEX_BACKEND = String(envValue("KRIS_PROJECT_INDEX_BACKEND", "node") || "node").trim().toLowerCase();
+const PAPER_REPORT_LEGACY_SCANNER_ENABLED = envBoolean("KRIS_PAPER_REPORT_LEGACY_SCANNER_ENABLED", true);
 const OUTBOX_POLLER_ENABLED = envBoolean("KRIS_OUTBOX_POLLER_ENABLED", true);
 const OUTBOX_POLL_INTERVAL_MS = Math.max(
   250,
@@ -151,7 +150,6 @@ const READER_UPLOAD_MAX_FILE_BYTES = positiveInteger(
 const READER_UPLOAD_MAX_FILES = positiveInteger(process.env.READER_UPLOAD_MAX_FILES, DEFAULT_READER_UPLOAD_MAX_FILES);
 const WORKER_PROGRESS_EVENT_PREFIX = "KRIS_PROGRESS_EVENT ";
 const DAILY_JOB_COMMANDS = new Set(["run-daily", "resume-daily", "retry-daily"]);
-const PAPER_REPORT_QUEUE_COMMAND = "generate-paper-reports";
 const requestTimingStorage = new AsyncLocalStorage();
 
 if (!["service", "legacy"].includes(COMPUTE_BACKEND)) {
@@ -199,18 +197,6 @@ const schedulerRuntime = {
 const startupDailyRuntime = {
   enabled: false,
   triggerInFlight: false,
-  lastCheckAt: null,
-  lastRunAt: null,
-  lastSkipReason: null,
-  lastError: null
-};
-
-const paperReportQueueRuntime = {
-  enabled: true,
-  timer: null,
-  active: 0,
-  activeJobs: [],
-  concurrency: PAPER_REPORT_QUEUE_DEFAULT_CONCURRENCY,
   lastCheckAt: null,
   lastRunAt: null,
   lastSkipReason: null,
@@ -556,11 +542,6 @@ function computeNextRun(settings) {
   return next;
 }
 
-function paperReportQueueConcurrency(settings = {}) {
-  const value = Number(settings.paper_report_queue_concurrency || PAPER_REPORT_QUEUE_DEFAULT_CONCURRENCY);
-  return Math.max(1, Math.min(8, Number.isFinite(value) ? Math.floor(value) : PAPER_REPORT_QUEUE_DEFAULT_CONCURRENCY));
-}
-
 function schedulerStatus() {
   return {
     enabled: schedulerRuntime.enabled,
@@ -575,16 +556,6 @@ function schedulerStatus() {
       last_run_at: startupDailyRuntime.lastRunAt,
       last_skip_reason: startupDailyRuntime.lastSkipReason,
       last_error: startupDailyRuntime.lastError
-    },
-    paper_report_queue: {
-      enabled: paperReportQueueRuntime.enabled,
-      active: paperReportQueueRuntime.active,
-      active_jobs: paperReportQueueRuntime.activeJobs,
-      concurrency: paperReportQueueRuntime.concurrency,
-      last_check_at: paperReportQueueRuntime.lastCheckAt,
-      last_run_at: paperReportQueueRuntime.lastRunAt,
-      last_skip_reason: paperReportQueueRuntime.lastSkipReason,
-      last_error: paperReportQueueRuntime.lastError
     }
   };
 }
@@ -632,16 +603,8 @@ async function publishDurablePaperChanged(type, data = {}, fallbackId = null, ex
   return publishDurableEvent(type, compactPaperChangedPayload(data, fallbackId, extra));
 }
 
-async function publishDurablePaperReportChanged(type, data = {}, fallbackId = null, extra = {}) {
-  return publishDurableEvent(type, compactPaperReportChangedPayload(data, fallbackId, extra));
-}
-
 function isDailyJobCommand(command) {
   return DAILY_JOB_COMMANDS.has(String(command || ""));
-}
-
-function isPaperReportQueueCommand(command) {
-  return String(command || "") === PAPER_REPORT_QUEUE_COMMAND;
 }
 
 function isQueueJobBackend() {
@@ -650,7 +613,6 @@ function isQueueJobBackend() {
 
 function jobPriority(command) {
   if (isDailyJobCommand(command)) return 20;
-  if (isPaperReportQueueCommand(command)) return 5;
   return 10;
 }
 
@@ -743,13 +705,12 @@ async function enqueueActionWorkerJob(command, payload = {}, { source = "action"
   return response;
 }
 
-async function activeDatabaseJob({ ignoreDailyJobs = false, ignorePaperReportQueueJobs = false, includeQueued = false } = {}) {
+async function activeDatabaseJob({ ignoreDailyJobs = false, includeQueued = false } = {}) {
   const statuses = includeQueued ? new Set(["queued", "running"]) : new Set(["running"]);
   const history = await getJobsHistoryResponse(100);
   return (history.items || []).find((job) => {
     if (!statuses.has(job.status)) return false;
     if (ignoreDailyJobs && isDailyJobCommand(job.job_type)) return false;
-    if (ignorePaperReportQueueJobs && isPaperReportQueueCommand(job.job_type)) return false;
     return true;
   }) || null;
 }
@@ -1041,11 +1002,7 @@ async function reconcileCurrentJobWithDatabase() {
     message
   };
   jobRuntime.currentJob = null;
-  if (current.source === "paper-report-queue") {
-    paperReportQueueRuntime.lastError = { message, at: finishedAt };
-  } else {
-    schedulerRuntime.lastError = { message, at: finishedAt };
-  }
+  schedulerRuntime.lastError = { message, at: finishedAt };
   publishTaskEvent(SERVER_EVENTS.TASK_FAILED, jobRuntime.lastJob, { stale: true });
   return null;
 }
@@ -1134,7 +1091,6 @@ async function enqueueManagedJob(command, source = "manual", args = []) {
   await requireAvailableWorker();
   const isDailyJob = isDailyJobCommand(command);
   const active = await activeDatabaseJob({
-    ignorePaperReportQueueJobs: isDailyJob,
     includeQueued: true
   });
   if (active) {
@@ -1174,18 +1130,11 @@ async function runManagedCliJob(command, source = "manual", args = []) {
     err.statusCode = 409;
     throw err;
   }
-  if (!isDailyJob && source !== "paper-report-queue" && paperReportQueueRuntime.active > 0) {
-    const err = new Error(`Paper report queue is running: ${paperReportQueueRuntime.active} active`);
+  const running = await runningDatabaseJob();
+  if (running) {
+    const err = new Error(`Database job is already running: ${running.job_type} #${running.id}`);
     err.statusCode = 409;
     throw err;
-  }
-  if (source !== "paper-report-queue") {
-    const running = await runningDatabaseJob({ ignorePaperReportQueueJobs: isDailyJob });
-    if (running) {
-      const err = new Error(`Database job is already running: ${running.job_type} #${running.id}`);
-      err.statusCode = 409;
-      throw err;
-    }
   }
   const startedAt = new Date().toISOString();
   jobRuntime.currentJob = { command, source, args, started_at: startedAt };
@@ -1226,11 +1175,7 @@ async function runManagedCliJob(command, source = "manual", args = []) {
       finished_at: finishedAt,
       message: error.message
     };
-    if (source === "paper-report-queue") {
-      paperReportQueueRuntime.lastError = { message: error.message, at: finishedAt };
-    } else {
-      schedulerRuntime.lastError = { message: error.message, at: finishedAt };
-    }
+    schedulerRuntime.lastError = { message: error.message, at: finishedAt };
     jobRuntime.currentJob = null;
     publishTaskEvent(SERVER_EVENTS.TASK_FAILED, jobRuntime.lastJob);
     throw error;
@@ -1238,150 +1183,6 @@ async function runManagedCliJob(command, source = "manual", args = []) {
     progressPublisher?.stop();
     jobRuntime.currentJob = null;
   }
-}
-
-function schedulePaperReportQueue(delay = PAPER_REPORT_QUEUE_INTERVAL_MS) {
-  if (!paperReportQueueRuntime.enabled) return;
-  if (paperReportQueueRuntime.timer) clearTimeout(paperReportQueueRuntime.timer);
-  paperReportQueueRuntime.timer = setTimeout(() => {
-    runPaperReportQueueOnce().catch((error) => {
-      paperReportQueueRuntime.lastError = {
-        message: error.message,
-        at: new Date().toISOString()
-      };
-      schedulePaperReportQueue();
-    });
-  }, delay);
-}
-
-async function runPaperReportWorker(workerId) {
-  const startedAt = new Date().toISOString();
-  const activeJob = {
-    id: workerId,
-    command: PAPER_REPORT_QUEUE_COMMAND,
-    source: "paper-report-queue",
-    args: ["--limit", "1"],
-    started_at: startedAt
-  };
-  paperReportQueueRuntime.active += 1;
-  paperReportQueueRuntime.activeJobs = [...paperReportQueueRuntime.activeJobs, activeJob];
-  publishTaskEvent(SERVER_EVENTS.TASK_STARTED, { ...activeJob, status: "running" });
-  let result = null;
-  let failure = null;
-  let finishedAt = null;
-  try {
-    result = await jsonFromWorker([PAPER_REPORT_QUEUE_COMMAND, "--limit", "1"]);
-    finishedAt = new Date().toISOString();
-    paperReportQueueRuntime.lastRunAt = finishedAt;
-    paperReportQueueRuntime.lastError = null;
-    return result;
-  } catch (error) {
-    failure = error;
-    finishedAt = new Date().toISOString();
-    paperReportQueueRuntime.lastError = {
-      message: error.message,
-      at: finishedAt
-    };
-    return null;
-  } finally {
-    paperReportQueueRuntime.active = Math.max(0, paperReportQueueRuntime.active - 1);
-    paperReportQueueRuntime.activeJobs = paperReportQueueRuntime.activeJobs.filter((job) => job.id !== workerId);
-    const completedJob = {
-      ...activeJob,
-      status: failure ? "failed" : "completed",
-      finished_at: finishedAt || new Date().toISOString(),
-      message: failure?.message || result?.message || "generate-paper-reports completed"
-    };
-    publishTaskEvent(failure ? SERVER_EVENTS.TASK_FAILED : SERVER_EVENTS.TASK_FINISHED, completedJob, failure ? {} : { result });
-    schedulePaperReportQueue(1000);
-  }
-}
-
-async function runPaperReportQueueOnce() {
-  paperReportQueueRuntime.lastCheckAt = new Date().toISOString();
-  paperReportQueueRuntime.lastSkipReason = null;
-  if (jobRuntime.currentJob) {
-    await reconcileCurrentJobWithDatabase();
-  }
-  if (jobRuntime.currentJob && !isDailyJobCommand(jobRuntime.currentJob.command)) {
-    paperReportQueueRuntime.lastSkipReason = `busy:${jobRuntime.currentJob.command}`;
-    schedulePaperReportQueue();
-    return schedulerStatus();
-  }
-
-  const settings = await readAppSettings();
-  const concurrency = paperReportQueueConcurrency(settings);
-  paperReportQueueRuntime.concurrency = concurrency;
-  const activeWorkerJobs = isQueueJobBackend() ? await countActiveWorkerJobs(PAPER_REPORT_QUEUE_COMMAND) : 0;
-  if (isQueueJobBackend()) {
-    paperReportQueueRuntime.active = activeWorkerJobs;
-    paperReportQueueRuntime.activeJobs = [];
-  }
-  if (paperReportQueueRuntime.active >= concurrency) {
-    paperReportQueueRuntime.lastSkipReason = `active:${paperReportQueueRuntime.active}/${concurrency}`;
-    schedulePaperReportQueue();
-    return schedulerStatus();
-  }
-
-  const running = await runningDatabaseJob({
-    ignoreDailyJobs: true,
-    ignorePaperReportQueueJobs: paperReportQueueRuntime.active > 0
-  });
-  if (running) {
-    paperReportQueueRuntime.lastSkipReason = `busy:${running.job_type}`;
-    schedulePaperReportQueue();
-    return schedulerStatus();
-  }
-
-  const data = await getNodePaperReportsSummary();
-  const queued = Number(data?.stats?.queued || 0);
-  if (!queued) {
-    paperReportQueueRuntime.lastSkipReason = "empty";
-    schedulePaperReportQueue();
-    return schedulerStatus();
-  }
-
-  const available = Math.max(0, concurrency - paperReportQueueRuntime.active);
-  const launchCount = Math.min(queued, available);
-  if (isQueueJobBackend()) {
-    try {
-      await requireAvailableWorker();
-    } catch (error) {
-      paperReportQueueRuntime.lastSkipReason = "worker_unavailable";
-      paperReportQueueRuntime.lastError = { message: error.message, at: new Date().toISOString() };
-      schedulePaperReportQueue();
-      return schedulerStatus();
-    }
-    for (let index = 0; index < launchCount; index += 1) {
-      await enqueueWorkerJob({
-        jobType: PAPER_REPORT_QUEUE_COMMAND,
-        payload: {
-          command: PAPER_REPORT_QUEUE_COMMAND,
-          source: "paper-report-queue",
-          args: ["--limit", "1"],
-          limit: 1
-        },
-        priority: jobPriority(PAPER_REPORT_QUEUE_COMMAND),
-        message: `${PAPER_REPORT_QUEUE_COMMAND} queued`
-      });
-    }
-    paperReportQueueRuntime.active += launchCount;
-    paperReportQueueRuntime.lastError = null;
-    paperReportQueueRuntime.lastSkipReason = `queued:${launchCount}`;
-    schedulePaperReportQueue(1000);
-    return schedulerStatus();
-  }
-  for (let index = 0; index < launchCount; index += 1) {
-    runPaperReportWorker(`${Date.now()}-${index}`).catch((error) => {
-      paperReportQueueRuntime.lastError = {
-        message: error.message,
-        at: new Date().toISOString()
-      };
-    });
-  }
-  paperReportQueueRuntime.lastSkipReason = `launched:${launchCount}`;
-  schedulePaperReportQueue(1000);
-  return schedulerStatus();
 }
 
 async function runScheduledDaily() {
@@ -2036,8 +1837,6 @@ async function routeApi(req, res, url) {
   if (req.method === "POST" && url.pathname === "/api/settings") {
     const body = await readRequestJson(req);
     const data = await saveAppSettings(settingsPayloadWithoutSchedulerMode(body));
-    paperReportQueueRuntime.concurrency = paperReportQueueConcurrency(data.settings || {});
-    schedulePaperReportQueue(1000);
     if (schedulerRuntime.enabled) {
       scheduleNext(data.settings || {});
     }
@@ -2645,7 +2444,6 @@ async function routeApi(req, res, url) {
   if (req.method === "POST" && readerCancelMatch) {
     const data = await cancelNodeReaderReport(readerCancelMatch[1]);
     sendJson(res, 200, data);
-    await publishDurablePaperReportChanged(SERVER_EVENTS.PAPER_REPORT_UPDATED, data, readerCancelMatch[1], { action: "cancel" });
     return;
   }
 
@@ -2654,7 +2452,6 @@ async function routeApi(req, res, url) {
     const body = await readRequestJson(req);
     const data = await retryNodeReaderReport(readerRetryMatch[1], body);
     sendJson(res, 200, data);
-    await publishDurablePaperReportChanged(SERVER_EVENTS.PAPER_REPORT_UPDATED, data, readerRetryMatch[1], { action: "retry" });
     return;
   }
 
@@ -2662,7 +2459,6 @@ async function routeApi(req, res, url) {
   if (req.method === "DELETE" && readerReportMatch) {
     const data = await deleteNodeReaderReport(readerReportMatch[1]);
     sendJson(res, 200, data);
-    await publishDurablePaperReportChanged(SERVER_EVENTS.PAPER_REPORT_DELETED, data, readerReportMatch[1]);
     return;
   }
 
@@ -2693,9 +2489,6 @@ async function routeApi(req, res, url) {
       action: body.action || null,
       project_ids: Array.isArray(body.project_ids) ? body.project_ids.map(eventNumber).filter(Boolean) : projectIdsFromData(data)
     });
-    await publishDurablePaperReportChanged(SERVER_EVENTS.PAPER_REPORT_UPDATED, data, paperRecommendationMatch[1], {
-      action: "recommendation_state"
-    });
     return;
   }
 
@@ -2703,29 +2496,13 @@ async function routeApi(req, res, url) {
   if (req.method === "DELETE" && paperReportMatch) {
     const data = await deleteNodeReaderReport(paperReportMatch[1]);
     sendJson(res, 200, data);
-    await publishDurablePaperReportChanged(SERVER_EVENTS.PAPER_REPORT_DELETED, data, paperReportMatch[1]);
     return;
   }
 
   if (req.method === "POST" && paperReportMatch) {
     const body = await readRequestJson(req);
-    if (isQueueJobBackend()) {
-      const data = await enqueueActionWorkerJob(
-        "paper-report",
-        { paper_id: eventNumber(paperReportMatch[1]), force: Boolean(body.force), body },
-        { source: "paper-report", args: [paperReportMatch[1]], priority: jobPriority(PAPER_REPORT_QUEUE_COMMAND) }
-      );
-      sendJson(res, 202, data);
-      return;
-    }
-    const data = await jsonFromWorker([
-      "api-paper-report",
-      paperReportMatch[1]
-    ], JSON.stringify(body));
-    sendJson(res, 200, data);
-    await publishDurablePaperReportChanged(SERVER_EVENTS.PAPER_REPORT_UPDATED, data, paperReportMatch[1], {
-      force: Boolean(body.force)
-    });
+    const data = await enqueuePaperReport(paperReportMatch[1], body, { source: "paper-report" });
+    sendJson(res, 202, data);
     return;
   }
 
@@ -2733,11 +2510,15 @@ async function routeApi(req, res, url) {
     "/api/jobs/sync-obsidian": "sync-obsidian",
     "/api/jobs/fetch-arxiv": "fetch-arxiv",
     "/api/jobs/cache-arxiv-text": "cache-arxiv-text",
-    "/api/jobs/generate-paper-reports": "generate-paper-reports",
     "/api/jobs/generate-reports": "generate-reports",
     "/api/jobs/run-daily": "run-daily",
     "/api/jobs/retry-daily": "retry-daily"
   };
+  if (req.method === "POST" && url.pathname === "/api/jobs/generate-paper-reports") {
+    const data = await materializeRecommendedPaperReports({ source: "manual-bulk" });
+    sendJson(res, 200, { ...data, scheduler: schedulerStatus() });
+    return;
+  }
   if (req.method === "POST" && jobMap[url.pathname]) {
     const data = await runManagedJob(jobMap[url.pathname], "manual");
     sendJson(res, 200, { ok: true, ...data, scheduler: schedulerStatus() });
@@ -2789,7 +2570,11 @@ server.listen(PORT, () => {
   console.log(`Research Intelligence dashboard listening on http://localhost:${PORT}`);
   startOutboxPoller();
   startWorkerMonitor();
-  schedulePaperReportQueue(1000);
+  if (PAPER_REPORT_LEGACY_SCANNER_ENABLED) {
+    materializeLegacyQueuedPaperReports()
+      .then((result) => console.info(JSON.stringify({ event: "paper_report.legacy_materialized", ...result })))
+      .catch((error) => console.error("Paper report legacy materialization failed", error));
+  }
   scheduleUpdateCheck(UPDATE_CHECK_INITIAL_DELAY_MS);
   readAppSettings()
     .then(async (settings) => {

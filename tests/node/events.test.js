@@ -21,10 +21,7 @@ function createPublisher() {
     getSchedulerStatus: () => ({
       enabled: true,
       current_job: { command: "run-daily", status: "running", args: ["--x"] },
-      last_job: null,
-      paper_report_queue: {
-        active_jobs: [{ command: "generate-paper-reports", status: "running" }]
-      }
+      last_job: null
     })
   });
 }
@@ -90,7 +87,7 @@ test("publishSettingsChanged compacts scheduler payload", () => {
     finished_at: null,
     message: null
   });
-  assert.equal(event.data.scheduler.paper_report_queue.active_jobs[0].command, "generate-paper-reports");
+  assert.equal(Object.hasOwn(event.data.scheduler, "paper_report_queue"), false);
 });
 
 test("publishProjectChanged and publishPaperChanged preserve frontend id fields", () => {

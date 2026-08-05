@@ -1,14 +1,14 @@
-import { createHash } from "node:crypto";
-
-import { NotFoundError, ValidationError, maybeOne, parseJson, query, toJson, withTransaction } from "./db.js";
-import { getAppSettings, resolvePaperReaderPrompt } from "./settings.js";
+import { NotFoundError, ValidationError, maybeOne, parseJson, query, withTransaction } from "./db.js";
+import {
+  materializeRecommendedPaperReports,
+  reconcilePaperReportRecommendationsInTransaction
+} from "./paperReports.js";
 import {
   ensureLibraryPaperIdForLegacyPaper,
   getReaderPaperDetail
 } from "./reader.js";
 
 const PAPER_REPORT_ARTIFACT_TYPE = "paper_report";
-const PAPER_READER_ANALYSIS_SYSTEM = "You are a research document reading assistant. Read the supplied cleaned document text and answer accurately from it.";
 const REPORT_RELATIONS = ["direct", "indirect"];
 const REPORT_CONFIDENCE_THRESHOLD = 0.65;
 const REPORT_USEFULNESS_THRESHOLD = 0.6;
@@ -46,23 +46,6 @@ function reportContent(row) {
   return content && typeof content === "object" && !Array.isArray(content) ? content : {};
 }
 
-function reportSource(row) {
-  const source = parseJson(row?.source_json, {});
-  return source && typeof source === "object" && !Array.isArray(source) ? source : {};
-}
-
-function sourceProjectIdsFromContent(content) {
-  return parseIntegerList(content?.source_project_ids);
-}
-
-function contentHash(markdown, content) {
-  return createHash("sha256")
-    .update(text(markdown))
-    .update("\n")
-    .update(toJson(content))
-    .digest("hex");
-}
-
 function readingStateForStatus(status, existing = "") {
   if (status === "reading") return "reading";
   if (status === "read") return "read";
@@ -75,127 +58,6 @@ async function canonicalPaper(db, paperId) {
   const row = maybeOne(result);
   if (!row) throw new NotFoundError(`Paper not found: ${paperId}`);
   return row;
-}
-
-async function reportArtifactRow(db, paperId) {
-  const result = await db.query(
-    `
-      SELECT *
-      FROM artifacts
-      WHERE scope_type = 'paper'
-        AND scope_id = $1
-        AND artifact_type = $2
-      ORDER BY updated_at DESC, id DESC
-      LIMIT 1
-    `,
-    [Number(paperId), PAPER_REPORT_ARTIFACT_TYPE]
-  );
-  return maybeOne(result);
-}
-
-async function sourceProjectsForRecommendedPapers(db, paperIds = null) {
-  const normalizedIds = paperIds === null ? null : parseIntegerList(paperIds);
-  const result = await db.query(
-    `
-      SELECT r.paper_id, r.project_id
-      FROM project_paper_recommendations r
-      JOIN research_projects rp ON rp.id = r.project_id
-      WHERE r.state IN ('pending', 'accepted')
-        AND rp.status NOT IN ('paused', 'archived')
-        AND (
-          $1::bigint[] IS NULL
-          OR r.paper_id = ANY($1::bigint[])
-          OR r.source_arxiv_paper_id = ANY($1::bigint[])
-        )
-      ORDER BY r.paper_id, r.project_id
-    `,
-    [normalizedIds && normalizedIds.length ? normalizedIds : null]
-  );
-  const projectsByPaper = new Map();
-  for (const row of result.rows || []) {
-    const paperId = Number(row.paper_id);
-    const projects = projectsByPaper.get(paperId) || [];
-    projects.push(Number(row.project_id));
-    projectsByPaper.set(paperId, projects);
-  }
-  return projectsByPaper;
-}
-
-async function savePaperReportState(db, state) {
-  const content = {
-    paper_id: Number(state.library_paper_id),
-    arxiv_id: state.arxiv_id || "",
-    link: state.link || "",
-    prompt: state.prompt || "",
-    system_prompt: state.system_prompt || "",
-    source_project_ids: state.source_project_ids || [],
-    error_message: state.error_message || "",
-    started_at: state.started_at ?? null,
-    finished_at: state.finished_at ?? null
-  };
-  const source = {
-    source_key: `paper_report:${Number(state.library_paper_id)}`,
-    generated_from: "paper_report_queue",
-    source_text_hash: state.source_text_hash || ""
-  };
-  const markdown = state.report_markdown || "";
-  const now = nowIso();
-  const inputHash = state.source_text_hash || contentHash(markdown, content);
-  if (state.artifact_id) {
-    await db.query(
-      `
-        UPDATE artifacts
-        SET title = $1,
-            content_markdown = $2,
-            content_json = $3,
-            status = $4,
-            source_json = $5,
-            model_provider_id = $6,
-            model = $7,
-            input_hash = $8,
-            updated_at = $9
-        WHERE id = $10
-      `,
-      [
-        text(state.title) || `Paper ${Number(state.paper_id)} Full Report`,
-        markdown,
-        toJson(content),
-        text(state.status) || "queued",
-        toJson(source),
-        state.model_provider_id || "",
-        state.model || "",
-        inputHash,
-        now,
-        Number(state.artifact_id)
-      ]
-    );
-    return Number(state.artifact_id);
-  }
-  const inserted = await db.query(
-    `
-      INSERT INTO artifacts(
-        scope_type, scope_id, artifact_type, title, content_markdown,
-        content_json, status, source_json, model_provider_id, model,
-        input_hash, created_at, updated_at
-      )
-      VALUES ('paper', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
-      RETURNING id
-    `,
-    [
-      Number(state.library_paper_id),
-      PAPER_REPORT_ARTIFACT_TYPE,
-      text(state.title) || `Paper ${Number(state.paper_id)} Full Report`,
-      markdown,
-      toJson(content),
-      text(state.status) || "queued",
-      toJson(source),
-      state.model_provider_id || "",
-      state.model || "",
-      inputHash,
-      now
-    ]
-  );
-  return Number(inserted.rows[0].id);
 }
 
 async function setPaperLibraryStatus(db, paperId, status) {
@@ -323,35 +185,6 @@ async function discardRecommendationsForPaper(db, paperId, projectIds = null) {
   );
 }
 
-async function paperReportState(db, paperId) {
-  const paper = await canonicalPaper(db, paperId);
-  const row = await reportArtifactRow(db, paperId);
-  const content = reportContent(row);
-  const source = reportSource(row);
-  const now = nowIso();
-  return {
-    artifact_id: row ? Number(row.id) : null,
-    paper_id: Number(paperId),
-    library_paper_id: Number(paperId),
-    arxiv_id: paper.arxiv_id || "",
-    link: paper.link || "",
-    title: paper.title || "",
-    status: row?.status || "queued",
-    prompt: content.prompt || "",
-    system_prompt: content.system_prompt || "",
-    model_provider_id: row?.model_provider_id || "",
-    model: row?.model || "",
-    source_text_hash: source.source_text_hash || row?.input_hash || "",
-    source_project_ids: sourceProjectIdsFromContent(content),
-    report_markdown: row?.content_markdown || "",
-    error_message: content.error_message || "",
-    created_at: row?.created_at || now,
-    updated_at: row?.updated_at || now,
-    started_at: content.started_at ?? null,
-    finished_at: content.finished_at ?? null
-  };
-}
-
 export async function syncProjectPaperRecommendations(paperIds = null) {
   const normalizedIds = paperIds === null ? null : parseIntegerList(paperIds);
   return withTransaction(async (client) => {
@@ -466,48 +299,13 @@ export async function syncProjectPaperRecommendations(paperIds = null) {
 }
 
 export async function ensurePaperReportsForRecommendations(paperIds = null) {
-  const settingsData = await getAppSettings();
-  const prompt = resolvePaperReaderPrompt(settingsData.settings || {});
-  const projectsByPaper = await sourceProjectsForRecommendedPapers({ query }, paperIds);
-  return withTransaction(async (client) => {
-    let created = 0;
-    let refreshed = 0;
-    let preserved = 0;
-    for (const [paperId, projectIds] of projectsByPaper.entries()) {
-      const state = await paperReportState(client, paperId);
-      if (!state) continue;
-      if (!state.artifact_id) {
-        await savePaperReportState(client, {
-          ...state,
-          status: "queued",
-          prompt,
-          system_prompt: PAPER_READER_ANALYSIS_SYSTEM,
-          source_project_ids: projectIds,
-          report_markdown: "",
-          error_message: ""
-        });
-        created += 1;
-        continue;
-      }
-      if (JSON.stringify(state.source_project_ids) !== JSON.stringify(projectIds)) {
-        await savePaperReportState(client, {
-          ...state,
-          source_project_ids: projectIds,
-          prompt: state.prompt || prompt,
-          system_prompt: state.system_prompt || PAPER_READER_ANALYSIS_SYSTEM
-        });
-        refreshed += 1;
-      } else {
-        preserved += 1;
-      }
-    }
-    return {
-      paper_reports_candidates: projectsByPaper.size,
-      paper_reports_queued: created,
-      paper_reports_refreshed: refreshed,
-      paper_reports_preserved: preserved
-    };
-  });
+  const result = await materializeRecommendedPaperReports({ paperIds, source: "paper-recommendations" });
+  return {
+    ...result,
+    paper_reports_queued: result.created,
+    paper_reports_preserved: result.deduplicated,
+    paper_reports_refreshed: 0
+  };
 }
 
 export async function getInbox() {
@@ -656,7 +454,8 @@ export async function updatePaperRecommendation(paperId, payload = {}) {
     return withTransaction(async (client) => {
       await discardRecommendationsForPaper(client, id, projectIds);
       const library = await setPaperLibraryStatus(client, id, "discarded");
-      return { ok: true, paper_id: id, action: "discard", library };
+      const report = await reconcilePaperReportRecommendationsInTransaction(client, id);
+      return { ok: true, paper_id: id, action: "discard", library, ...report };
     });
   }
   throw new ValidationError("action must be accept or discard");

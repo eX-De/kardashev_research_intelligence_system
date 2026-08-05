@@ -93,6 +93,10 @@ function createWorkerQueuePool() {
         }]
       };
     }
+    if (normalized.startsWith("SELECT JOB_TYPE, PAYLOAD_JSON FROM WORKER_JOBS")) {
+      const row = workerJobs.find((item) => Number(item.id) === Number(params[0]));
+      return { rows: row ? [{ job_type: row.job_type, payload_json: row.payload_json }] : [] };
+    }
     if (normalized.includes("FROM WORKER_JOBS") && normalized.includes("FOR UPDATE")) {
       const row = workerJobs.find((item) => Number(item.id) === Number(params[0]));
       return { rows: row ? [row] : [] };
@@ -224,13 +228,13 @@ test("daily enqueue creates and links the business job_run", async () => {
 
 test("get/list/count expose queue state including cancellation fields", async () => {
   await withWorkerQueuePool(async (fake) => {
-    const first = await enqueueWorkerJob({ jobType: "generate-paper-reports", now: "2026-07-06T10:00:00.000Z" });
+    const first = await enqueueWorkerJob({ jobType: "paper-report", now: "2026-07-06T10:00:00.000Z" });
     await enqueueWorkerJob({ jobType: "generate-reports", now: "2026-07-06T10:00:01.000Z" });
     fake.workerJobs[1].status = "running";
     fake.workerJobs[1].cancel_requested_at = "2026-07-06T10:01:00.000Z";
     fake.workerJobs[1].cancel_reason = "User requested";
 
-    assert.equal(await countActiveWorkerJobs("generate-paper-reports"), 1);
+    assert.equal(await countActiveWorkerJobs("paper-report"), 1);
     assert.equal(await countActiveWorkerJobs(), 2);
     const loaded = await getWorkerJob(first.worker_job.id);
     assert.equal(loaded.cancel_requested_at, null);

@@ -68,11 +68,7 @@ export function compactSchedulerPayload(status = {}) {
   return {
     ...status,
     current_job: compactRuntimeJob(status.current_job),
-    last_job: compactRuntimeJob(status.last_job),
-    paper_report_queue: {
-      ...status.paper_report_queue,
-      active_jobs: (status.paper_report_queue?.active_jobs || []).map(compactRuntimeJob)
-    }
+    last_job: compactRuntimeJob(status.last_job)
   };
 }
 

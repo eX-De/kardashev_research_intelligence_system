@@ -6,6 +6,77 @@ from typing import Any
 from .db import from_json, to_json, utc_now
 
 
+def _sync_stale_paper_report_domain(
+    conn: Any,
+    worker_job: dict[str, Any],
+    status: str,
+    message: str,
+    now: str,
+) -> None:
+    if str(worker_job.get("job_type") or "") != "paper-report":
+        return
+    payload = worker_job.get("payload") if isinstance(worker_job.get("payload"), dict) else {}
+    paper_id = int(payload.get("paper_id") or 0)
+    if paper_id <= 0:
+        return
+    generation_id = str(payload.get("generation_id") or "").strip()
+    row = conn.execute(
+        """
+        SELECT id, title, content_json, created_at
+        FROM artifacts
+        WHERE scope_type = 'paper' AND scope_id = ? AND artifact_type = 'paper_report'
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1 FOR UPDATE
+        """,
+        (paper_id,),
+    ).fetchone()
+    if not row:
+        return
+    content = from_json(row["content_json"], {})
+    if not isinstance(content, dict):
+        content = {}
+    if generation_id and str(content.get("generation_id") or "") != generation_id:
+        return
+    content["error_message"] = message if status == "failed" else ""
+    if status == "queued":
+        content["started_at"] = None
+        content["finished_at"] = None
+    else:
+        content["finished_at"] = now
+    conn.execute(
+        "UPDATE artifacts SET status = ?, content_json = ?, updated_at = ? WHERE id = ?",
+        (status, to_json(content), now, int(row["id"])),
+    )
+    report = {
+        "paper_id": paper_id,
+        "artifact_id": int(row["id"]),
+        "status": status,
+        "error_message": content.get("error_message") or "",
+        "updated_at": now,
+    }
+    insert_app_event(
+        conn,
+        "paper_report.updated",
+        {
+            "paper": {
+                "paper_id": paper_id,
+                "id": paper_id,
+                "title": row["title"] or None,
+                "report_status": status,
+                "updated_at": now,
+            },
+            "paper_report": report,
+            "paper_id": paper_id,
+            "artifact_id": int(row["id"]),
+            "status": status,
+            "project_ids": [],
+            "stale": True,
+        },
+        created_at=now,
+        commit=False,
+    )
+
+
 def _row_to_worker_job(row: Any | None) -> dict[str, Any] | None:
     if not row:
         return None
@@ -419,7 +490,6 @@ def cleanup_stale_worker_jobs(
             WHERE status = 'running'
               AND (locked_at IS NULL OR locked_at < ?)
             ORDER BY locked_at NULLS FIRST, id
-            FOR UPDATE SKIP LOCKED
             LIMIT ?
             """,
             (cutoff, max(1, int(limit))),
@@ -431,7 +501,25 @@ def cleanup_stale_worker_jobs(
             "stale_worker_jobs_cancelled": 0,
         }
         for row in rows:
-            current = _row_to_worker_job(row)
+            preview = _row_to_worker_job(row)
+            if not preview:
+                continue
+            preview_payload = preview.get("payload") if isinstance(preview.get("payload"), dict) else {}
+            if preview.get("job_type") == "paper-report":
+                paper_id = int(preview_payload.get("paper_id") or 0)
+                if paper_id > 0 and getattr(conn, "dialect", "") == "postgres":
+                    conn.execute("SELECT pg_advisory_xact_lock(724023, ?)", (paper_id,))
+            locked = conn.execute(
+                f"""
+                SELECT {_worker_job_select_columns()}
+                FROM worker_jobs
+                WHERE id = ? AND status = 'running'
+                  AND (locked_at IS NULL OR locked_at < ?)
+                FOR UPDATE SKIP LOCKED
+                """,
+                (int(preview["id"]), cutoff),
+            ).fetchone()
+            current = _row_to_worker_job(locked)
             if not current:
                 continue
             attempts = int(current.get("attempts") or 0)
@@ -472,6 +560,7 @@ def cleanup_stale_worker_jobs(
                         """,
                         (now_text, message, now_text, int(worker_job["job_run_id"])),
                     )
+                _sync_stale_paper_report_domain(conn, worker_job, "cancelled", message, now_text)
                 insert_app_event(
                     conn,
                     "task.cancelled",
@@ -508,6 +597,7 @@ def cleanup_stale_worker_jobs(
                         """,
                         (now_text, message, now_text, int(worker_job["job_run_id"])),
                     )
+                _sync_stale_paper_report_domain(conn, worker_job or current, "failed", message, now_text)
                 insert_app_event(
                     conn,
                     "task.failed",
@@ -542,6 +632,7 @@ def cleanup_stale_worker_jobs(
                         """,
                         (message, now_text, int(worker_job["job_run_id"])),
                     )
+                _sync_stale_paper_report_domain(conn, worker_job or current, "queued", message, now_text)
                 insert_app_event(
                     conn,
                     "task.started",
@@ -618,6 +709,7 @@ def cancel_worker_job_before_dispatch(
     worker_id: str,
     lease_attempt: int,
     message: str = "Worker job cancelled",
+    domain_events: list[dict[str, Any]] | None = None,
     now: str | None = None,
 ) -> dict[str, Any]:
     finished = now or utc_now()
@@ -660,6 +752,14 @@ def cancel_worker_job_before_dispatch(
             created_at=finished,
             commit=False,
         )
+        for event in domain_events or []:
+            insert_app_event(
+                conn,
+                str(event.get("event_type") or ""),
+                event.get("payload") if isinstance(event.get("payload"), dict) else {},
+                created_at=finished,
+                commit=False,
+            )
         conn.commit()
         return {"worker_job": worker_job, "job_run": job_run, "cancelled": True}
     except Exception:

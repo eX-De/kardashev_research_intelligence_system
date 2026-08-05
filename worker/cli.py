@@ -1609,7 +1609,6 @@ def run_rank_job(conn: DbConnection, settings, *, job_id: int | None = None, tra
         result.update(generate_missing_project_judgments(conn, settings))
         result.update(sync_project_paper_recommendations(conn))
         result.update(ensure_paper_reports_for_recommendations(conn, settings=settings))
-        result.update(process_paper_report_queue(conn, settings))
         if active_job_id:
             update_job_meta(conn, active_job_id, "Ranking completed", result)
     return result
@@ -1641,8 +1640,9 @@ def run_generate_paper_reports_job(
     job_id: int | None = None,
     track_job_run: bool = True,
 ) -> dict[str, Any]:
+    """Legacy synchronous rollback path; never dispatched by the queue worker."""
     with _job_context(conn, "generate-paper-reports", job_id, track_job_run=track_job_run) as active_job_id:
-        result = ensure_paper_reports_for_recommendations(conn, settings=settings)
+        result = ensure_paper_reports_for_recommendations(conn, settings=settings, enqueue_jobs=False)
         result.update(process_paper_report_queue(conn, settings, limit=limit))
         if active_job_id:
             update_job_meta(conn, active_job_id, "Full paper reports generated", result)

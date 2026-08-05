@@ -160,6 +160,38 @@ export async function enqueueWorkerJobInTransaction(client, {
   return { job_run: jobRun, worker_job: workerJob };
 }
 
+async function cancelPaperReportDomainInTransaction(client, workerJob, now, message) {
+  if (workerJob?.job_type !== "paper-report") return;
+  const paperId = Number(workerJob.payload?.paper_id || 0);
+  if (!Number.isInteger(paperId) || paperId <= 0) return;
+  const selected = await client.query(
+    `SELECT * FROM artifacts
+     WHERE scope_type = 'paper' AND scope_id = $1 AND artifact_type = 'paper_report'
+     ORDER BY updated_at DESC, id DESC LIMIT 1 FOR UPDATE`,
+    [paperId]
+  );
+  const artifact = selected.rows[0];
+  if (!artifact || artifact.status === "removed") return;
+  const content = parseJson(artifact.content_json, {});
+  const expectedGeneration = String(workerJob.payload?.generation_id || "");
+  if (expectedGeneration && String(content.generation_id || "") !== expectedGeneration) return;
+  const updatedContent = { ...content, error_message: "", finished_at: now };
+  await client.query(
+    "UPDATE artifacts SET status = 'cancelled', content_json = $1, updated_at = $2 WHERE id = $3",
+    [toJson(updatedContent), now, artifact.id]
+  );
+  await insertAppEvent(SERVER_EVENTS.PAPER_REPORT_UPDATED, {
+    paper: { paper_id: paperId, id: paperId, title: artifact.title || null, report_status: "cancelled", updated_at: now },
+    paper_report: { paper_id: paperId, artifact_id: Number(artifact.id), status: "cancelled", error_message: "", updated_at: now },
+    paper_id: paperId,
+    artifact_id: Number(artifact.id),
+    status: "cancelled",
+    project_ids: [],
+    action: "worker_job_cancel",
+    message
+  }, { createdAt: now, client });
+}
+
 export async function enqueueWorkerJob(options = {}) {
   cleanJobType(options.jobType);
   cleanPriority(options.priority ?? 0);
@@ -250,6 +282,18 @@ export async function requestWorkerJobCancellation(
   const id = cleanWorkerJobId(workerJobId);
   const message = String(reason || "Cancellation requested").trim() || "Cancellation requested";
   return withTransaction(async (client) => {
+    const previewResult = await client.query(
+      "SELECT job_type, payload_json FROM worker_jobs WHERE id = $1",
+      [id]
+    );
+    const preview = previewResult.rows[0];
+    if (preview?.job_type === "paper-report") {
+      const previewPayload = parseJson(preview.payload_json, {});
+      const paperId = Number(previewPayload.paper_id || 0);
+      if (Number.isInteger(paperId) && paperId > 0) {
+        await client.query("SELECT pg_advisory_xact_lock($1, $2)", [724023, paperId]);
+      }
+    }
     const selected = await client.query(
       `
         SELECT id, job_run_id, job_type, status, priority, payload_json, result_json,
@@ -293,6 +337,7 @@ export async function requestWorkerJobCancellation(
         compactTaskEventPayload(workerJob, { status: "cancelled", message }),
         { createdAt: now, client }
       );
+      await cancelPaperReportDomainInTransaction(client, workerJob, now, message);
       return { worker_job: workerJob, job_run: jobRun, cancellation_requested: true, cancelled: true };
     }
 
@@ -317,6 +362,7 @@ export async function requestWorkerJobCancellation(
       compactTaskEventPayload(workerJob, { status: "cancel_requested", message }),
       { createdAt: now, client }
     );
+    await cancelPaperReportDomainInTransaction(client, workerJob, now, message);
     return { worker_job: workerJob, job_run: jobRun, cancellation_requested: true, cancelled: false };
   });
 }

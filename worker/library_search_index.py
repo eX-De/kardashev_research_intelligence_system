@@ -30,6 +30,8 @@ def enqueue_library_paper_index(
     conn: DbConnection,
     settings: Settings,
     paper_id: int,
+    *,
+    commit: bool = False,
 ) -> dict[str, object]:
     model = clean_unicode(settings.llm_embedding_model).strip()
     if not model:
@@ -63,7 +65,7 @@ def enqueue_library_paper_index(
         },
         priority=14,
         max_attempts=3,
-        commit=False,
+        commit=commit,
     )
     return {"queued": True, "worker_job_id": int(worker_job["id"]), "paper_id": int(paper_id)}
 

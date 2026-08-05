@@ -67,6 +67,8 @@ function createPapersFake(initialSettings = {}) {
   const paperChunks = [];
   const feedback = [];
   const artifacts = [];
+  const workerJobs = [];
+  const appEvents = [];
   const judgments = [
     {
       project_id: "7",
@@ -126,6 +128,9 @@ function createPapersFake(initialSettings = {}) {
     if (["BEGIN", "COMMIT", "ROLLBACK"].includes(normalized)) {
       txCalls.push(normalized);
       return { rows: [] };
+    }
+    if (normalized.startsWith("SELECT PG_ADVISORY_XACT_LOCK")) {
+      return { rows: [{}] };
     }
     if (normalized.startsWith("SELECT KEY, VALUE_JSON FROM APP_SETTINGS")) {
       return {
@@ -239,6 +244,10 @@ function createPapersFake(initialSettings = {}) {
     }
     if (normalized.startsWith("SELECT * FROM PAPERS WHERE ID = $1")) {
       return { rows: papers.filter((paper) => Number(paper.id) === Number(params[0])) };
+    }
+    if (normalized.startsWith("SELECT P.ID, P.TITLE, P.ARXIV_ID")) {
+      const paper = papers.find((row) => Number(row.id) === Number(params[0]));
+      return { rows: paper ? [{ ...paper, link: "" }] : [] };
     }
     if (normalized.startsWith("SELECT CHUNK_INDEX, SOURCE, PAGE_START, PAGE_END, TEXT, TOKEN_COUNT, CHAR_COUNT FROM ARXIV_TEXT_CHUNKS")) {
       return { rows: arxivChunks.filter((row) => Number(row.paper_id) === Number(params[0])) };
@@ -402,12 +411,69 @@ function createPapersFake(initialSettings = {}) {
           .map((row) => ({ paper_id: row.paper_id, project_id: row.project_id }))
       };
     }
+    if (normalized.startsWith("SELECT R.PAPER_ID, ARRAY_AGG")) {
+      const grouped = new Map();
+      for (const row of recommendations.filter((item) => ["pending", "accepted"].includes(item.state))) {
+        const ids = grouped.get(Number(row.paper_id)) || [];
+        ids.push(Number(row.project_id));
+        grouped.set(Number(row.paper_id), ids);
+      }
+      return {
+        rows: [...grouped].map(([paper_id, project_ids]) => ({
+          paper_id,
+          project_ids,
+          source_paper_ids: recommendations
+            .filter((row) => Number(row.paper_id) === paper_id)
+            .map((row) => Number(row.source_arxiv_paper_id))
+            .filter(Boolean)
+        }))
+      };
+    }
+    if (normalized.startsWith("SELECT R.PROJECT_ID FROM PROJECT_PAPER_RECOMMENDATIONS R")) {
+      return {
+        rows: recommendations
+          .filter((row) => Number(row.paper_id) === Number(params[0]))
+          .filter((row) => ["pending", "accepted"].includes(row.state))
+          .map((row) => ({ project_id: row.project_id }))
+      };
+    }
+    if (normalized.includes("FROM WORKER_JOBS") && normalized.includes("JOB_TYPE = 'PAPER-REPORT'")) {
+      const paperId = String(params[2] ?? params[1] ?? "");
+      return {
+        rows: workerJobs.filter((row) => {
+          const payload = JSON.parse(row.payload_json || "{}");
+          return row.job_type === "paper-report"
+            && ["queued", "running"].includes(row.status)
+            && String(payload.paper_id || "") === paperId;
+        })
+      };
+    }
     if (normalized.startsWith("SELECT * FROM ARTIFACTS")) {
       return {
         rows: artifacts.filter((artifact) => Number(artifact.scope_id) === Number(params[0]) && artifact.artifact_type === params[1])
       };
     }
     if (normalized.startsWith("INSERT INTO ARTIFACTS(")) {
+      if (params.length === 7) {
+        const artifact = {
+          id: nextId(artifacts, 600),
+          scope_type: "paper",
+          scope_id: String(params[0]),
+          artifact_type: params[1],
+          title: params[2],
+          content_markdown: "",
+          content_json: params[3],
+          status: "queued",
+          source_json: params[4],
+          model_provider_id: "",
+          model: "",
+          input_hash: params[5],
+          created_at: params[6],
+          updated_at: params[6]
+        };
+        artifacts.push(artifact);
+        return { rows: [artifact] };
+      }
       const artifact = {
         id: nextId(artifacts, 600),
         scope_type: "paper",
@@ -427,6 +493,42 @@ function createPapersFake(initialSettings = {}) {
       artifacts.push(artifact);
       return { rows: [{ id: artifact.id }] };
     }
+    if (normalized.startsWith("INSERT INTO WORKER_JOBS(")) {
+      const row = {
+        id: nextId(workerJobs, 700),
+        job_run_id: params[0],
+        job_type: params[1],
+        status: "queued",
+        priority: params[2],
+        payload_json: params[3],
+        result_json: "{}",
+        error_message: "",
+        attempts: 0,
+        max_attempts: params[4],
+        run_after: params[5],
+        locked_by: "",
+        locked_at: null,
+        cancel_requested_at: null,
+        cancel_reason: "",
+        created_at: params[6],
+        updated_at: params[6],
+        started_at: null,
+        finished_at: null
+      };
+      workerJobs.push(row);
+      return { rows: [row] };
+    }
+    if (normalized.startsWith("INSERT INTO APP_EVENTS")) {
+      const row = {
+        id: nextId(appEvents, 800),
+        event_type: params[0],
+        payload_json: params[1],
+        created_at: params[2],
+        published_at: null
+      };
+      appEvents.push(row);
+      return { rows: [row] };
+    }
     throw new Error(`Unexpected SQL in papers test: ${sql}`);
   }
 
@@ -439,6 +541,8 @@ function createPapersFake(initialSettings = {}) {
     paperChunks,
     feedback,
     artifacts,
+    workerJobs,
+    appEvents,
     judgments,
     recommendations,
     projectPapers,

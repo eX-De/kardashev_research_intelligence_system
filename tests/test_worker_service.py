@@ -25,7 +25,7 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         entries = worker_job_inventory()
         inventory_types = {str(entry["type"]) for entry in entries}
         self.assertEqual(inventory_types, set(service.SUPPORTED_WORKER_JOB_TYPES))
-        self.assertEqual(len(entries), 21)
+        self.assertEqual(len(entries), 20)
         for entry in entries:
             self.assertTrue(str(entry.get("label") or "").strip(), entry["type"])
             self.assertTrue(str(entry.get("concurrency_group") or "").strip(), entry["type"])
@@ -70,7 +70,7 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         self.assertEqual(observation["job_type"], "paper-report")
         self.assertEqual(observation["worker_id"], "worker-test")
         self.assertEqual(observation["attempt"], 2)
-        self.assertEqual(observation["concurrency_group"], "llm")
+        self.assertEqual(observation["concurrency_group"], "paper-report")
 
     def test_paper_report_result_marks_reader_sources_as_manual_imports(self) -> None:
         base = {
@@ -88,19 +88,15 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         automatic = _paper_report_result({**base, "source_type": "arxiv", "arxiv_id": "2607.00001"})
         self.assertFalse(automatic["manual_import"])
 
-    def test_dispatch_generate_paper_reports_parses_limit_payload(self) -> None:
-        conn = object()
-        settings = object()
+    def test_dispatch_generate_paper_reports_is_removed(self) -> None:
         worker_job = {
             "id": 7,
             "job_run_id": 42,
             "job_type": "generate-paper-reports",
             "payload": {"command": "generate-paper-reports", "args": ["--limit", "1"]},
         }
-        with patch("worker.service.run_generate_paper_reports_job", return_value={"ok": True}) as run:
-            self.assertEqual(service.dispatch_worker_job(conn, settings, worker_job), {"ok": True})
-
-        run.assert_called_once_with(conn, settings, limit=1, job_id=42, track_job_run=True)
+        with self.assertRaisesRegex(RuntimeError, "Unsupported worker job type"):
+            service.dispatch_worker_job(object(), object(), worker_job)
 
     def test_dispatch_ordinary_cli_job_disables_implicit_job_run_tracking(self) -> None:
         conn = object()
@@ -308,10 +304,10 @@ class WorkerServiceDispatchTests(unittest.TestCase):
             "job_type": "paper-report",
             "payload": {"command": "paper-report", "paper_id": 101, "body": {"force": True}},
         }
-        with patch("worker.service.generate_paper_reading_report", return_value={"ok": True}) as run:
+        with patch("worker.service.run_paper_report_worker_job", return_value={"ok": True}) as run:
             self.assertEqual(service.dispatch_worker_job(conn, settings, worker_job), {"ok": True})
 
-        run.assert_called_once_with(conn, settings, 101, {"force": True})
+        run.assert_called_once_with(conn, settings, worker_job)
 
     def test_run_once_claims_and_completes_a_worker_job(self) -> None:
         conn = Mock()
@@ -525,13 +521,13 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         self.assertEqual(artifact_events[0].args[2]["artifact_id"], 9)
         self.assertEqual(artifact_events[0].args[2]["project_id"], 5)
 
-    def test_run_once_publishes_paper_report_domain_event(self) -> None:
+    def test_run_once_does_not_publish_legacy_aggregate_report_event(self) -> None:
         conn = Mock()
         worker_job = {
             "id": 13,
             "job_run_id": 48,
-            "job_type": "generate-paper-reports",
-            "payload": {"command": "generate-paper-reports", "source": "manual", "args": []},
+            "job_type": "rank-papers",
+            "payload": {"command": "rank-papers", "source": "manual", "args": []},
             "started_at": "2026-07-06T10:00:00+00:00",
             "finished_at": None,
         }
@@ -551,76 +547,40 @@ class WorkerServiceDispatchTests(unittest.TestCase):
             service.run_once("worker-test")
 
         report_events = [call for call in insert_event.call_args_list if call.args[1] == "paper_report.updated"]
-        self.assertEqual(len(report_events), 1)
-        payload = report_events[0].args[2]
-        self.assertIsNone(payload["paper_id"])
-        self.assertEqual(payload["status"], "done")
-        self.assertEqual(payload["result"]["paper_reports_done"], 2)
+        self.assertEqual(report_events, [])
 
     def test_run_once_toasts_when_manual_import_report_completes(self) -> None:
         conn = Mock()
         worker_job = {
             "id": 14,
-            "job_run_id": 49,
-            "job_type": "generate-paper-reports",
-            "payload": {"command": "generate-paper-reports", "source": "paper-report-queue", "args": ["--limit", "1"]},
+            "job_run_id": None,
+            "job_type": "paper-report",
+            "payload": {"command": "paper-report", "source": "reader-import", "paper_id": 27},
             "started_at": "2026-07-21T10:00:00+00:00",
             "finished_at": None,
         }
-        result_payload = {
-            "paper_reports_done": 2,
-            "paper_reports_failed": 0,
-            "paper_reports_completed": [
-                {
-                    "paper_id": 27,
-                    "artifact_id": 61,
-                    "title": "A Manually Imported Paper",
-                    "status": "done",
-                    "source_type": "upload",
-                    "manual_import": True,
-                    "updated_at": "2026-07-21T10:00:15+00:00",
-                    "error_message": "",
-                },
-                {
-                    "paper_id": 28,
-                    "artifact_id": 62,
-                    "title": "Daily Recommendation Paper",
-                    "status": "done",
-                    "source_type": "arxiv",
-                    "manual_import": False,
-                    "updated_at": "2026-07-21T10:00:16+00:00",
-                    "error_message": "",
-                },
-            ],
-            "paper_reports_failures": [],
+        report_event = {
+            "event_type": "paper_report.updated",
+            "payload": {
+                "paper_id": 27,
+                "artifact_id": 61,
+                "status": "done",
+                "notification": {"channels": ["toast"], "severity": "ok", "title": "论文报告生成完成", "detail": "A Manually Imported Paper"},
+            },
         }
+        result_payload = {"paper_reports_done": 1, "domain_events": [report_event]}
+        completed_result = {"worker_job": {**worker_job, "status": "completed"}, "job_run": {}, "cancelled": False}
         with patch("worker.service.connect", return_value=conn), \
             patch("worker.service.claim_next_worker_job", return_value={"worker_job": worker_job, "job_run": {}}), \
             patch("worker.service.insert_app_event") as insert_event, \
             patch("worker.service.load_settings", return_value=object()), \
             patch("worker.service.apply_stored_settings", return_value=object()), \
             patch("worker.service.dispatch_worker_job", return_value=result_payload), \
-            patch(
-                "worker.service.complete_worker_job",
-                return_value={
-                    "worker_job": {**worker_job, "status": "completed", "cancel_requested_at": "now"},
-                    "job_run": {},
-                    "cancelled": False,
-                },
-            ):
+            patch("worker.service.complete_worker_job", return_value=completed_result) as complete:
             service.run_once("worker-test")
 
-        report_events = [call for call in insert_event.call_args_list if call.args[1] == "paper_report.updated"]
-        self.assertEqual(len(report_events), 2)
-        payload = next(call.args[2] for call in report_events if call.args[2]["paper_id"] == 27)
-        self.assertEqual(payload["paper_id"], 27)
-        self.assertEqual(payload["artifact_id"], 61)
-        self.assertEqual(payload["notification"]["channels"], ["toast"])
-        self.assertEqual(payload["notification"]["severity"], "ok")
-        self.assertEqual(payload["notification"]["title"], "论文报告生成完成")
-        self.assertEqual(payload["notification"]["detail"], "A Manually Imported Paper")
-        automatic_payload = next(call.args[2] for call in report_events if call.args[2]["paper_id"] == 28)
-        self.assertNotIn("notification", automatic_payload)
+        self.assertEqual([call for call in insert_event.call_args_list if call.args[1] == "paper_report.updated"], [])
+        self.assertEqual(complete.call_args.kwargs["domain_events"], [report_event])
 
     def test_reader_import_domain_event_toasts_success_and_partial_failure(self) -> None:
         worker_job = {
@@ -685,17 +645,13 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         event_names = [call.args[1] for call in insert_event.call_args_list]
         self.assertNotIn("task.finished", event_names)
         self.assertIn("artifact.updated", event_names)
-        self.assertIn("paper_report.updated", event_names)
+        self.assertNotIn("paper_report.updated", event_names)
         self.assertIn("papers.changed", event_names)
         self.assertIn("project.updated", event_names)
 
         artifact_event = next(call for call in insert_event.call_args_list if call.args[1] == "artifact.updated")
         self.assertEqual(artifact_event.args[2]["artifact_id"], 36)
         self.assertEqual(artifact_event.args[2]["artifact"]["artifact_type"], "daily_report")
-
-        report_event = next(call for call in insert_event.call_args_list if call.args[1] == "paper_report.updated")
-        self.assertEqual(report_event.args[2]["status"], "queued")
-        self.assertEqual(report_event.args[2]["result"]["paper_reports_queued"], 2)
 
         papers_event = next(call for call in insert_event.call_args_list if call.args[1] == "papers.changed")
         self.assertEqual(papers_event.args[2]["result"]["arxiv_papers_inserted"], 5)

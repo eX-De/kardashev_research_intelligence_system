@@ -5,6 +5,7 @@ import json
 from .db_types import DbConnection, DbRow
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,8 @@ from .config import Settings
 from .artifacts import PAPER_REPORT_ARTIFACT_TYPE, content_hash, upsert_artifact
 from .artifact_index import enqueue_artifact_index
 from .library_search_index import enqueue_library_paper_index
-from .db import clean_unicode, from_json, utc_now
+from .db import clean_unicode, from_json, to_json, utc_now
+from .queue import enqueue_worker_job, insert_app_event, task_event_payload
 from .papers import (
     replace_paper_chunks,
     upsert_paper_asset,
@@ -129,6 +131,7 @@ def _paper_report_state(
         "model": row["model"] if row else "",
         "source_text_hash": source.get("source_text_hash") or (row["input_hash"] if row else ""),
         "source_project_ids": content.get("source_project_ids") if isinstance(content.get("source_project_ids"), list) else [],
+        "generation_id": clean_unicode(str(content.get("generation_id") or "")).strip(),
         "report_markdown": row["content_markdown"] if row else "",
         "error_message": content.get("error_message") or "",
         "created_at": created_at,
@@ -151,6 +154,7 @@ def _save_paper_report_state(
         "prompt": state.get("prompt") or "",
         "system_prompt": state.get("system_prompt") or "",
         "source_project_ids": state.get("source_project_ids") or [],
+        "generation_id": state.get("generation_id") or "",
         "error_message": state.get("error_message") or "",
         "started_at": state.get("started_at"),
         "finished_at": state.get("finished_at"),
@@ -158,7 +162,7 @@ def _save_paper_report_state(
     source_key = _report_source_key(int(state["paper_id"]))
     source = {
         "source_key": source_key,
-        "generated_from": "paper_report_queue",
+        "generated_from": "paper_report_job",
         "source_text_hash": state.get("source_text_hash") or "",
     }
     markdown = clean_unicode(str(state.get("report_markdown") or ""))
@@ -277,12 +281,16 @@ def ensure_paper_reports_for_recommendations(
     conn: DbConnection,
     paper_ids: list[int] | tuple[int, ...] | set[int] | None = None,
     settings: Settings | None = None,
+    *,
+    enqueue_jobs: bool = True,
 ) -> dict[str, int]:
     projects_by_paper = _source_projects_for_recommended_papers(conn, paper_ids)
     prompt = resolve_paper_reader_prompt(settings) if settings else PAPER_READER_DEFAULT_PROMPT
     created = 0
     refreshed = 0
     preserved = 0
+    jobs_created = 0
+    jobs_deduplicated = 0
     for paper_id, project_ids in projects_by_paper.items():
         state = _paper_report_state(conn, paper_id)
         if not state:
@@ -300,8 +308,7 @@ def ensure_paper_reports_for_recommendations(
             )
             _save_paper_report_state(conn, state, commit=False)
             created += 1
-            continue
-        if state.get("source_project_ids") != project_ids:
+        elif state.get("source_project_ids") != project_ids:
             state["source_project_ids"] = project_ids
             if not state.get("prompt"):
                 state["prompt"] = prompt
@@ -311,12 +318,24 @@ def ensure_paper_reports_for_recommendations(
             refreshed += 1
         else:
             preserved += 1
+        if enqueue_jobs:
+            materialized = ensure_paper_report_worker_job(
+                conn,
+                paper_id,
+                source="daily-paper-recommendations",
+                prompt=prompt,
+                commit=False,
+            )
+            jobs_created += int(bool(materialized.get("created")))
+            jobs_deduplicated += int(bool(materialized.get("deduplicated")))
     conn.commit()
     return {
         "paper_reports_candidates": len(projects_by_paper),
         "paper_reports_queued": created,
         "paper_reports_refreshed": refreshed,
         "paper_reports_preserved": preserved,
+        "paper_report_jobs_created": jobs_created,
+        "paper_report_jobs_deduplicated": jobs_deduplicated,
     }
 
 
@@ -371,6 +390,7 @@ def queue_paper_report(
     *,
     force: bool = False,
     prompt: str | None = None,
+    commit: bool = True,
 ) -> dict[str, int]:
     if not conn.execute("SELECT id FROM papers WHERE id = ?", (paper_id,)).fetchone():
         raise RuntimeError(f"Paper not found: {paper_id}")
@@ -392,7 +412,8 @@ def queue_paper_report(
             }
         )
         _save_paper_report_state(conn, state, commit=False)
-        conn.commit()
+        if commit:
+            conn.commit()
         return {"paper_reports_queued": 1}
     if str(state.get("status") or "") == "removed":
         state.update(
@@ -407,7 +428,8 @@ def queue_paper_report(
             }
         )
         _save_paper_report_state(conn, state, commit=False)
-        conn.commit()
+        if commit:
+            conn.commit()
         return {"paper_reports_queued": 1}
     if force:
         state.update(
@@ -422,9 +444,211 @@ def queue_paper_report(
             }
         )
         _save_paper_report_state(conn, state, commit=False)
-        conn.commit()
+        if commit:
+            conn.commit()
         return {"paper_reports_requeued": 1}
     return {"paper_reports_queued": 0}
+
+
+def paper_report_concurrency_key(paper_id: int) -> str:
+    return f"paper:{int(paper_id)}:report"
+
+
+def _lock_paper_report(conn: DbConnection, paper_id: int) -> None:
+    if getattr(conn, "dialect", "") == "postgres":
+        conn.execute("SELECT pg_advisory_xact_lock(724023, ?)", (int(paper_id),))
+
+
+def _active_paper_report_jobs(conn: DbConnection, paper_id: int) -> list[DbRow]:
+    key = paper_report_concurrency_key(paper_id)
+    if getattr(conn, "dialect", "") == "postgres":
+        return conn.execute(
+            """
+            SELECT id, status, payload_json
+            FROM worker_jobs
+            WHERE job_type = 'paper-report'
+              AND status IN ('queued', 'running')
+              AND (
+                payload_json::jsonb ->> 'dedupe_key' = ?
+                OR payload_json::jsonb ->> 'paper_id' = ?
+              )
+            ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, id DESC
+            FOR UPDATE
+            """,
+            (key, str(int(paper_id))),
+        ).fetchall()
+    rows = conn.execute(
+        """
+        SELECT id, status, payload_json FROM worker_jobs
+        WHERE job_type = 'paper-report' AND status IN ('queued', 'running')
+        ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, id DESC
+        """
+    ).fetchall()
+    return [
+        row for row in rows
+        if (lambda payload: payload.get("dedupe_key") == key or int(payload.get("paper_id") or 0) == int(paper_id))(
+            from_json(row["payload_json"], {})
+        )
+    ]
+
+
+def ensure_paper_report_worker_job(
+    conn: DbConnection,
+    paper_id: int,
+    *,
+    source: str,
+    force: bool = False,
+    prompt: str | None = None,
+    body: dict[str, object] | None = None,
+    commit: bool = True,
+) -> dict[str, object]:
+    """Atomically materialize one report artifact and its one active worker job."""
+    try:
+        _lock_paper_report(conn, paper_id)
+        state = _paper_report_state(conn, paper_id)
+        if state is None:
+            raise RuntimeError(f"Paper not found: {paper_id}")
+        active = _active_paper_report_jobs(conn, paper_id)
+        if len(active) > 1:
+            keeper = active[0]
+            cancelled_at = utc_now()
+            for surplus in active[1:]:
+                cancelled = conn.execute(
+                    """
+                    UPDATE worker_jobs
+                    SET status = 'cancelled', cancel_requested_at = COALESCE(cancel_requested_at, ?),
+                        cancel_reason = CASE WHEN cancel_reason = '' THEN ? ELSE cancel_reason END,
+                        locked_by = '', locked_at = NULL, finished_at = ?, updated_at = ?
+                    WHERE id = ? AND status IN ('queued', 'running')
+                    RETURNING *
+                    """,
+                    (
+                        cancelled_at,
+                        "Duplicate legacy paper-report job",
+                        cancelled_at,
+                        cancelled_at,
+                        int(surplus["id"]),
+                    ),
+                ).fetchone()
+                if not cancelled:
+                    continue
+                cancelled_job = dict(cancelled)
+                cancelled_job["payload"] = from_json(cancelled_job.get("payload_json"), {})
+                insert_app_event(
+                    conn,
+                    "task.cancelled",
+                    task_event_payload(
+                        cancelled_job,
+                        "cancelled",
+                        message="Duplicate legacy paper-report job",
+                    ),
+                    created_at=cancelled_at,
+                    commit=False,
+                )
+            active = [keeper]
+        running = next((row for row in active if row["status"] == "running"), None)
+        queued = next((row for row in active if row["status"] == "queued"), None)
+        if running:
+            running_payload = from_json(running["payload_json"], {})
+            key = paper_report_concurrency_key(paper_id)
+            if running_payload.get("dedupe_key") != key or running_payload.get("concurrency_key") != key:
+                running_payload.update({"paper_id": int(paper_id), "dedupe_key": key, "concurrency_key": key})
+                conn.execute(
+                    "UPDATE worker_jobs SET payload_json = ?, updated_at = ? WHERE id = ?",
+                    (to_json(running_payload), utc_now(), int(running["id"])),
+                )
+            if commit:
+                conn.commit()
+            return {"created": False, "deduplicated": True, "worker_job_id": int(running["id"])}
+        queued_payload = from_json(queued["payload_json"], {}) if queued else {}
+        if (
+            queued
+            and not force
+            and state.get("artifact_id")
+            and state.get("status") == "queued"
+            and state.get("generation_id")
+            and queued_payload.get("generation_id") == state.get("generation_id")
+        ):
+            if commit:
+                conn.commit()
+            return {"created": False, "deduplicated": True, "worker_job_id": int(queued["id"])}
+        if state.get("artifact_id") and state.get("status") != "queued" and not force:
+            if commit:
+                conn.commit()
+            return {"created": False, "deduplicated": True, "worker_job_id": None}
+
+        generation_id = str(uuid.uuid4())
+        prompt_text = clean_unicode(str(prompt or state.get("prompt") or PAPER_READER_DEFAULT_PROMPT)).strip()
+        state.update(
+            {
+                "status": "queued",
+                "prompt": prompt_text,
+                "system_prompt": PAPER_READER_ANALYSIS_SYSTEM,
+                "generation_id": generation_id,
+                "report_markdown": "",
+                "error_message": "",
+                "started_at": None,
+                "finished_at": None,
+            }
+        )
+        artifact = _save_paper_report_state(conn, state, commit=False)
+        key = paper_report_concurrency_key(paper_id)
+        payload = {
+            "command": "paper-report",
+            "source": source,
+            "args": [str(int(paper_id))],
+            "paper_id": int(paper_id),
+            "generation_id": generation_id,
+            "concurrency_key": key,
+            "dedupe_key": key,
+            "force": bool(force),
+            "body": {**(body or {}), "prompt": prompt_text, "force": bool(force)},
+        }
+        created = False
+        if queued:
+            conn.execute(
+                """
+                UPDATE worker_jobs
+                SET payload_json = ?, priority = GREATEST(priority, 10), updated_at = ?,
+                    cancel_requested_at = NULL, cancel_reason = ''
+                WHERE id = ?
+                """,
+                (to_json(payload), utc_now(), int(queued["id"])),
+            )
+            worker_job_id = int(queued["id"])
+        else:
+            worker_job = enqueue_worker_job(
+                conn,
+                "paper-report",
+                payload,
+                priority=10,
+                max_attempts=2,
+                message=f"paper-report queued for paper {int(paper_id)}",
+                commit=False,
+            )
+            worker_job_id = int(worker_job["id"])
+            created = True
+        insert_app_event(
+            conn,
+            "paper_report.updated",
+            {
+                "paper": {"paper_id": int(paper_id), "id": int(paper_id), "report_status": "queued", "updated_at": state.get("updated_at")},
+                "paper_report": {**_paper_report_result(state), "updated_at": artifact.get("updated_at")},
+                "paper_id": int(paper_id),
+                "artifact_id": int(artifact["id"]),
+                "status": "queued",
+                "worker_job_id": worker_job_id,
+                "generation_id": generation_id,
+                "project_ids": [],
+            },
+            commit=False,
+        )
+        if commit:
+            conn.commit()
+        return {"created": created, "deduplicated": not created, "worker_job_id": worker_job_id}
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def paper_report_payload(conn: DbConnection, paper_id: int) -> dict[str, object] | None:
@@ -882,6 +1106,294 @@ def process_paper_report_queue(
         "paper_reports_completed": completed_reports,
         "paper_reports_failures": failed_reports,
     }
+
+
+class PaperReportCancellationRequested(RuntimeError):
+    pass
+
+
+class PaperReportSuperseded(RuntimeError):
+    pass
+
+
+def _worker_job_cancel_requested(conn: DbConnection, worker_job_id: int, *, for_update: bool = False) -> bool:
+    lock_clause = " FOR UPDATE" if for_update else ""
+    row = conn.execute(
+        f"SELECT cancel_requested_at FROM worker_jobs WHERE id = ?{lock_clause}",
+        (int(worker_job_id),),
+    ).fetchone()
+    return bool(row and row["cancel_requested_at"])
+
+
+def _paper_report_event(state: dict[str, Any], status: str, *, notification: bool = False) -> dict[str, object]:
+    result = _paper_report_result(state)
+    payload: dict[str, object] = {
+        "paper": {
+            "paper_id": int(state["paper_id"]),
+            "id": int(state["paper_id"]),
+            "title": state.get("title") or None,
+            "report_status": status,
+            "updated_at": result.get("updated_at"),
+        },
+        "paper_report": result,
+        "paper_id": int(state["paper_id"]),
+        "artifact_id": state.get("artifact_id"),
+        "status": status,
+        "project_ids": [],
+    }
+    if notification and status == "done" and bool(result.get("manual_import")):
+        notification_key = state.get("artifact_id") or state.get("paper_id")
+        payload["notification"] = {
+            "id": f"manual-paper-report-completed-{notification_key}",
+            "type": "manual_paper_report_completed",
+            "severity": "ok",
+            "title": "论文报告生成完成",
+            "detail": state.get("title") or f"论文 {state['paper_id']}",
+            "created_at": result.get("updated_at"),
+            "source": {
+                "paper_id": int(state["paper_id"]),
+                "artifact_id": state.get("artifact_id"),
+                "source_type": result.get("source_type"),
+            },
+            "channels": ["toast"],
+            "requires_action": False,
+        }
+    return {"event_type": "paper_report.updated", "payload": payload}
+
+
+def _acquire_paper_report_session_lock(conn: DbConnection, paper_id: int) -> None:
+    if getattr(conn, "dialect", "") == "postgres":
+        conn.execute("SELECT pg_advisory_lock(724024, ?)", (int(paper_id),))
+        conn.commit()
+
+
+def _release_paper_report_session_lock(conn: DbConnection, paper_id: int) -> None:
+    if getattr(conn, "dialect", "") == "postgres":
+        conn.execute("SELECT pg_advisory_unlock(724024, ?)", (int(paper_id),))
+
+
+def _materialize_legacy_paper_report_worker_job(
+    conn: DbConnection,
+    settings: Settings,
+    worker_job: dict[str, Any],
+    paper_id: int,
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Bind a pre-Phase-5 paper job to its artifact before doing any work.
+
+    A worker can claim a legacy queued job before the Node startup scanner runs,
+    so the execution path must be able to complete the migration itself.
+    """
+    _lock_paper_report(conn, paper_id)
+    lock_clause = " FOR UPDATE" if getattr(conn, "dialect", "") == "postgres" else ""
+    current_job = conn.execute(
+        f"SELECT status, cancel_requested_at, payload_json FROM worker_jobs WHERE id = ?{lock_clause}",
+        (int(worker_job["id"]),),
+    ).fetchone()
+    if not current_job or current_job["status"] != "running":
+        conn.rollback()
+        raise PaperReportSuperseded(f"Paper report worker job is no longer active: {worker_job['id']}")
+    if current_job["cancel_requested_at"]:
+        conn.rollback()
+        raise PaperReportCancellationRequested("Paper report generation cancelled")
+
+    state = _paper_report_state(conn, paper_id)
+    if state is None:
+        conn.rollback()
+        raise RuntimeError(f"Paper not found: {paper_id}")
+    stored_payload = from_json(current_job["payload_json"], {})
+    if not isinstance(stored_payload, dict):
+        stored_payload = {}
+    stored_generation = clean_unicode(str(stored_payload.get("generation_id") or "")).strip()
+    state_generation = clean_unicode(str(state.get("generation_id") or "")).strip()
+    if stored_generation and stored_generation == state_generation:
+        conn.commit()
+        worker_job["payload"] = stored_payload
+        worker_job["payload_json"] = to_json(stored_payload)
+        return state, stored_payload
+    if state_generation:
+        conn.rollback()
+        raise PaperReportSuperseded(f"Paper report generation was replaced: {paper_id}")
+    generation_id = str(uuid.uuid4())
+    body = payload.get("body") if isinstance(payload.get("body"), dict) else {}
+    prompt = clean_unicode(str(body.get("prompt") or payload.get("prompt") or "")).strip()
+    state.update(
+        {
+            "status": "queued",
+            "prompt": prompt or state.get("prompt") or _settings_report_prompt(settings),
+            "system_prompt": state.get("system_prompt") or PAPER_READER_ANALYSIS_SYSTEM,
+            "generation_id": generation_id,
+            "error_message": "",
+            "started_at": None,
+            "finished_at": None,
+        }
+    )
+    _save_paper_report_state(conn, state, commit=False)
+    key = paper_report_concurrency_key(paper_id)
+    normalized_payload = {
+        "command": "paper-report",
+        "source": payload.get("source") or "paper-report-legacy-worker",
+        "args": payload.get("args") if isinstance(payload.get("args"), list) else [str(paper_id)],
+        **payload,
+        "paper_id": paper_id,
+        "generation_id": generation_id,
+        "concurrency_key": key,
+        "dedupe_key": key,
+    }
+    now = utc_now()
+    conn.execute(
+        "UPDATE worker_jobs SET payload_json = ?, updated_at = ? WHERE id = ? AND status = 'running'",
+        (to_json(normalized_payload), now, int(worker_job["id"])),
+    )
+    event = _paper_report_event(state, "queued")
+    event["payload"].update(
+        {
+            "action": "legacy_worker_materialized",
+            "worker_job_id": int(worker_job["id"]),
+            "generation_id": generation_id,
+        }
+    )
+    insert_app_event(conn, event["event_type"], event["payload"], commit=False)
+    conn.commit()
+    worker_job["payload"] = normalized_payload
+    worker_job["payload_json"] = to_json(normalized_payload)
+    return state, normalized_payload
+
+
+def run_paper_report_worker_job(
+    conn: DbConnection,
+    settings: Settings,
+    worker_job: dict[str, Any],
+) -> dict[str, Any]:
+    payload = worker_job.get("payload") if isinstance(worker_job.get("payload"), dict) else from_json(worker_job.get("payload_json"), {})
+    paper_id = int(payload.get("paper_id") or 0)
+    if paper_id <= 0:
+        raise RuntimeError("paper_id is required")
+    generation_id = clean_unicode(str(payload.get("generation_id") or "")).strip()
+    worker_job_id = int(worker_job["id"])
+    _acquire_paper_report_session_lock(conn, paper_id)
+    try:
+        state = _paper_report_state(conn, paper_id)
+        if not generation_id:
+            state, payload = _materialize_legacy_paper_report_worker_job(
+                conn, settings, worker_job, paper_id, payload
+            )
+            generation_id = clean_unicode(str(payload.get("generation_id") or "")).strip()
+        elif state is None or not state.get("artifact_id"):
+            raise RuntimeError(f"Paper report not found: {paper_id}")
+        if generation_id and state.get("generation_id") != generation_id:
+            return {"paper_id": paper_id, "superseded": True, "paper_report": paper_report_payload(conn, paper_id)}
+        if state.get("status") in {"cancelled", "removed"} or _worker_job_cancel_requested(conn, worker_job_id):
+            raise PaperReportCancellationRequested("Paper report generation cancelled")
+
+        state.update({"status": "processing", "error_message": "", "started_at": utc_now(), "finished_at": None})
+        _save_paper_report_state(conn, state, commit=False)
+        insert_app_event(conn, "paper_report.updated", _paper_report_event(state, "processing")["payload"], commit=False)
+        conn.commit()
+
+        if _worker_job_cancel_requested(conn, worker_job_id):
+            raise PaperReportCancellationRequested("Paper report generation cancelled")
+        paper_text = _ensure_full_text(conn, settings, paper_id)
+        if not paper_text:
+            raise RuntimeError("Full paper text is missing")
+        if _worker_job_cancel_requested(conn, worker_job_id):
+            raise PaperReportCancellationRequested("Paper report generation cancelled")
+        text_hash = hashlib.sha256(paper_text.encode("utf-8", "replace")).hexdigest()
+        prompt = clean_unicode(str(state.get("prompt") or "")).strip() or _settings_report_prompt(settings)
+        provider_id = settings.paper_report_provider_id or settings.llm_chat_provider_id
+        model = settings.paper_report_model or settings.llm_chat_model
+        raw_response = _call_chat_text(
+            settings,
+            _analysis_messages(paper_text, prompt),
+            response_format={"type": "json_object"},
+            provider_id=provider_id,
+            model=model,
+            purpose="Full paper report generation",
+        )
+        generated_title, markdown = _parse_report_generation_response(raw_response, clean_unicode(str(state.get("title") or "")).strip())
+
+        _lock_paper_report(conn, paper_id)
+        if _worker_job_cancel_requested(conn, worker_job_id, for_update=True):
+            raise PaperReportCancellationRequested("Paper report generation cancelled")
+        current = _paper_report_state(conn, paper_id)
+        if current is None or (generation_id and current.get("generation_id") != generation_id):
+            conn.rollback()
+            return {"paper_id": paper_id, "superseded": True, "paper_report": paper_report_payload(conn, paper_id)}
+        if current.get("status") in {"cancelled", "removed"}:
+            raise PaperReportCancellationRequested("Paper report generation cancelled")
+        finished = utc_now()
+        if generated_title and generated_title != current.get("title"):
+            conn.execute("UPDATE papers SET title = ?, updated_at = ? WHERE id = ?", (generated_title, finished, paper_id))
+            current["title"] = generated_title
+            enqueue_library_paper_index(conn, settings, paper_id, commit=False)
+        current.update(
+            {
+                "status": "done",
+                "prompt": prompt,
+                "system_prompt": PAPER_READER_ANALYSIS_SYSTEM,
+                "model_provider_id": provider_id,
+                "model": model,
+                "source_text_hash": text_hash,
+                "report_markdown": markdown,
+                "error_message": "",
+                "finished_at": finished,
+            }
+        )
+        artifact = _save_paper_report_state(conn, current, commit=False)
+        enqueue_artifact_index(conn, settings, artifact, commit=False)
+        return {
+            "paper_id": paper_id,
+            "paper_report": paper_report_payload_from_state(current),
+            "paper_reports_done": 1,
+            "domain_events": [_paper_report_event(current, "done", notification=True)],
+        }
+    finally:
+        _release_paper_report_session_lock(conn, paper_id)
+
+
+def paper_report_payload_from_state(state: dict[str, Any]) -> dict[str, object]:
+    return {
+        **_paper_report_result(state),
+        "prompt": state.get("prompt") or "",
+        "system_prompt": state.get("system_prompt") or "",
+        "model_provider_id": state.get("model_provider_id") or "",
+        "model": state.get("model") or "",
+        "source_project_ids": state.get("source_project_ids") or [],
+        "report_markdown": state.get("report_markdown") or "",
+        "error_message": state.get("error_message") or "",
+        "created_at": state.get("created_at"),
+        "started_at": state.get("started_at"),
+        "finished_at": state.get("finished_at"),
+    }
+
+
+def stage_paper_report_terminal_failure(
+    conn: DbConnection,
+    worker_job: dict[str, Any],
+    error: Exception,
+) -> tuple[str, list[dict[str, object]]]:
+    payload = worker_job.get("payload") if isinstance(worker_job.get("payload"), dict) else from_json(worker_job.get("payload_json"), {})
+    paper_id = int(payload.get("paper_id") or 0)
+    generation_id = clean_unicode(str(payload.get("generation_id") or "")).strip()
+    conn.rollback()
+    if isinstance(error, PaperReportSuperseded):
+        return "superseded", []
+    _lock_paper_report(conn, paper_id)
+    _worker_job_cancel_requested(conn, int(worker_job["id"]), for_update=True)
+    state = _paper_report_state(conn, paper_id)
+    if state is None or (generation_id and state.get("generation_id") != generation_id):
+        return "superseded", []
+    cancelled = isinstance(error, PaperReportCancellationRequested) or _worker_job_cancel_requested(conn, int(worker_job["id"]))
+    status = "cancelled" if cancelled else "failed"
+    state.update(
+        {
+            "status": status,
+            "error_message": "" if cancelled else clean_unicode(str(error))[:2000],
+            "finished_at": utc_now(),
+        }
+    )
+    _save_paper_report_state(conn, state, commit=False)
+    return status, [_paper_report_event(state, status)]
 
 
 def ensure_report_ready_for_paper(

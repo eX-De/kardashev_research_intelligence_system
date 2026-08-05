@@ -136,6 +136,8 @@ function createReaderFake() {
   ];
   const calls = [];
   const referencePapers = [];
+  const workerJobs = [];
+  const appEvents = [];
 
   function reportRows() {
     return artifacts.filter((artifact) => artifact.scope_type === "paper" && artifact.artifact_type === "paper_report" && artifact.status !== "removed");
@@ -160,6 +162,28 @@ function createReaderFake() {
         grouped.set(artifact.status, current);
       }
       return { rows: [...grouped.values()].map((row) => ({ ...row, count: String(row.count) })) };
+    }
+    if (normalized.startsWith("SELECT PG_ADVISORY_XACT_LOCK")) return { rows: [{}] };
+    if (normalized.startsWith("SELECT P.ID, P.TITLE, P.ARXIV_ID")) {
+      return { rows: papers.filter((paper) => Number(paper.id) === Number(params[0])) };
+    }
+    if (normalized.startsWith("SELECT ID, JOB_RUN_ID, JOB_TYPE, STATUS, PAYLOAD_JSON")) {
+      return { rows: workerJobs.filter((job) => Number(JSON.parse(job.payload_json).paper_id) === Number(params[2])) };
+    }
+    if (normalized.startsWith("INSERT INTO WORKER_JOBS")) {
+      const row = {
+        id: String(workerJobs.length + 1), job_run_id: null, job_type: params[1], status: "queued",
+        priority: String(params[2]), payload_json: params[3], result_json: "{}", error_message: "",
+        attempts: "0", max_attempts: String(params[4]), run_after: params[5], locked_by: "", locked_at: null,
+        cancel_requested_at: null, cancel_reason: "", created_at: params[6], updated_at: params[6], started_at: null, finished_at: null
+      };
+      workerJobs.push(row);
+      return { rows: [row] };
+    }
+    if (normalized.startsWith("INSERT INTO APP_EVENTS")) {
+      const row = { id: String(appEvents.length + 1), event_type: params[0], payload_json: params[1], created_at: params[2], published_at: null };
+      appEvents.push(row);
+      return { rows: [row] };
     }
     if (normalized.startsWith("WITH CHAT_STATS AS")) {
       let conversationRows = papers
@@ -356,6 +380,13 @@ function createReaderFake() {
       }
       return { rows: [], rowCount: 1 };
     }
+    if (normalized.startsWith("UPDATE ARTIFACTS SET STATUS = $1")) {
+      const artifact = artifacts.find((item) => Number(item.id) === Number(params[3]));
+      artifact.status = params[0];
+      artifact.content_json = params[1];
+      artifact.updated_at = params[2];
+      return { rows: [artifact], rowCount: 1 };
+    }
     if (normalized.startsWith("UPDATE ARTIFACTS SET TITLE =")) {
       const artifact = artifacts.find((item) => Number(item.id) === Number(params[5]));
       artifact.title = params[0];
@@ -367,7 +398,7 @@ function createReaderFake() {
       artifact.model = "";
       artifact.input_hash = params[3];
       artifact.updated_at = params[4];
-      return { rows: [], rowCount: 1 };
+      return { rows: [artifact], rowCount: 1 };
     }
     if (normalized.startsWith("UPDATE ARXIV_PAPERS SET TITLE")) {
       const paper = arxivPapers.find((item) => Number(item.id) === Number(params[2]));

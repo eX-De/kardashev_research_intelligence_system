@@ -230,7 +230,8 @@ export function PaperLibraryView({
       title: importTargetTitle(target, t)
     }));
   }), [activeImportItems, t]);
-  const reportQueueStatus = jobStatusQuery.data?.scheduler?.paper_report_queue || {};
+  const reportQueueStatus = jobStatusQuery.data?.worker?.queue?.by_type?.["paper-report"] || {};
+  const reportWorkerCapacity = Math.max(1, Number(jobStatusQuery.data?.worker?.online_workers || 0));
 
   useEffect(() => {
     if (!trackedImportJobIds.length) return undefined;
@@ -637,9 +638,9 @@ export function PaperLibraryView({
             <i aria-hidden="true" />
             {!jobStatusQuery.hasData
               ? t("library.queue.loading")
-              : reportQueueStatus.enabled
-                ? t("library.queue.capacity", { active: Number(reportQueueStatus.active || 0), capacity: Number(reportQueueStatus.concurrency || 0) })
-                : t("library.queue.disabled")}
+              : jobStatusQuery.data?.worker?.required && !jobStatusQuery.data?.worker?.available
+                ? t("library.queue.disabled")
+                : t("library.queue.capacity", { active: Number(reportQueueStatus.active || 0), capacity: reportWorkerCapacity })}
           </span>
           <RefreshButton className="vision-refresh" busy={listQuery.status === "loading" || importStatusQuery.status === "loading"} onClick={() => refresh().catch((error) => setStatusMessage(error.message))} />
         </div>

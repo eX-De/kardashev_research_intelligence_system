@@ -229,7 +229,13 @@ def index_artifact(
     }
 
 
-def enqueue_artifact_index(conn: DbConnection, settings: Settings, artifact: dict[str, object]) -> dict[str, object]:
+def enqueue_artifact_index(
+    conn: DbConnection,
+    settings: Settings,
+    artifact: dict[str, object],
+    *,
+    commit: bool = True,
+) -> dict[str, object]:
     artifact_id = int(artifact["id"])
     artifact_type = str(artifact.get("artifact_type") or "")
     if not artifact_uses_generic_embedding_index(artifact_type):
@@ -270,7 +276,7 @@ def enqueue_artifact_index(conn: DbConnection, settings: Settings, artifact: dic
         },
         priority=15,
         max_attempts=3,
-        commit=True,
+        commit=commit,
     )
     return {"queued": True, "worker_job_id": int(worker_job["id"]), "artifact_id": artifact_id, "action": action}
 

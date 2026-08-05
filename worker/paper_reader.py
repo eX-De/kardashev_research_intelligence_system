@@ -24,6 +24,7 @@ from .paper_reports import (
     _ensure_full_text,
     _iter_chat_text_chunks,
     cancel_paper_report_from_queue,
+    ensure_paper_report_worker_job,
     paper_report_payload,
     queue_paper_report,
 )
@@ -269,7 +270,13 @@ def _queue_imported_report(
     *,
     prompt: str = "",
 ) -> None:
-    queue_paper_report(conn, paper_id, prompt=prompt or _reader_report_prompt(settings))
+    ensure_paper_report_worker_job(
+        conn,
+        paper_id,
+        source="reader-import",
+        prompt=prompt or _reader_report_prompt(settings),
+        commit=False,
+    )
 
 
 def _reader_upload_metadata(payload: dict[str, object]) -> tuple[str, str]:
