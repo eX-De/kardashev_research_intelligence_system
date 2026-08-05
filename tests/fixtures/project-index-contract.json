@@ -1,0 +1,71 @@
+{
+  "legacy_renderer": "worker.artifacts.generate_project_index_artifact",
+  "input": {
+    "project": {
+      "id": 7,
+      "name": "Alpha | β",
+      "status": "active",
+      "summary": "Summary line",
+      "goals": "Goal line",
+      "keywords_json": "[\"rag\",\"检索\"]",
+      "updated_at": "2026-08-05T10:00:00Z"
+    },
+    "papers": [
+      {
+        "relation": "core",
+        "arxiv_id": "2608.00001",
+        "title": "A | Paper",
+        "link": "https://arxiv.org/abs/2608.00001"
+      }
+    ],
+    "documents": [
+      {
+        "relation": "primary",
+        "source_type": "manual_project",
+        "source_uri": "project:7|context",
+        "title": "Notes | Main"
+      }
+    ]
+  },
+  "expected": {
+    "title": "Alpha | β Project Index",
+    "markdown": "# Alpha | β\n\n- Status: active\n- Keywords: rag, 检索\n\n## Summary\n\nSummary line\n\n## Goals\n\nGoal line\n\n## Papers\n\n| Relation | arXiv | Title |\n| --- | --- | --- |\n| core | [2608.00001](https://arxiv.org/abs/2608.00001) | A \\| Paper |\n\n## Context Sources\n\n| Relation | Source | Title |\n| --- | --- | --- |\n| primary | manual_project:project:7\\|context | Notes \\| Main |\n",
+    "content": {
+      "project_id": 7,
+      "paper_count": 1,
+      "context_document_count": 1
+    },
+    "source": {
+      "project_updated_at": "2026-08-05T10:00:00Z",
+      "source_key": "project_index:7"
+    },
+    "input_hash": "644ff94073205e2dc8512ea0ca4f3b4f88f4e087791a6ddf3146d85cec49360d"
+  },
+  "empty_input": {
+    "project": {
+      "id": 8,
+      "name": "Empty",
+      "status": "planned",
+      "summary": "",
+      "goals": "",
+      "keywords_json": "[]",
+      "updated_at": "2026-08-05T11:00:00Z"
+    },
+    "papers": [],
+    "documents": []
+  },
+  "empty_expected": {
+    "title": "Empty Project Index",
+    "markdown": "# Empty\n\n- Status: planned\n\n## Papers\n\n| Relation | arXiv | Title |\n| --- | --- | --- |\n|  |  |  |\n\n## Context Sources\n\n| Relation | Source | Title |\n| --- | --- | --- |\n|  |  |  |\n",
+    "content": {
+      "project_id": 8,
+      "paper_count": 0,
+      "context_document_count": 0
+    },
+    "source": {
+      "project_updated_at": "2026-08-05T11:00:00Z",
+      "source_key": "project_index:8"
+    },
+    "input_hash": "256ca455f99495489586771f340bfe7e30e31a3fafd8f9dea97e2c2f1734589a"
+  }
+}

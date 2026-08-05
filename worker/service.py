@@ -24,7 +24,7 @@ from .queue import (
     task_event_payload,
 )
 from .settings_store import apply_stored_settings
-from .api import export_artifact, export_project_to_obsidian, generate_paper_reading_report, generate_project_index, project_detail
+from .api import export_artifact, generate_paper_reading_report, project_detail
 from .cli import (
     run_cache_arxiv_text_job,
     run_daily_job,
@@ -100,8 +100,6 @@ EXPLICIT_WORKER_JOB_TYPES = {
     "run-daily",
     "resume-daily",
     "retry-daily",
-    "project-index",
-    "project-export-obsidian",
     "knowledge-document-index",
     "project-context",
     "artifact-export-obsidian",
@@ -449,25 +447,6 @@ def _publish_project_domain_events(conn: Any, worker_job: dict[str, Any], result
     job_type = str(worker_job.get("job_type") or "")
     payload = _payload(worker_job)
     project_id = _optional_int(payload.get("project_id"))
-    if job_type == "project-index":
-        project = _compact_project_payload(result, project_id)
-        insert_app_event(conn, "project.updated", {"project": project, "project_id": project["project_id"], "reason": "project_index"})
-        artifact = _compact_artifact_payload(result, "generated_artifact")
-        if artifact:
-            insert_app_event(
-                conn,
-                "artifact.created",
-                {
-                    "artifact": artifact,
-                    "artifact_id": artifact["artifact_id"],
-                    "project_id": artifact["scope_id"] if artifact["scope_type"] == "project" else project["project_id"],
-                },
-            )
-        return
-    if job_type == "project-export-obsidian":
-        project = _compact_project_payload(result, project_id)
-        insert_app_event(conn, "project.updated", {"project": project, "project_id": project["project_id"], "reason": "export_obsidian"})
-        return
     if job_type == "project-context":
         project = _compact_project_payload(result, project_id)
         insert_app_event(conn, "project.updated", {"project": project, "project_id": project["project_id"], "reason": "project_context"})
@@ -786,7 +765,12 @@ def dispatch_worker_job(conn: Any, settings: Any, worker_job: dict[str, Any]) ->
         artifact_id = _required_int(payload.get("artifact_id"), "artifact_id")
         if str(payload.get("action") or "index") == "remove":
             return remove_artifact_index(conn, artifact_id)
-        return index_artifact(conn, settings, artifact_id)
+        return index_artifact(
+            conn,
+            settings,
+            artifact_id,
+            expected_content_hash=clean_unicode(str(payload.get("content_hash") or "")).strip(),
+        )
 
     if job_type == "artifact-index-backfill":
         return backfill_search_indexes(conn, settings)
@@ -819,14 +803,6 @@ def dispatch_worker_job(conn: Any, settings: Any, worker_job: dict[str, Any]) ->
             requested_job_id=requested_job_id,
             job_id=job_run_id,
         )
-
-    if job_type == "project-index":
-        project_id = _required_int(payload.get("project_id") or _arg_value(args, "--project-id"), "project_id")
-        return generate_project_index(conn, settings, project_id, payload)
-
-    if job_type == "project-export-obsidian":
-        project_id = _required_int(payload.get("project_id") or _arg_value(args, "--project-id"), "project_id")
-        return export_project_to_obsidian(conn, settings, project_id)
 
     if job_type == "knowledge-document-index":
         return index_knowledge_document(

@@ -248,6 +248,7 @@ python -m worker.cli generate-paper-reports --limit 10
 - `KRIS_JOB_BACKEND`：任务执行后端，默认 `queue`。Node 会写入 `worker_jobs`，由 `python -m worker.service` 常驻 worker 执行；设为 `cli` 可临时回退旧的 Node spawn CLI 行为。
 - `KRIS_COMPUTE_BACKEND`：交互计算后端，默认 `service`。deep search、Reader Chat 和追问建议直接调用常驻 compute service，不写入 `worker_jobs` / `job_runs`；设为 `legacy` 可在一个发布周期内回退旧队列/CLI 路径。
 - `KRIS_PROJECT_CONTEXT_BACKEND`：项目上下文保存后端，默认 `node`。Node 在项目保存事务内持久化原文并提交 `knowledge-document-index`；仅在迁移回滚时设为 `legacy`，两条路径不会同时处理同一次保存。
+- `KRIS_PROJECT_INDEX_BACKEND`：项目索引产物后端，默认 `node`。Node 在一个事务内立即生成或更新 Markdown 产物、写入 artifact 事件并提交索引/导出任务；`legacy` 仅保留为一个发布周期内的 Python CLI 回滚路径，两条路径不会双写。
 - `KRIS_COMPUTE_URL`、`KRIS_COMPUTE_TOKEN` / `KRIS_COMPUTE_TOKEN_FILE`、`KRIS_COMPUTE_TIMEOUT_MS`：Node 到 compute 的内部地址、服务身份和请求超时。Compose 使用不暴露宿主端口的 `compute` 服务，并要求 `secrets/compute_token.txt` 为非空随机值。
 - `KRIS_OUTBOX_POLLER_ENABLED` / `KRIS_OUTBOX_POLL_INTERVAL_MS`：控制 Node 轮询 `app_events` outbox 并转发到 `/api/events`，默认启用且间隔 1000ms。Node 写接口和常驻 worker 的缓存失效事件都会写入 `app_events`；关闭 poller 时，Node 写接口会回退到进程内 SSE，worker 侧仍保留旧 stderr progress 兼容路径。
 - `KRIS_WORKER_POLL_INTERVAL_MS` / `KRIS_WORKER_INIT_DB_ON_START`：控制常驻 Python worker 的队列轮询间隔和启动时 schema 初始化。

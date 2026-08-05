@@ -25,7 +25,7 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         entries = worker_job_inventory()
         inventory_types = {str(entry["type"]) for entry in entries}
         self.assertEqual(inventory_types, set(service.SUPPORTED_WORKER_JOB_TYPES))
-        self.assertEqual(len(entries), 23)
+        self.assertEqual(len(entries), 21)
         for entry in entries:
             self.assertTrue(str(entry.get("label") or "").strip(), entry["type"])
             self.assertTrue(str(entry.get("concurrency_group") or "").strip(), entry["type"])
@@ -138,7 +138,7 @@ class WorkerServiceDispatchTests(unittest.TestCase):
             job_id=43,
         )
 
-    def test_dispatch_project_index_uses_payload_project_id(self) -> None:
+    def test_removed_project_index_worker_dispatcher_is_rejected(self) -> None:
         conn = object()
         settings = object()
         worker_job = {
@@ -147,10 +147,8 @@ class WorkerServiceDispatchTests(unittest.TestCase):
             "job_type": "project-index",
             "payload": {"command": "project-index", "project_id": 5, "export_to_obsidian": True},
         }
-        with patch("worker.service.generate_project_index", return_value={"project": {"id": 5}}) as run:
-            self.assertEqual(service.dispatch_worker_job(conn, settings, worker_job), {"project": {"id": 5}})
-
-        run.assert_called_once_with(conn, settings, 5, worker_job["payload"])
+        with self.assertRaisesRegex(RuntimeError, "Unsupported worker job type: project-index"):
+            service.dispatch_worker_job(conn, settings, worker_job)
 
     def test_dispatch_knowledge_document_index_uses_identity_and_content_hash_only(self) -> None:
         conn = object()
@@ -186,6 +184,31 @@ class WorkerServiceDispatchTests(unittest.TestCase):
             self.assertEqual(service.dispatch_worker_job(conn, settings, worker_job), {"ok": True})
 
         run.assert_called_once_with(conn, settings, 9, {"relative_path": "A.md"})
+
+    def test_dispatch_artifact_index_uses_current_settings_model(self) -> None:
+        conn = object()
+        settings = object()
+        worker_job = {
+            "id": 15,
+            "job_run_id": None,
+            "job_type": "artifact-index",
+            "payload": {
+                "artifact_id": 9,
+                "action": "index",
+                "content_hash": "expected-content",
+                "model": "old-queued-model",
+            },
+        }
+        with patch("worker.service.index_artifact", return_value={"artifact_id": 9}) as index:
+            result = service.dispatch_worker_job(conn, settings, worker_job)
+
+        self.assertEqual(result, {"artifact_id": 9})
+        index.assert_called_once_with(
+            conn,
+            settings,
+            9,
+            expected_content_hash="expected-content",
+        )
 
     def test_dispatch_reader_import_upload_uses_payload_body(self) -> None:
         conn = object()
@@ -442,28 +465,17 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         cleanup.assert_called_once_with(conn, stale_after_seconds=90)
         conn.close.assert_called_once_with()
 
-    def test_handler_success_wins_over_late_cancel_and_publishes_domain_events(self) -> None:
+    def test_handler_success_wins_over_late_cancel_without_removed_project_events(self) -> None:
         conn = Mock()
         worker_job = {
             "id": 12,
             "job_run_id": 47,
-            "job_type": "project-index",
-            "payload": {"command": "project-index", "source": "project-index", "project_id": 5},
+            "job_type": "generate-reports",
+            "payload": {"command": "generate-reports", "source": "manual"},
             "started_at": "2026-07-06T10:00:00+00:00",
             "finished_at": None,
         }
-        result_payload = {
-            "project": {"id": 5, "name": "P", "status": "active", "updated_at": "now"},
-            "generated_artifact": {
-                "id": 9,
-                "artifact_type": "project_index",
-                "title": "Index",
-                "scope_type": "project",
-                "scope_id": 5,
-                "status": "draft",
-                "updated_at": "now",
-            },
-        }
+        result_payload = {"ok": True}
         with patch("worker.service.connect", return_value=conn), \
             patch("worker.service.claim_next_worker_job", return_value={"worker_job": worker_job, "job_run": {}}), \
             patch("worker.service.insert_app_event") as insert_event, \
@@ -475,8 +487,8 @@ class WorkerServiceDispatchTests(unittest.TestCase):
 
         event_names = [call.args[1] for call in insert_event.call_args_list]
         self.assertNotIn("task.finished", event_names)
-        self.assertIn("project.updated", event_names)
-        self.assertIn("artifact.created", event_names)
+        self.assertNotIn("project.updated", event_names)
+        self.assertNotIn("artifact.created", event_names)
 
     def test_run_once_publishes_artifact_export_domain_event(self) -> None:
         conn = Mock()

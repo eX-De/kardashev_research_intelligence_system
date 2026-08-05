@@ -14,8 +14,6 @@
     { "type": "run-daily", "label": "每日流程", "concurrency_group": "daily" },
     { "type": "resume-daily", "label": "恢复每日流程", "concurrency_group": "daily" },
     { "type": "retry-daily", "label": "历史论文补跑", "concurrency_group": "daily" },
-    { "type": "project-index", "label": "项目索引生成", "concurrency_group": "embedding" },
-    { "type": "project-export-obsidian", "label": "项目导出", "concurrency_group": "obsidian" },
     { "type": "knowledge-document-index", "label": "知识文档索引", "concurrency_group": "embedding" },
     { "type": "project-context", "label": "项目上下文入库（回滚）", "concurrency_group": "embedding" },
     { "type": "artifact-export-obsidian", "label": "产物导出", "concurrency_group": "obsidian" },

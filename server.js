@@ -75,6 +75,7 @@ import {
   unlinkProjectNote as unlinkNodeProjectNote,
   unlinkProjectPaper as unlinkNodeProjectPaper
 } from "./server/projects.js";
+import { ensureProjectIndex } from "./server/projectIndex.js";
 import {
   countActiveWorkerJobs,
   enqueueWorkerJob,
@@ -132,6 +133,7 @@ const WORKER_TIMING_LOG_ENABLED = envBoolean("KRIS_WORKER_TIMING_LOG", false);
 const JOB_BACKEND = String(envValue("KRIS_JOB_BACKEND", "queue") || "queue").trim().toLowerCase();
 const COMPUTE_BACKEND = String(envValue("KRIS_COMPUTE_BACKEND", "service") || "service").trim().toLowerCase();
 const PROJECT_CONTEXT_BACKEND = String(envValue("KRIS_PROJECT_CONTEXT_BACKEND", "node") || "node").trim().toLowerCase();
+const PROJECT_INDEX_BACKEND = String(envValue("KRIS_PROJECT_INDEX_BACKEND", "node") || "node").trim().toLowerCase();
 const OUTBOX_POLLER_ENABLED = envBoolean("KRIS_OUTBOX_POLLER_ENABLED", true);
 const OUTBOX_POLL_INTERVAL_MS = Math.max(
   250,
@@ -157,6 +159,9 @@ if (!["service", "legacy"].includes(COMPUTE_BACKEND)) {
 }
 if (!["node", "legacy"].includes(PROJECT_CONTEXT_BACKEND)) {
   throw new Error("KRIS_PROJECT_CONTEXT_BACKEND must be node or legacy");
+}
+if (!["node", "legacy"].includes(PROJECT_INDEX_BACKEND)) {
+  throw new Error("KRIS_PROJECT_INDEX_BACKEND must be node or legacy");
 }
 
 function abortOnClientDisconnect(req, res) {
@@ -1927,14 +1932,19 @@ async function routeApi(req, res, url) {
 
   const projectExportMatch = url.pathname.match(/^\/api\/projects\/(\d+)\/export-obsidian$/);
   if (req.method === "POST" && projectExportMatch) {
-    if (isQueueJobBackend()) {
-      const data = await enqueueProjectWorkerJob(
-        "project-export-obsidian",
-        projectExportMatch[1],
-        {},
-        { source: "project-export" }
-      );
-      sendJson(res, 200, data);
+    if (PROJECT_INDEX_BACKEND === "node") {
+      const ensured = await ensureProjectIndex(projectExportMatch[1], { exportToObsidian: true });
+      const data = await getNodeProjectDetail(projectExportMatch[1]);
+      data.generated_artifact = ensured.artifact;
+      data.index_job = ensured.index_job;
+      data.export_job = ensured.export_job;
+      data.ok = true;
+      data.queued = true;
+      data.command = "artifact-export-obsidian";
+      data.worker_job_id = ensured.export_job?.worker_job_id || null;
+      data.job_id = data.worker_job_id;
+      data.job_run_id = null;
+      sendJson(res, 202, data);
       return;
     }
     const data = await jsonFromWorker(["api-project-export", projectExportMatch[1]]);
@@ -1946,16 +1956,15 @@ async function routeApi(req, res, url) {
   const projectIndexMatch = url.pathname.match(/^\/api\/projects\/(\d+)\/artifacts\/project-index$/);
   if (req.method === "POST" && projectIndexMatch) {
     const body = await readRequestJson(req);
-    if (isQueueJobBackend()) {
-      const data = await enqueueProjectWorkerJob(
-        "project-index",
-        projectIndexMatch[1],
-        {
-          export_to_obsidian: Boolean(body.export_to_obsidian),
-          relative_path: body.relative_path || ""
-        },
-        { source: "project-index" }
-      );
+    if (PROJECT_INDEX_BACKEND === "node") {
+      const ensured = await ensureProjectIndex(projectIndexMatch[1], {
+        exportToObsidian: Boolean(body.export_to_obsidian),
+        relativePath: body.relative_path || ""
+      });
+      const data = await getNodeProjectDetail(projectIndexMatch[1]);
+      data.generated_artifact = ensured.artifact;
+      data.index_job = ensured.index_job;
+      if (ensured.export_job) data.export_job = ensured.export_job;
       sendJson(res, 200, data);
       return;
     }

@@ -61,7 +61,13 @@ def _model_is_complete(conn: DbConnection, chunk_ids: list[int], model: str) -> 
     return int(row["count"] or 0) == len(chunk_ids)
 
 
-def index_artifact(conn: DbConnection, settings: Settings, artifact_id: int) -> dict[str, object]:
+def index_artifact(
+    conn: DbConnection,
+    settings: Settings,
+    artifact_id: int,
+    *,
+    expected_content_hash: str = "",
+) -> dict[str, object]:
     artifact = get_artifact(conn, int(artifact_id))
     if not artifact:
         return remove_artifact_index(conn, int(artifact_id))
@@ -79,6 +85,15 @@ def index_artifact(conn: DbConnection, settings: Settings, artifact_id: int) -> 
         raise RuntimeError("Embedding provider/model is not configured for artifact indexing")
 
     digest = artifact_index_content_hash(artifact)
+    requested_digest = clean_unicode(expected_content_hash).strip()
+    if requested_digest and requested_digest != digest:
+        return {
+            "artifact_id": int(artifact_id),
+            "artifact_type": artifact_type,
+            "expected_content_hash": requested_digest,
+            "content_hash": digest,
+            "superseded": True,
+        }
     existing = _existing_chunks(conn, int(artifact_id))
     existing_ids = [int(row["id"]) for row in existing]
     content_unchanged = bool(existing) and all(str(row["content_hash"] or "") == digest for row in existing)
@@ -115,6 +130,43 @@ def index_artifact(conn: DbConnection, settings: Settings, artifact_id: int) -> 
             "SELECT pg_advisory_xact_lock(?, ?)",
             (POSTGRES_ARTIFACT_INDEX_LOCK_NAMESPACE, int(artifact_id)),
         )
+    current_artifact = get_artifact(conn, int(artifact_id))
+    current_digest = artifact_index_content_hash(current_artifact) if current_artifact else ""
+    current_type = str(current_artifact.get("artifact_type") or "") if current_artifact else ""
+    current_searchable = bool(
+        current_artifact
+        and artifact_uses_generic_embedding_index(current_type)
+        and artifact_is_searchable(current_type, current_artifact.get("status"))
+    )
+    if (
+        not current_searchable
+        or current_type != artifact_type
+        or current_digest != digest
+        or (requested_digest and requested_digest != current_digest)
+    ):
+        return {
+            "artifact_id": int(artifact_id),
+            "artifact_type": artifact_type,
+            "expected_content_hash": requested_digest or digest,
+            "content_hash": current_digest,
+            "superseded": True,
+        }
+    current_existing = _existing_chunks(conn, int(artifact_id))
+    current_ids = [int(row["id"]) for row in current_existing]
+    if current_existing and all(str(row["content_hash"] or "") == digest for row in current_existing) and _model_is_complete(conn, current_ids, model):
+        return {
+            "artifact_id": int(artifact_id),
+            "artifact_type": artifact_type,
+            "content_hash": digest,
+            "model": model,
+            "artifact_chunks_created": 0,
+            "artifact_embeddings_created": 0,
+            "unchanged": True,
+        }
+    existing = current_existing
+    existing_ids = current_ids
+    content_unchanged = bool(existing) and all(str(row["content_hash"] or "") == digest for row in existing)
+
     now = utc_now()
     created_chunks = 0
     if content_unchanged:

@@ -5,7 +5,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from worker.artifact_index import enqueue_artifact_index, index_artifact, remove_artifact_index
+from worker.artifact_index import artifact_index_content_hash, enqueue_artifact_index, index_artifact, remove_artifact_index
+from worker.artifacts import get_artifact
 from worker.search_backfill import backfill_search_indexes
 from worker.unified_search import deep_search
 from worker.knowledge import chunk_markdown
@@ -87,6 +88,28 @@ class ArtifactIndexTests(unittest.TestCase):
         self.assertEqual(mocked_embed.call_count, 2)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM artifact_chunks").fetchone()[0], 1)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM artifact_chunk_embeddings").fetchone()[0], 2)
+
+    def test_stale_index_job_cannot_overwrite_newer_artifact_content(self) -> None:
+        original = get_artifact(self.conn, 1)
+        expected_hash = artifact_index_content_hash(original)
+
+        def update_during_embedding(_settings, _texts):
+            self.conn.execute(
+                "UPDATE artifacts SET content_markdown = 'newest body', input_hash = 'newest' WHERE id = 1"
+            )
+            self.conn.commit()
+            return [[1.0, 0.0]]
+
+        with patch("worker.artifact_index.embed_many", side_effect=update_during_embedding):
+            result = index_artifact(
+                self.conn,
+                FakeSettings("embed-v1"),
+                1,
+                expected_content_hash=expected_hash,
+            )
+
+        self.assertTrue(result["superseded"])
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM artifact_chunks").fetchone()[0], 0)
 
     def test_stale_removal_and_queue_delivery_are_idempotent(self) -> None:
         artifact = {
