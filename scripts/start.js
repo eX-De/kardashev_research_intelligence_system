@@ -9,10 +9,29 @@ const ROOT_DIR = resolve(fileURLToPath(new URL("..", import.meta.url)));
 loadDotEnv(join(ROOT_DIR, ".env"));
 
 const PYTHON_BIN = process.env.PYTHON_BIN || "python";
+const DEFAULT_WORKER_POOL_SHUTDOWN_TIMEOUT_MS = 30000;
+const WORKER_POOL_PARENT_SHUTDOWN_GRACE_MS = 5000;
+const MAX_WORKER_POOL_SHUTDOWN_TIMEOUT_MS = 300000;
 const children = new Map();
 let shuttingDown = false;
 let requestedExitCode = 0;
 let forcedExitTimer = null;
+
+function boundedInteger(value, fallback, minimum, maximum) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isInteger(parsed)) return fallback;
+  return Math.min(maximum, Math.max(minimum, parsed));
+}
+
+export function parentShutdownTimeoutMs(env = process.env) {
+  const workerPoolTimeout = boundedInteger(
+    env.KRIS_WORKER_POOL_SHUTDOWN_TIMEOUT_MS,
+    DEFAULT_WORKER_POOL_SHUTDOWN_TIMEOUT_MS,
+    1000,
+    MAX_WORKER_POOL_SHUTDOWN_TIMEOUT_MS
+  );
+  return workerPoolTimeout + WORKER_POOL_PARENT_SHUTDOWN_GRACE_MS;
+}
 
 function formatExit(code, signal) {
   if (code !== null && code !== undefined) return `exit code ${code}`;
@@ -42,16 +61,16 @@ function shutdown(exitCode = 0) {
   for (const child of children.values()) stopChild(child);
   forcedExitTimer = setTimeout(() => {
     process.exit(requestedExitCode || 1);
-  }, 5000);
+  }, parentShutdownTimeoutMs());
   forcedExitTimer.unref?.();
   finishIfStopped();
 }
 
-function startProcess(name, command, args) {
+function startProcess(name, command, args, { env = {} } = {}) {
   console.log(`[start] launching ${name}: ${command} ${args.join(" ")}`);
   const child = spawn(command, args, {
     cwd: ROOT_DIR,
-    env: process.env,
+    env: { ...process.env, ...env },
     stdio: "inherit",
     windowsHide: false
   });
@@ -107,7 +126,9 @@ export function main({ initialize = initializeSchema, launch = startProcess, ins
   ensureComputeIdentity();
   launch("compute", PYTHON_BIN, ["-m", "worker.compute_service"]);
   launch("api", process.execPath, ["server.js"]);
-  launch("worker", PYTHON_BIN, ["-m", "worker.service"]);
+  launch("worker", process.execPath, ["scripts/worker-pool.js"], {
+    env: { KRIS_WORKER_POOL_INIT_DB_ON_START: "false" }
+  });
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

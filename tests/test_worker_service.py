@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import signal
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,6 +72,21 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         self.assertEqual(observation["worker_id"], "worker-test")
         self.assertEqual(observation["attempt"], 2)
         self.assertEqual(observation["concurrency_group"], "paper-report")
+
+    def test_worker_heartbeat_reports_draining_while_preserving_current_job(self) -> None:
+        conn = Mock()
+        with patch("worker.service.connect", return_value=conn), \
+            patch("worker.service.heartbeat_worker") as heartbeat_worker, \
+            patch("worker.service.heartbeat_worker_job") as heartbeat_job:
+            heartbeat = service.WorkerHeartbeat("worker-test", 5)
+            heartbeat.set_current_job((17, 2))
+            heartbeat.begin_draining()
+            heartbeat._beat()
+
+        self.assertEqual(heartbeat_worker.call_args.kwargs["status"], "draining")
+        self.assertEqual(heartbeat_worker.call_args.kwargs["current_job_id"], 17)
+        self.assertTrue(heartbeat_worker.call_args.kwargs["meta"]["draining"])
+        heartbeat_job.assert_called_with(conn, "worker-test", 17, 2, commit=False)
 
     def test_paper_report_result_marks_reader_sources_as_manual_imports(self) -> None:
         base = {
@@ -425,6 +441,33 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         heartbeat_class.return_value.start.assert_called_once_with()
         heartbeat_class.return_value.stop.assert_called_once_with()
         stale_recovery_class.return_value.start.assert_called_once_with()
+        stale_recovery_class.return_value.stop.assert_called_once_with()
+
+    def test_sigterm_drains_current_job_then_exits_without_claiming_again(self) -> None:
+        conn = Mock()
+        installed_handlers = {}
+
+        def install_handler(sig, handler):
+            installed_handlers[sig] = handler
+            return signal.SIG_DFL
+
+        def run_once(_worker_id, _on_job_change):
+            installed_handlers[signal.SIGTERM](signal.SIGTERM, None)
+            return {"claimed": True}
+
+        with patch("worker.service._worker_id", return_value="worker-test"), \
+            patch("worker.service._env_flag", return_value=False), \
+            patch("worker.service.connect", return_value=conn), \
+            patch("worker.service.WorkerHeartbeat") as heartbeat_class, \
+            patch("worker.service.WorkerStaleRecovery") as stale_recovery_class, \
+            patch("worker.service.run_once", side_effect=run_once) as run, \
+            patch("worker.service.signal.getsignal", return_value=signal.SIG_DFL), \
+            patch("worker.service.signal.signal", side_effect=install_handler):
+            self.assertEqual(service.main(), 0)
+
+        run.assert_called_once()
+        heartbeat_class.return_value.begin_draining.assert_called_once_with()
+        heartbeat_class.return_value.stop.assert_called_once_with()
         stale_recovery_class.return_value.stop.assert_called_once_with()
 
     def test_stale_recovery_scan_uses_an_independent_connection(self) -> None:

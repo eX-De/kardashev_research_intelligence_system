@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import socket
 import sys
 import threading
@@ -180,6 +181,7 @@ class WorkerHeartbeat:
         self.interval_seconds = max(1, int(interval_seconds))
         self.started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         self._current_job: tuple[int, int] | None = None
+        self._draining = threading.Event()
         self._state_lock = threading.Lock()
         self._beat_lock = threading.Lock()
         self._stop = threading.Event()
@@ -200,11 +202,13 @@ class WorkerHeartbeat:
                 heartbeat_worker(
                     conn,
                     self.worker_id,
-                    status=status_override or ("running" if current_job_id else "idle"),
+                    status=status_override or (
+                        "draining" if self._draining.is_set() else ("running" if current_job_id else "idle")
+                    ),
                     started_at=self.started_at,
                     current_job_id=current_job_id,
                     pid=os.getpid(),
-                    meta={"service": "worker.service"},
+                    meta={"service": "worker.service", "draining": self._draining.is_set()},
                     commit=False,
                 )
                 if current_job:
@@ -236,6 +240,9 @@ class WorkerHeartbeat:
         with self._state_lock:
             self._current_job = worker_job
         self._beat()
+
+    def begin_draining(self) -> None:
+        self._draining.set()
 
     def stop(self) -> None:
         self._stop.set()
@@ -851,21 +858,37 @@ def main() -> int:
         _env_int("KRIS_WORKER_HEARTBEAT_INTERVAL_SECONDS", 5, minimum=1),
     )
     stale_recovery = WorkerStaleRecovery(stale_recovery_interval_seconds, stale_after_seconds)
+    drain_requested = threading.Event()
+
+    def request_drain(signum: int, _frame: Any) -> None:
+        if not drain_requested.is_set():
+            print(f"KRIS worker drain requested by signal {signum}: {worker_id}", flush=True)
+        drain_requested.set()
+        heartbeat.begin_draining()
+
+    previous_signal_handlers: dict[signal.Signals, Any] = {}
+    for handled_signal in (signal.SIGINT, signal.SIGTERM):
+        previous_signal_handlers[handled_signal] = signal.getsignal(handled_signal)
+        signal.signal(handled_signal, request_drain)
     heartbeat.start()
     stale_recovery.start()
     print(f"KRIS worker service started: {worker_id}", flush=True)
     try:
-        while True:
+        while not drain_requested.is_set():
             try:
                 result = run_once(worker_id, heartbeat.set_current_job)
                 if not result.get("claimed"):
-                    time.sleep(poll_interval_ms / 1000)
+                    drain_requested.wait(poll_interval_ms / 1000)
             except KeyboardInterrupt:
+                heartbeat.begin_draining()
                 return 0
             except Exception:
                 traceback.print_exc(file=sys.stderr)
-                time.sleep(poll_interval_ms / 1000)
+                drain_requested.wait(poll_interval_ms / 1000)
+        return 0
     finally:
+        for handled_signal, previous_handler in previous_signal_handlers.items():
+            signal.signal(handled_signal, previous_handler)
         stale_recovery.stop()
         heartbeat.stop()
 

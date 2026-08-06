@@ -18,7 +18,7 @@ export function workerHeartbeatTtlSeconds() {
 
 export async function getWorkerStatus(options = {}, db = { query }) {
   const ttlSeconds = positiveInteger(options.heartbeatTtlSeconds, workerHeartbeatTtlSeconds(), 1);
-  const [instancesResult, queueResult, queueBreakdownResult] = await Promise.all([
+  const [instancesResult, queueResult, queueBreakdownResult, runtimePolicyResult] = await Promise.all([
     db.query(
       `
         SELECT wi.worker_id, wi.status, wi.started_at, wi.heartbeat_at, wi.current_job_id, wi.pid,
@@ -60,7 +60,14 @@ export async function getWorkerStatus(options = {}, db = { query }) {
         GROUP BY job_type, concurrency_group, status
         ORDER BY job_type, concurrency_group, status
       `
-    )
+    ),
+    db.query(
+      `
+        SELECT revision, worker_process_count
+        FROM worker_runtime_policy
+        WHERE singleton_id = 1
+      `
+    ).catch((error) => ({ rows: [], error }))
   ]);
   const instances = (instancesResult.rows || []).map((row) => ({
     worker_id: String(row.worker_id || ""),
@@ -77,6 +84,12 @@ export async function getWorkerStatus(options = {}, db = { query }) {
     }
   }));
   const liveInstances = instances.filter((item) => item.live);
+  const acceptingInstances = liveInstances.filter((item) => item.status !== "draining");
+  const drainingInstances = liveInstances.filter((item) => item.status === "draining");
+  const runtimePolicy = runtimePolicyResult.rows?.[0] || {};
+  const parsedDesiredProcesses = Number(runtimePolicy.worker_process_count);
+  const runtimePolicyAvailable = Number.isInteger(parsedDesiredProcesses) && parsedDesiredProcesses >= 1;
+  const desiredProcesses = runtimePolicyAvailable ? parsedDesiredProcesses : null;
   const queueRow = queueResult.rows?.[0] || {};
   const queued = numberValue(queueRow.queued);
   const running = numberValue(queueRow.running);
@@ -119,13 +132,19 @@ export async function getWorkerStatus(options = {}, db = { query }) {
     }
     byGroup[group] = groupStats;
   }
-  const available = liveInstances.length > 0;
+  const available = acceptingInstances.length > 0;
+  let poolState = "online";
+  if (!runtimePolicyAvailable) poolState = "degraded";
+  else if (drainingInstances.length > 0 || liveInstances.length > desiredProcesses) poolState = "draining";
+  else if (liveInstances.length < desiredProcesses) poolState = "degraded";
   return {
     required: true,
     available,
     state: available ? "online" : "offline",
     heartbeat_ttl_seconds: ttlSeconds,
     online_workers: liveInstances.length,
+    accepting_workers: acceptingInstances.length,
+    draining_workers: drainingInstances.length,
     registered_workers: instances.length,
     last_heartbeat_at: instances[0]?.heartbeat_at || null,
     queue: {
@@ -138,6 +157,16 @@ export async function getWorkerStatus(options = {}, db = { query }) {
       by_group: byGroup
     },
     instances,
+    pool: {
+      revision: runtimePolicyAvailable ? numberValue(runtimePolicy.revision) : null,
+      policy_available: runtimePolicyAvailable,
+      desired_processes: desiredProcesses,
+      actual_processes: liveInstances.length,
+      accepting_processes: acceptingInstances.length,
+      draining_processes: drainingInstances.length,
+      state: poolState,
+      degraded: poolState === "degraded"
+    },
     group_occupancy: byGroup,
     stalled: !available && queued + running > 0
   };
@@ -145,7 +174,7 @@ export async function getWorkerStatus(options = {}, db = { query }) {
 
 export async function requireAvailableWorker(options = {}, db = { query }) {
   const status = await getWorkerStatus(options, db);
-  if (status.online_workers > 0) return status;
+  if (status.accepting_workers > 0) return status;
   const error = new Error("Background worker service is unavailable");
   error.statusCode = 503;
   error.structuredCode = "worker_unavailable";

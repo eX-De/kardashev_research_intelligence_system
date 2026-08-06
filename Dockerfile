@@ -43,6 +43,7 @@ RUN npm ci --omit=dev \
 COPY --chown=node:node server.js ./
 COPY --chown=node:node server ./server
 COPY --chown=node:node scripts/extract-web-content.mjs ./scripts/extract-web-content.mjs
+COPY --chown=node:node scripts/worker-pool.js ./scripts/worker-pool.js
 COPY --chown=node:node worker ./worker
 COPY --from=frontend-build --chown=node:node /app/dist ./dist
 
