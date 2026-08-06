@@ -6,7 +6,7 @@ const inventory = JSON.parse(readFileSync(new URL("../config/worker-job-inventor
 const entries = Object.entries(document.jobs || {});
 const byType = new Map(entries.map(([type, value]) => [type, Object.freeze({ type, ...value })]));
 
-const requiredFields = ["execution_mode", "concurrency_group", "max_running", "key_fields", "priority", "default_max_attempts", "user_visible"];
+const requiredFields = ["execution_mode", "concurrency_group", "limit_mode", "default_max_running", "key_fields", "priority", "default_max_attempts", "user_visible"];
 const inventoryTypes = new Set((inventory.jobs || []).map((entry) => String(entry.type || "")));
 const valid = Number.isInteger(Number(document.version)) && Number(document.version) >= 1
   && byType.size === inventoryTypes.size
@@ -14,16 +14,23 @@ const valid = Number.isInteger(Number(document.version)) && Number(document.vers
   && entries.every(([, policy]) => requiredFields.every((field) => Object.hasOwn(policy, field))
     && ["background", "interactive", "node"].includes(policy.execution_mode)
     && String(policy.concurrency_group || "").trim()
-    && Number.isInteger(policy.max_running) && policy.max_running >= 1
+    && ["invariant", "capacity", "unlimited"].includes(policy.limit_mode)
+    && (policy.limit_mode === "unlimited"
+      ? policy.default_max_running === null
+      : Number.isInteger(policy.default_max_running) && policy.default_max_running >= 1)
     && Array.isArray(policy.key_fields)
     && Number.isInteger(policy.priority)
     && Number.isInteger(policy.default_max_attempts) && policy.default_max_attempts >= 1
     && typeof policy.user_visible === "boolean");
-const groupLimits = new Map();
+const groupPolicies = new Map();
 for (const [, policy] of entries) {
-  const previous = groupLimits.get(policy.concurrency_group);
-  if (previous !== undefined && previous !== policy.max_running) throw new Error(`Inconsistent max_running for ${policy.concurrency_group}`);
-  groupLimits.set(policy.concurrency_group, policy.max_running);
+  const current = { limit_mode: policy.limit_mode, default_max_running: policy.default_max_running };
+  const previous = groupPolicies.get(policy.concurrency_group);
+  if (previous && (previous.limit_mode !== current.limit_mode
+    || previous.default_max_running !== current.default_max_running)) {
+    throw new Error(`Inconsistent limit policy for ${policy.concurrency_group}`);
+  }
+  groupPolicies.set(policy.concurrency_group, Object.freeze(current));
 }
 if (!valid) {
   throw new Error("config/worker-job-policy.json is invalid");
@@ -100,4 +107,8 @@ export function resolveWorkerJobPolicy(jobType, payload = {}) {
 
 export function allWorkerJobPolicies() {
   return Array.from(byType.values());
+}
+
+export function allWorkerGroupPolicies() {
+  return Object.fromEntries(groupPolicies);
 }

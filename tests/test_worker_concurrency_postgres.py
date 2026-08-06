@@ -36,6 +36,16 @@ class WorkerConcurrencyPostgresTests(unittest.TestCase):
 
     def setUp(self) -> None:
         reset_test_db(self.conn)
+        self.conn.execute("DELETE FROM worker_group_limit_overrides")
+        self.conn.execute(
+            """UPDATE worker_runtime_policy SET revision = 1, worker_process_count = 1,
+                      global_llm_request_concurrency = 4, global_embedding_request_concurrency = 4,
+                      embedding_concurrency = 2, project_judgment_concurrency = 3,
+                      project_chat_profile_concurrency = 2, updated_at = ?
+               WHERE singleton_id = 1""",
+            (utc_now(),),
+        )
+        self.conn.commit()
 
     def connection(self):
         return connect_test_db_peer(self.conn)
@@ -265,6 +275,71 @@ class WorkerConcurrencyPostgresTests(unittest.TestCase):
         finally:
             other.close()
 
+    def test_dynamic_finite_and_unlimited_group_limits_preserve_key_mutex(self) -> None:
+        changed_at = utc_now()
+        self.conn.execute("UPDATE worker_runtime_policy SET revision = 2, updated_at = ? WHERE singleton_id = 1", (changed_at,))
+        self.conn.execute(
+            "INSERT INTO worker_group_limit_overrides(concurrency_group, max_running, policy_revision, updated_at) VALUES ('reader-import', 1, 2, ?)",
+            (changed_at,),
+        )
+        self.conn.commit()
+        self.enqueue("reader-import-url", {"body": {"url": "https://finite-a.test"}})
+        self.enqueue("reader-import-url", {"body": {"url": "https://finite-b.test"}})
+        self.assertIsNotNone(claim_next_worker_job(self.conn, "finite-a", now="2026-08-05T10:01:00+00:00"))
+        other = self.connection()
+        try:
+            self.assertIsNone(claim_next_worker_job(other, "finite-b", now="2026-08-05T10:01:01+00:00"))
+        finally:
+            other.close()
+
+        self.setUp()
+        for paper_id in (71, 72, 73):
+            self.enqueue("paper-report", {"paper_id": paper_id})
+        connections = [self.conn, self.connection(), self.connection()]
+        try:
+            claimed = [
+                claim_next_worker_job(conn, f"report-{index}", now=f"2026-08-05T10:01:0{index}+00:00")
+                for index, conn in enumerate(connections)
+            ]
+            self.assertEqual({item["worker_job"]["concurrency_key"] for item in claimed}, {
+                "paper:71:report", "paper:72:report", "paper:73:report",
+            })
+        finally:
+            for conn in connections[1:]:
+                conn.close()
+
+        self.setUp()
+        first_id = self.enqueue("paper-report", {"paper_id": 80})
+        second_id = self.enqueue("paper-report", {"paper_id": 81})
+        self.conn.execute(
+            "UPDATE worker_jobs SET concurrency_key = 'paper:80:report' WHERE id = ?",
+            (second_id,),
+        )
+        self.conn.commit()
+        self.assertEqual(
+            int(claim_next_worker_job(self.conn, "same-paper-a", now="2026-08-05T10:01:00+00:00")["worker_job"]["id"]),
+            first_id,
+        )
+        other = self.connection()
+        try:
+            self.assertIsNone(claim_next_worker_job(other, "same-paper-b", now="2026-08-05T10:01:01+00:00"))
+        finally:
+            other.close()
+
+    def test_invalid_invariant_override_fails_closed(self) -> None:
+        changed_at = utc_now()
+        self.conn.execute("UPDATE worker_runtime_policy SET revision = 2, updated_at = ? WHERE singleton_id = 1", (changed_at,))
+        self.conn.execute(
+            "INSERT INTO worker_group_limit_overrides(concurrency_group, max_running, policy_revision, updated_at) VALUES ('daily', 2, 2, ?)",
+            (changed_at,),
+        )
+        self.conn.commit()
+        job_id = self.enqueue("run-daily", {})
+        with self.assertRaisesRegex(RuntimeError, "does not allow overrides"):
+            claim_next_worker_job(self.conn, "invalid-policy", now="2026-08-05T10:01:00+00:00")
+        self.assertEqual(self.conn.execute("SELECT status FROM worker_jobs WHERE id = ?", (job_id,)).fetchone()["status"], "queued")
+
+    def test_static_key_mutex_across_group_modes(self) -> None:
         self.setUp()
         self.enqueue("artifact-index", {"artifact_id": 1})
         self.enqueue("artifact-index", {"artifact_id": 1})
@@ -336,6 +411,11 @@ class WorkerConcurrencyPostgresTests(unittest.TestCase):
             other.close()
 
     def test_postgres_global_slots_cap_threads_and_release_after_process_kill(self) -> None:
+        self.conn.execute(
+            "UPDATE worker_runtime_policy SET revision = revision + 1, global_embedding_request_concurrency = 2, updated_at = ? WHERE singleton_id = 1",
+            (utc_now(),),
+        )
+        self.conn.commit()
         active = 0
         maximum = 0
         gate = threading.Lock()
@@ -350,7 +430,11 @@ class WorkerConcurrencyPostgresTests(unittest.TestCase):
                 with gate:
                     active -= 1
 
-        with patch.dict(os.environ, {"DATABASE_URL": self.database_url, "KRIS_RESOURCE_LIMITER_BACKEND": "postgres"}):
+        with patch.dict(os.environ, {
+            "DATABASE_URL": self.database_url,
+            "PGOPTIONS": f"-c search_path={self.schema}",
+            "KRIS_RESOURCE_LIMITER_BACKEND": "postgres",
+        }):
             threads = [threading.Thread(target=request) for _ in range(6)]
             for thread in threads: thread.start()
             for thread in threads: thread.join()
@@ -360,7 +444,12 @@ class WorkerConcurrencyPostgresTests(unittest.TestCase):
                 "import os,time; from worker.resource_limiter import outbound_request_slot; "
                 "ctx=outbound_request_slot('llm',1); ctx.__enter__(); print('READY',flush=True); time.sleep(60)"
             )
-            child_env = {**os.environ, "DATABASE_URL": self.database_url, "KRIS_RESOURCE_LIMITER_BACKEND": "postgres"}
+            child_env = {
+                **os.environ,
+                "DATABASE_URL": self.database_url,
+                "PGOPTIONS": f"-c search_path={self.schema}",
+                "KRIS_RESOURCE_LIMITER_BACKEND": "postgres",
+            }
             child = subprocess.Popen([sys.executable, "-c", code], cwd=os.getcwd(), env=child_env, stdout=subprocess.PIPE, text=True)
             try:
                 self.assertEqual(child.stdout.readline().strip(), "READY")
@@ -374,6 +463,54 @@ class WorkerConcurrencyPostgresTests(unittest.TestCase):
             finally:
                 if child.poll() is None:
                     child.kill()
+
+    def test_postgres_global_slot_limit_hot_lowering_blocks_only_new_requests(self) -> None:
+        self.conn.execute(
+            """UPDATE worker_runtime_policy SET revision = 2, global_llm_request_concurrency = 2,
+                      project_judgment_concurrency = 2, project_chat_profile_concurrency = 2,
+                      updated_at = ? WHERE singleton_id = 1""",
+            (utc_now(),),
+        )
+        self.conn.commit()
+        first_entered = threading.Event()
+        release_first = threading.Event()
+        second_entered = threading.Event()
+
+        def first_request() -> None:
+            with outbound_request_slot("llm", 64):
+                first_entered.set()
+                release_first.wait(timeout=10)
+
+        def second_request() -> None:
+            with outbound_request_slot("llm", 64):
+                second_entered.set()
+
+        environment = {
+            "DATABASE_URL": self.database_url,
+            "PGOPTIONS": f"-c search_path={self.schema}",
+            "KRIS_RESOURCE_LIMITER_BACKEND": "postgres",
+            "KRIS_RESOURCE_SLOT_WAIT_SECONDS": "10",
+        }
+        with patch.dict(os.environ, environment):
+            first = threading.Thread(target=first_request)
+            first.start()
+            self.assertTrue(first_entered.wait(timeout=5))
+            self.conn.execute(
+                """UPDATE worker_runtime_policy SET revision = 3, global_llm_request_concurrency = 1,
+                          project_judgment_concurrency = 1, project_chat_profile_concurrency = 1,
+                          updated_at = ? WHERE singleton_id = 1""",
+                (utc_now(),),
+            )
+            self.conn.commit()
+            second = threading.Thread(target=second_request)
+            second.start()
+            self.assertFalse(second_entered.wait(timeout=0.2))
+            release_first.set()
+            self.assertTrue(second_entered.wait(timeout=5))
+            first.join(timeout=5)
+            second.join(timeout=5)
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
 
     def test_killed_running_worker_requeues_and_second_worker_completes(self) -> None:
         first_request = threading.Event()

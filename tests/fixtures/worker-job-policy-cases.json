@@ -19,5 +19,26 @@
     { "job_type": "reader-import-web", "payload": { "body": { "urls": ["https://例子.test/a"] } }, "key": "reader-import:2d470871db71a97b9d7a57e5a97c74ea235a243dff1448b96b73e6ec8fa81c7b" },
     { "job_type": "reader-save-obsidian", "payload": { "paper_id": 19 }, "key": "obsidian-path:19" },
     { "job_type": "paper-report", "payload": { "paper_id": 20 }, "key": "paper:20:report" }
-  ]
+  ],
+  "runtime": {
+    "row": {
+      "revision": 7,
+      "worker_process_count": 3,
+      "global_llm_request_concurrency": 4,
+      "global_embedding_request_concurrency": 4,
+      "embedding_concurrency": 2,
+      "project_judgment_concurrency": 3,
+      "project_chat_profile_concurrency": 2
+    },
+    "overrides": [
+      { "concurrency_group": "reader-import", "max_running": 3, "policy_revision": 7 },
+      { "concurrency_group": "artifact-index", "max_running": null, "policy_revision": 7 }
+    ],
+    "expected_groups": {
+      "reader-import": { "default_max_running": 2, "max_running": 3, "source": "override", "editable": true },
+      "artifact-index": { "default_max_running": 2, "max_running": null, "source": "override", "editable": true },
+      "daily": { "default_max_running": 1, "max_running": 1, "source": "invariant", "editable": false },
+      "paper-report": { "default_max_running": null, "max_running": null, "source": "unlimited", "editable": false }
+    }
+  }
 }

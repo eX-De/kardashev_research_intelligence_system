@@ -201,7 +201,7 @@ test("ordinary enqueue creates only worker task state and queued outbox event tr
     assert.deepEqual(result.worker_job.payload, { scope: "daily" });
     assert.equal(result.worker_job.max_attempts, 1);
     assert.equal(result.worker_job.concurrency_group, "llm");
-    assert.equal(result.worker_job.policy_version, 1);
+    assert.equal(result.worker_job.policy_version, 2);
     assert.equal(fake.appEvents.length, 1);
     assert.equal(fake.appEvents[0].event_type, "task.started");
     const payload = JSON.parse(fake.appEvents[0].payload_json);

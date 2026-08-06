@@ -6,6 +6,7 @@ from typing import Any
 
 from .db import from_json, to_json, utc_now
 from .job_policy import policy_aging_seconds, resolve_worker_job_policy, worker_job_policy
+from .runtime_policy import effective_group_limit, load_runtime_policy
 
 
 _LOCAL_CLAIM_LOCK = threading.RLock()
@@ -471,6 +472,11 @@ def claim_next_worker_job(conn: Any, worker_id: str, *, now: str | None = None) 
     normalized_worker_id = _required_worker_id(worker_id)
     is_postgres = getattr(conn, "dialect", "") == "postgres"
     is_sqlite = conn.__class__.__module__ == "sqlite3"
+    try:
+        runtime_snapshot = load_runtime_policy(conn) if is_postgres else None
+    except Exception:
+        conn.rollback()
+        raise
     if not is_postgres:
         _LOCAL_CLAIM_LOCK.acquire()
     try:
@@ -526,21 +532,35 @@ def claim_next_worker_job(conn: Any, worker_id: str, *, now: str | None = None) 
             key = str(candidate_job.get("concurrency_key") or "")
             try:
                 policy = worker_job_policy(str(candidate_job.get("job_type") or ""))
-            except RuntimeError:
-                continue
+                if str(policy["concurrency_group"]) != group:
+                    raise RuntimeError(
+                        f"worker job {candidate_job.get('id')} has concurrency group {group!r}, "
+                        f"expected {policy['concurrency_group']!r}"
+                    )
+                limit = (
+                    effective_group_limit(runtime_snapshot, group)
+                    if runtime_snapshot is not None
+                    else policy["default_max_running"]
+                )
+            except Exception:
+                conn.rollback()
+                raise
             if not is_postgres and not is_sqlite:
                 row = candidate
                 break
             if not is_postgres:
-                occupied = conn.execute(
-                    "SELECT COUNT(*) AS count FROM worker_jobs WHERE status = 'running' AND concurrency_group = ?",
-                    (group,),
-                ).fetchone()
                 duplicate = key and conn.execute(
                     "SELECT 1 AS present FROM worker_jobs WHERE status = 'running' AND concurrency_key = ? LIMIT 1",
                     (key,),
                 ).fetchone()
-                if int(occupied["count"] or 0) < int(policy["max_running"]) and not duplicate:
+                occupied_count = 0
+                if limit is not None:
+                    occupied = conn.execute(
+                        "SELECT COUNT(*) AS count FROM worker_jobs WHERE status = 'running' AND concurrency_group = ?",
+                        (group,),
+                    ).fetchone()
+                    occupied_count = int(occupied["count"] or 0)
+                if (limit is None or occupied_count < limit) and not duplicate:
                     row = candidate
                     break
                 continue
@@ -548,14 +568,10 @@ def claim_next_worker_job(conn: Any, worker_id: str, *, now: str | None = None) 
             def abandon_candidate() -> None:
                 conn.execute("ROLLBACK TO SAVEPOINT claim_candidate")
                 conn.execute("RELEASE SAVEPOINT claim_candidate")
-            conn.execute(
-                "SELECT pg_advisory_xact_lock(hashtextextended(?, 76103))",
-                (f"worker-group:{group}",),
-            )
-            if key:
+            if limit is not None:
                 conn.execute(
-                    "SELECT pg_advisory_xact_lock(hashtextextended(?, 76104))",
-                    (f"worker-key:{key}",),
+                    "SELECT pg_advisory_xact_lock(hashtextextended(?, 76103))",
+                    (f"worker-group:{group}",),
                 )
             locked = conn.execute(
                 f"SELECT {_worker_job_select_columns()} FROM worker_jobs WHERE id = ? AND status = 'queued' FOR UPDATE SKIP LOCKED",
@@ -564,13 +580,19 @@ def claim_next_worker_job(conn: Any, worker_id: str, *, now: str | None = None) 
             if not locked:
                 abandon_candidate()
                 continue
-            occupied = conn.execute(
-                "SELECT COUNT(*) AS count FROM worker_jobs WHERE status = 'running' AND concurrency_group = ?",
-                (group,),
-            ).fetchone()
-            if int(occupied["count"] or 0) >= int(policy["max_running"]):
-                abandon_candidate()
-                continue
+            if key:
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(?, 76104))",
+                    (f"worker-key:{key}",),
+                )
+            if limit is not None:
+                occupied = conn.execute(
+                    "SELECT COUNT(*) AS count FROM worker_jobs WHERE status = 'running' AND concurrency_group = ?",
+                    (group,),
+                ).fetchone()
+                if int(occupied["count"] or 0) >= limit:
+                    abandon_candidate()
+                    continue
             if key:
                 duplicate = conn.execute(
                     "SELECT 1 AS present FROM worker_jobs WHERE status = 'running' AND concurrency_key = ? LIMIT 1",

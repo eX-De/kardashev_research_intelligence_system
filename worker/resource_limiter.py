@@ -47,6 +47,7 @@ def outbound_request_slot(kind: str, limit: int) -> Iterator[None]:
         return
 
     from .db import connect
+    from .runtime_policy import load_runtime_policy
 
     lock_conn = connect()
     acquired_slot: int | None = None
@@ -56,6 +57,12 @@ def outbound_request_slot(kind: str, limit: int) -> Iterator[None]:
             namespace = _NAMESPACES[normalized]
             lock_conn.execute("SELECT pg_advisory_lock(?, -1)", (namespace,))
             try:
+                snapshot = load_runtime_policy(lock_conn)
+                configured = int(snapshot[
+                    "global_llm_request_concurrency"
+                    if normalized == "llm"
+                    else "global_embedding_request_concurrency"
+                ])
                 occupied = lock_conn.execute(
                     """SELECT COUNT(*) AS count FROM pg_locks
                        WHERE locktype = 'advisory' AND granted AND classid = ?::oid
@@ -72,6 +79,12 @@ def outbound_request_slot(kind: str, limit: int) -> Iterator[None]:
                             acquired_slot = slot
                             break
             finally:
+                # A failed policy read aborts the transaction; rollback first so the
+                # session-level coordinator lock can still be released fail-closed.
+                try:
+                    lock_conn.rollback()
+                except Exception:
+                    pass
                 lock_conn.execute("SELECT pg_advisory_unlock(?, -1)", (namespace,))
             if acquired_slot is None:
                 if time.monotonic() >= deadline:

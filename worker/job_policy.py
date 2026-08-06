@@ -17,7 +17,7 @@ def policy_document() -> dict[str, Any]:
     inventory = json.loads(_POLICY_PATH.with_name("worker-job-inventory.json").read_text(encoding="utf-8-sig"))
     inventory_types = {str(entry.get("type") or "") for entry in inventory.get("jobs", [])}
     jobs = document.get("jobs") or {}
-    required = {"execution_mode", "concurrency_group", "max_running", "key_fields", "priority", "default_max_attempts", "user_visible"}
+    required = {"execution_mode", "concurrency_group", "limit_mode", "default_max_running", "key_fields", "priority", "default_max_attempts", "user_visible"}
     valid = (
         int(document.get("version") or 0) >= 1
         and set(jobs) == inventory_types
@@ -25,7 +25,13 @@ def policy_document() -> dict[str, Any]:
             required.issubset(policy)
             and policy.get("execution_mode") in {"background", "interactive", "node"}
             and str(policy.get("concurrency_group") or "").strip()
-            and isinstance(policy.get("max_running"), int) and int(policy["max_running"]) >= 1
+            and policy.get("limit_mode") in {"invariant", "capacity", "unlimited"}
+            and (
+                policy.get("default_max_running") is None
+                if policy.get("limit_mode") == "unlimited"
+                else isinstance(policy.get("default_max_running"), int)
+                and int(policy["default_max_running"]) >= 1
+            )
             and isinstance(policy.get("key_fields"), list)
             and isinstance(policy.get("priority"), int)
             and isinstance(policy.get("default_max_attempts"), int) and int(policy["default_max_attempts"]) >= 1
@@ -33,13 +39,13 @@ def policy_document() -> dict[str, Any]:
             for policy in jobs.values()
         )
     )
-    group_limits: dict[str, int] = {}
+    group_policies: dict[str, tuple[str, int | None]] = {}
     for policy in jobs.values():
         group = str(policy.get("concurrency_group") or "")
-        limit = int(policy.get("max_running") or 0)
-        if group in group_limits and group_limits[group] != limit:
+        current = (str(policy.get("limit_mode") or ""), policy.get("default_max_running"))
+        if group in group_policies and group_policies[group] != current:
             valid = False
-        group_limits[group] = limit
+        group_policies[group] = current
     if not valid:
         raise RuntimeError("config/worker-job-policy.json is invalid")
     return document
@@ -51,6 +57,17 @@ def worker_job_policy(job_type: str) -> dict[str, Any]:
     if not isinstance(policy, dict):
         raise RuntimeError(f"No worker job policy is declared for {normalized or '<empty>'}")
     return {"type": normalized, **policy}
+
+
+def worker_group_policies() -> dict[str, dict[str, Any]]:
+    groups: dict[str, dict[str, Any]] = {}
+    for policy in (policy_document().get("jobs") or {}).values():
+        group = str(policy["concurrency_group"])
+        groups[group] = {
+            "limit_mode": str(policy["limit_mode"]),
+            "default_max_running": policy["default_max_running"],
+        }
+    return groups
 
 
 def _canonical_url(value: Any) -> str:

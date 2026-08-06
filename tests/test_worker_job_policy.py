@@ -5,6 +5,7 @@ from pathlib import Path
 import unittest
 
 from worker.job_policy import policy_document, resolve_worker_job_policy
+from worker.runtime_policy import RuntimePolicyError, merge_runtime_policy
 
 
 class WorkerJobPolicyTests(unittest.TestCase):
@@ -16,7 +17,7 @@ class WorkerJobPolicyTests(unittest.TestCase):
         for item in fixture["cases"]:
             resolved = resolve_worker_job_policy(item["job_type"], item["payload"])
             self.assertEqual(resolved["concurrency_key"], item["key"], item["job_type"])
-            self.assertEqual(resolved["policy_version"], 1)
+            self.assertEqual(resolved["policy_version"], 2)
 
     def test_reader_url_key_is_a_canonical_set_hash(self) -> None:
         left = resolve_worker_job_policy("reader-import-url", {
@@ -41,6 +42,19 @@ class WorkerJobPolicyTests(unittest.TestCase):
             self.assertEqual(resolve_worker_job_policy("reader-import-url", {"body": {"url": url}})["concurrency_key"], expected)
         with self.assertRaisesRegex(RuntimeError, "No worker job policy"):
             resolve_worker_job_policy("unknown-job", {})
+
+    def test_runtime_policy_merge_matches_shared_fixture_and_rejects_invariant_override(self) -> None:
+        fixture = json.loads(
+            (Path(__file__).parent / "fixtures" / "worker-job-policy-cases.json").read_text(encoding="utf-8")
+        )["runtime"]
+        snapshot = merge_runtime_policy(fixture["row"], fixture["overrides"])
+        for group, expected in fixture["expected_groups"].items():
+            for field, value in expected.items():
+                self.assertEqual(snapshot["groups"][group][field], value, f"{group}.{field}")
+        with self.assertRaisesRegex(RuntimePolicyError, "does not allow overrides"):
+            merge_runtime_policy(fixture["row"], [{
+                "concurrency_group": "daily", "max_running": 2, "policy_revision": 7,
+            }])
 
 
 if __name__ == "__main__":
