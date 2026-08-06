@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import os
 import unittest
-import uuid
 
-from worker.db import init_db, to_json
+from helpers import connect_test_db, reset_test_db
+from worker.db import to_json
 from worker.cli import _job_context
-from worker.pg import connect_postgres
 from worker.queue import (
     cancel_worker_job_before_dispatch,
     claim_next_worker_job,
@@ -19,35 +17,15 @@ from worker.queue import (
 class WorkerQueuePostgresTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        database_url = os.environ.get("TEST_DATABASE_URL", "").strip()
-        if not database_url:
-            raise unittest.SkipTest("TEST_DATABASE_URL is not set; skipping isolated worker queue PostgreSQL tests")
-        cls.schema = f"ris_worker_lifecycle_{uuid.uuid4().hex}"
-        cls.conn = connect_postgres(database_url)
-        cls.conn.execute(f'CREATE SCHEMA "{cls.schema}"')
-        cls.conn.execute(f'SET search_path TO "{cls.schema}"')
-        cls.conn.commit()
-        try:
-            init_db(cls.conn)
-        except Exception:
-            cls.conn.rollback()
-            cls.conn.execute("SET search_path TO public")
-            cls.conn.execute(f'DROP SCHEMA IF EXISTS "{cls.schema}" CASCADE')
-            cls.conn.commit()
-            cls.conn.close()
-            raise
+        cls.conn = connect_test_db()
+        cls.schema = cls.conn.test_schema
 
     @classmethod
     def tearDownClass(cls) -> None:
-        cls.conn.rollback()
-        cls.conn.execute("SET search_path TO public")
-        cls.conn.execute(f'DROP SCHEMA IF EXISTS "{cls.schema}" CASCADE')
-        cls.conn.commit()
         cls.conn.close()
 
     def setUp(self) -> None:
-        self.conn.execute("TRUNCATE app_events, worker_instances, worker_jobs, job_runs RESTART IDENTITY CASCADE")
-        self.conn.commit()
+        reset_test_db(self.conn)
 
     def _enqueue(self, *, max_attempts: int = 2) -> int:
         now = "2026-08-05T10:00:00+00:00"

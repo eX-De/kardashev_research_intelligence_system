@@ -9,17 +9,16 @@ import threading
 import tempfile
 import time
 import unittest
-import uuid
 import urllib.request
 import statistics
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
+from helpers import connect_test_db, connect_test_db_peer, reset_test_db
 from worker.db import init_db
 from worker.db import to_json
 from worker.db import utc_now
-from worker.pg import connect_postgres
 from worker.queue import claim_next_worker_job, cleanup_stale_worker_jobs, enqueue_worker_job
 from worker.resource_limiter import outbound_request_slot
 
@@ -27,33 +26,19 @@ from worker.resource_limiter import outbound_request_slot
 class WorkerConcurrencyPostgresTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.database_url = os.environ.get("TEST_DATABASE_URL", "").strip()
-        if not cls.database_url:
-            raise unittest.SkipTest("TEST_DATABASE_URL is not set")
-        cls.schema = f"ris_worker_concurrency_{uuid.uuid4().hex}"
-        cls.conn = connect_postgres(cls.database_url)
-        cls.conn.execute(f'CREATE SCHEMA "{cls.schema}"')
-        cls.conn.execute(f'SET search_path TO "{cls.schema}"')
-        cls.conn.commit()
-        init_db(cls.conn)
+        cls.conn = connect_test_db()
+        cls.database_url = cls.conn.database_url
+        cls.schema = cls.conn.test_schema
 
     @classmethod
     def tearDownClass(cls) -> None:
-        cls.conn.rollback()
-        cls.conn.execute("SET search_path TO public")
-        cls.conn.execute(f'DROP SCHEMA IF EXISTS "{cls.schema}" CASCADE')
-        cls.conn.commit()
         cls.conn.close()
 
     def setUp(self) -> None:
-        self.conn.execute("TRUNCATE app_events, worker_instances, worker_jobs, job_runs RESTART IDENTITY CASCADE")
-        self.conn.commit()
+        reset_test_db(self.conn)
 
     def connection(self):
-        conn = connect_postgres(self.database_url)
-        conn.execute(f'SET search_path TO "{self.schema}"')
-        conn.commit()
-        return conn
+        return connect_test_db_peer(self.conn)
 
     def enqueue(self, job_type: str, payload: dict, *, now: str = "2026-08-05T10:00:00+00:00") -> int:
         return int(enqueue_worker_job(self.conn, job_type, payload, now=now, commit=True)["id"])
