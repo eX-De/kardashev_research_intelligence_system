@@ -12,17 +12,12 @@ function numberValue(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function jobBackend() {
-  return String(process.env.KRIS_JOB_BACKEND || "queue").trim().toLowerCase() || "queue";
-}
-
 export function workerHeartbeatTtlSeconds() {
   return positiveInteger(process.env.KRIS_WORKER_HEARTBEAT_TTL_SECONDS, DEFAULT_HEARTBEAT_TTL_SECONDS, 5);
 }
 
 export async function getWorkerStatus(options = {}, db = { query }) {
   const ttlSeconds = positiveInteger(options.heartbeatTtlSeconds, workerHeartbeatTtlSeconds(), 1);
-  const required = jobBackend() !== "cli";
   const [instancesResult, queueResult, queueBreakdownResult] = await Promise.all([
     db.query(
       `
@@ -124,12 +119,11 @@ export async function getWorkerStatus(options = {}, db = { query }) {
     }
     byGroup[group] = groupStats;
   }
-  const effectivelyRequired = required || queued + running > 0;
-  const available = !effectivelyRequired || liveInstances.length > 0;
+  const available = liveInstances.length > 0;
   return {
-    required: effectivelyRequired,
+    required: true,
     available,
-    state: effectivelyRequired ? (available ? "online" : "offline") : "not_required",
+    state: available ? "online" : "offline",
     heartbeat_ttl_seconds: ttlSeconds,
     online_workers: liveInstances.length,
     registered_workers: instances.length,
@@ -145,7 +139,7 @@ export async function getWorkerStatus(options = {}, db = { query }) {
     },
     instances,
     group_occupancy: byGroup,
-    stalled: effectivelyRequired && !available && queued + running > 0
+    stalled: !available && queued + running > 0
   };
 }
 

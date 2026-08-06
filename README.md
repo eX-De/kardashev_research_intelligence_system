@@ -143,7 +143,9 @@ http://localhost:3000
 
 `server.js` 不会在每个 API 请求里重复初始化 schema；源代码模式首次启动或 schema 更新后，先运行 `npm run init-db`。Docker 镜像启动命令仍会先执行 `python -m worker.cli init-db`，再启动 Node 服务。
 
-`KRIS_JOB_BACKEND=queue` 是默认任务后端。源代码模式下，Node 负责把每日流程、同步、抓取、报告生成等重任务写入 `worker_jobs`，`npm start` 会在构建后同时启动 Node API/static 服务、常驻 Python worker 和交互式 compute service。未显式配置时，启动器会为本次进程生成共享 compute token。
+系统只有三种执行模式：Node 负责在线 API、事务写入与 SSE；compute service 负责 deep search、Reader streaming chat 和追问建议，这些交互请求不创建任务记录；Python worker 只消费 `worker_jobs` 中的持久后台任务。只有每日流程保留 `job_runs` 业务运行记录，普通后台任务不再镜像一份 `job_runs`。
+
+导入 PDF/URL/网页、生成论文报告、构建索引、导出 Obsidian、同步、抓取和每日流程都是异步动作。接口返回 `202` 和 `worker_job_id` 后，可在“任务”页或通知中查看排队、运行、重试、取消与完成状态；浏览器不轮询结果表。
 
 如需单独调试 worker，可另开终端运行：
 
@@ -151,7 +153,9 @@ http://localhost:3000
 npm run worker
 ```
 
-如需临时恢复旧的 Node spawn CLI 行为，可设置 `KRIS_JOB_BACKEND=cli`。
+默认启动一个 worker。需要降低每日流程期间其他任务的排队时间时，可运行 `docker compose up -d --scale worker=2`。并发组、同实体 key 互斥和 PostgreSQL advisory lock 在多副本下仍生效；全局 LLM/embedding 上限跨 worker 与 compute 共享，项目判定、Chat profile 和 embedding 的局部并发仍受全局上限约束。受控基准中第二个 worker 约增加 53 MiB RSS（双 worker 约 105.5 MiB），并按每个副本最多一个活动任务连接外加短时 heartbeat/resource-slot 连接估算 PostgreSQL 容量。部署时应结合供应商 rate-limit/429 指标调整全局上限。
+
+升级旧版本前请先停止服务并备份 PostgreSQL。首次执行 `npm run init-db`（Docker 启动时自动执行）会幂等取消旧 `generate-paper-reports` 批量 pump，把 queued/processing 的论文报告产物转换为逐篇 `paper-report` 任务，并终止已删除类型的活动遗留任务；历史记录保留。建议升级后先启动一个 worker，确认队列和通知正常，再扩到两个副本。
 
 首次进入 dashboard 后，按 onboarding 配置 Obsidian 或创建第一个系统内项目，再到“设置”里配置 arXiv、RAG、LLM provider 和自动化策略。
 
@@ -217,7 +221,6 @@ npm run run-daily
 npm run sync-obsidian
 npm run fetch-arxiv
 npm run cache-arxiv-text
-npm run generate-paper-reports
 npm run generate-reports
 ```
 
@@ -226,7 +229,6 @@ npm run generate-reports
 ```powershell
 python -m worker.cli resume-daily --job-id 123
 python -m worker.cli retry-daily
-python -m worker.cli generate-paper-reports --limit 10
 ```
 
 ## 配置
@@ -238,23 +240,18 @@ python -m worker.cli generate-paper-reports --limit 10
 - `PORT`：Node 服务端口，默认 `3000`。
 - `DATABASE_URL` / `DATABASE_URL_FILE`：PostgreSQL 连接串；设置后优先使用。
 - `POSTGRES_HOST`、`POSTGRES_PORT`、`POSTGRES_DB`、`POSTGRES_USER`、`POSTGRES_PASSWORD` / `POSTGRES_PASSWORD_FILE`：未设置 `DATABASE_URL` 时使用的 PostgreSQL 连接参数；Docker Compose 会默认连接内置 PostgreSQL 17。
-- `PYTHON_BIN`：仅在 `KRIS_JOB_BACKEND=cli` 回退或少量交互式 CLI fallback 时使用的 Python 命令。
+- `PYTHON_BIN`：schema 初始化、worker、compute service 和管理 CLI 使用的 Python 命令。
 - `KRIS_REQUEST_TIMING_LOG`：设为 `1`/`true` 时，Node 为每个普通 `/api/*` 请求输出 `KRIS_REQUEST_TIMING` 日志，包含 method、path、status、duration、worker command 和 response size。
 - `KRIS_WORKER_TIMING_LOG`：设为 `1`/`true` 时，Python worker CLI 输出 `KRIS_WORKER_TIMING` 日志，包含 connect、init_db、stale cleanup、handler 和 total 耗时。
-- `KRIS_STALE_JOB_CLEANUP_ENABLED` / `KRIS_STALE_JOB_CLEANUP_INTERVAL_MS`：控制 Node 启动后执行的 stale job cleanup 定时任务，默认启用且间隔 60000ms。
+- `KRIS_WORKER_STALE_RECOVERY_INTERVAL_SECONDS`：worker 执行 stale job lease 恢复的间隔，默认 30 秒。
 - `KRIS_WORKER_HEARTBEAT_INTERVAL_SECONDS` / `KRIS_WORKER_HEARTBEAT_TTL_SECONDS`：Worker 默认每 5 秒写入实例及当前任务心跳；Node 在 15 秒无心跳后将其判定为离线。
 - `KRIS_WORKER_MONITOR_INTERVAL_MS`：Node 检查 Worker 和停滞队列的间隔，默认 5000ms。
-- `KRIS_WORKER_JOB_STALE_AFTER_SECONDS`：`worker_jobs.running` 的租约恢复阈值，默认 90 秒；Worker 会持续续期，失联超时后 attempts 未耗尽会重排队，耗尽则失败并同步 `job_runs`。
+- `KRIS_WORKER_JOB_STALE_AFTER_SECONDS`：`worker_jobs.running` 的租约恢复阈值，默认 90 秒；Worker 会持续续期，失联超时后 attempts 未耗尽会重排队，耗尽则失败；仅每日流程等带关联业务运行的任务会同步其 `job_runs`。
 - `GLOBAL_LLM_REQUEST_CONCURRENCY`：所有 Worker/compute 进程合计的 LLM 外部请求上限，默认 `4`。
 - `GLOBAL_EMBEDDING_REQUEST_CONCURRENCY`：所有 Worker/compute 进程合计的 embedding 外部请求上限，默认 `4`。`embedding_concurrency`、项目判定和 Chat profile 并发是单批次局部上限，保存时不会超过对应全局上限。
-- `KRIS_JOB_BACKEND`：任务执行后端，默认 `queue`。Node 会写入 `worker_jobs`，由 `python -m worker.service` 常驻 worker 执行；设为 `cli` 可临时回退旧的 Node spawn CLI 行为。
-- `KRIS_COMPUTE_BACKEND`：交互计算后端，默认 `service`。deep search、Reader Chat 和追问建议直接调用常驻 compute service，不写入 `worker_jobs` / `job_runs`；设为 `legacy` 可在一个发布周期内回退旧队列/CLI 路径。
-- `KRIS_PROJECT_CONTEXT_BACKEND`：项目上下文保存后端，默认 `node`。Node 在项目保存事务内持久化原文并提交 `knowledge-document-index`；仅在迁移回滚时设为 `legacy`，两条路径不会同时处理同一次保存。
-- `KRIS_PROJECT_INDEX_BACKEND`：项目索引产物后端，默认 `node`。Node 在一个事务内立即生成或更新 Markdown 产物、写入 artifact 事件并提交索引/导出任务；`legacy` 仅保留为一个发布周期内的 Python CLI 回滚路径，两条路径不会双写。
 - `KRIS_COMPUTE_URL`、`KRIS_COMPUTE_TOKEN` / `KRIS_COMPUTE_TOKEN_FILE`、`KRIS_COMPUTE_TIMEOUT_MS`：Node 到 compute 的内部地址、服务身份和请求超时。Compose 使用不暴露宿主端口的 `compute` 服务，并要求 `secrets/compute_token.txt` 为非空随机值。
-- `KRIS_OUTBOX_POLLER_ENABLED` / `KRIS_OUTBOX_POLL_INTERVAL_MS`：控制 Node 轮询 `app_events` outbox 并转发到 `/api/events`，默认启用且间隔 1000ms。Node 写接口和常驻 worker 的缓存失效事件都会写入 `app_events`；关闭 poller 时，Node 写接口会回退到进程内 SSE，worker 侧仍保留旧 stderr progress 兼容路径。
+- `KRIS_OUTBOX_POLLER_ENABLED` / `KRIS_OUTBOX_POLL_INTERVAL_MS`：控制 Node 轮询 `app_events` outbox 并转发到 `/api/events`，默认启用且间隔 1000ms。Node 写接口和常驻 worker 的缓存失效事件都会写入 `app_events`。
 - `KRIS_WORKER_POLL_INTERVAL_MS` / `KRIS_WORKER_INIT_DB_ON_START`：控制常驻 Python worker 的队列轮询间隔和启动时 schema 初始化。
-- `KRIS_READER_FOLLOWUPS_SYNC_FALLBACK_ENABLED`：仅在 `KRIS_COMPUTE_BACKEND=legacy` 时控制 Reader 追问建议的同步 CLI fallback。
 - Node 固定负责在线读写 API 和浏览器 SSE 适配；Python worker 负责持久后台任务；独立 compute service 负责 deep search、Reader streaming chat 和 follow-up questions。交互请求拥有 request ID、timeout 和浏览器断开取消传播，不占后台 job slot。
 - `KRIS_PG_POOL_MAX`、`KRIS_PG_IDLE_TIMEOUT_MS`、`KRIS_PG_CONNECTION_TIMEOUT_MS`：Node 侧 PostgreSQL 连接池参数。当前 schema 初始化仍由 `npm run init-db` / Python worker schema owner 负责。
 - `PANEL_PASSWORD` / `PANEL_PASSWORD_FILE`：单密码保护；为空时无密码模式。
@@ -460,7 +457,6 @@ docker compose --profile nginx up -d
 | `npm run sync-obsidian` | 同步 Obsidian/项目上下文 |
 | `npm run fetch-arxiv` | 抓取 arXiv 并缓存粗筛后的全文 |
 | `npm run cache-arxiv-text` | 为已入库论文补缓存 PDF/TXT |
-| `npm run generate-paper-reports` | 处理论文全文报告队列 |
 | `npm run generate-reports` | 生成日报 artifact |
 | `npm run run-daily` | 执行完整每日流水线 |
 | `npm run test` | 运行 Python unittest 和 Node helper 测试 |

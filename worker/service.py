@@ -25,7 +25,7 @@ from .queue import (
 )
 from .settings_store import apply_stored_settings
 from .job_policy import resolve_worker_job_policy
-from .api import export_artifact, project_detail
+from .api import export_artifact
 from .cli import (
     run_cache_arxiv_text_job,
     run_daily_job,
@@ -34,7 +34,7 @@ from .cli import (
     run_rank_job,
     run_sync_obsidian_job,
 )
-from .knowledge import index_knowledge_document, save_manual_project_context
+from .knowledge import index_knowledge_document
 from .paper_reader import import_reader_pdfs, import_reader_urls, import_reader_webpages, save_reader_note_to_obsidian
 from .artifact_index import index_artifact, remove_artifact_index
 from .search_backfill import backfill_search_indexes
@@ -92,7 +92,6 @@ EXPLICIT_WORKER_JOB_TYPES = {
     "resume-daily",
     "retry-daily",
     "knowledge-document-index",
-    "project-context",
     "artifact-export-obsidian",
     "reader-import-upload",
     "reader-import-url",
@@ -442,10 +441,6 @@ def _publish_project_domain_events(conn: Any, worker_job: dict[str, Any], result
     job_type = str(worker_job.get("job_type") or "")
     payload = _payload(worker_job)
     project_id = _optional_int(payload.get("project_id"))
-    if job_type == "project-context":
-        project = _compact_project_payload(result, project_id)
-        insert_app_event(conn, "project.updated", {"project": project, "project_id": project["project_id"], "reason": "project_context"})
-        return
     result_summary = _result_summary(result, PROJECT_RESULT_CHANGE_KEYS)
     if not result_summary:
         return
@@ -606,28 +601,6 @@ def _publish_paper_domain_events(conn: Any, worker_job: dict[str, Any], result: 
     )
 
 
-def run_project_context_job(conn: Any, settings: Any, worker_job: dict[str, Any]) -> dict[str, Any]:
-    """Temporary rollback-only implementation for KRIS_PROJECT_CONTEXT_BACKEND=legacy."""
-    payload = _payload(worker_job)
-    project_id = _required_int(payload.get("project_id"), "project_id")
-    raw_context = clean_unicode(str(payload.get("raw_context") or payload.get("context") or payload.get("project_context") or "")).strip()
-    if not raw_context:
-        raise RuntimeError("Project context cannot be empty")
-    context_document = save_manual_project_context(
-        conn,
-        settings,
-        project_id,
-        raw_context,
-        title=clean_unicode(str(payload.get("title") or "")).strip() or None,
-        source_uri=clean_unicode(str(payload.get("source_uri") or "")).strip() or None,
-        relation=clean_unicode(str(payload.get("relation") or "primary")).strip() or "primary",
-        weight=float(payload.get("weight") or 1.0),
-    )
-    detail = project_detail(conn, project_id)
-    detail["context_document"] = context_document
-    return detail
-
-
 def dispatch_worker_job(conn: Any, settings: Any, worker_job: dict[str, Any]) -> dict[str, Any]:
     job_type = str(worker_job.get("job_type") or "")
     job_run_id = int(worker_job["job_run_id"]) if worker_job.get("job_run_id") else None
@@ -675,9 +648,6 @@ def dispatch_worker_job(conn: Any, settings: Any, worker_job: dict[str, Any]) ->
             project_id=_required_int(payload.get("project_id"), "project_id"),
             expected_content_hash=clean_unicode(str(payload.get("content_hash") or "")).strip(),
         )
-
-    if job_type == "project-context":
-        return run_project_context_job(conn, settings, worker_job)
 
     if job_type == "artifact-export-obsidian":
         artifact_id = _required_int(payload.get("artifact_id"), "artifact_id")

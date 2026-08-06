@@ -158,18 +158,6 @@
                                                   "default_max_attempts":  1,
                                                   "user_visible":  true
                                               },
-                 "project-context":  {
-                                         "execution_mode":  "background",
-                                         "concurrency_group":  "knowledge-index",
-                                         "max_running":  2,
-                                         "key_fields":  [
-                                                            "project_id"
-                                                        ],
-                                         "key_prefix":  "project-context",
-                                         "priority":  10,
-                                         "default_max_attempts":  1,
-                                         "user_visible":  true
-                                     },
                  "artifact-export-obsidian":  {
                                                   "execution_mode":  "background",
                                                   "concurrency_group":  "obsidian",

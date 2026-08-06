@@ -13,7 +13,6 @@
     { "job_type": "resume-daily", "payload": {}, "key": "global:daily" },
     { "job_type": "retry-daily", "payload": {}, "key": "global:daily" },
     { "job_type": "knowledge-document-index", "payload": { "document_id": 17 }, "key": "document:17" },
-    { "job_type": "project-context", "payload": { "project_id": 18 }, "key": "project-context:18" },
     { "job_type": "artifact-export-obsidian", "payload": { "destination_path": "C:\\Vault\\研究.md" }, "key": "obsidian-path:C:/Vault/研究.md" },
     { "job_type": "reader-import-upload", "payload": { "body": { "files": [{ "sha256": "abc" }, { "sha256": "def" }] } }, "key": "reader-import:abc" },
     { "job_type": "reader-import-url", "payload": { "body": { "urls": ["https://a.test/x", "https://b.test/y"] } }, "key": "reader-import:9344f18d6c7767593701631363063fcc6fbaaa282aec664939354e2dc6be9a64" },

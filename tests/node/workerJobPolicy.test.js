@@ -7,7 +7,7 @@ import { allWorkerJobPolicies, resolveWorkerJobPolicy } from "../../server/worke
 const fixture = JSON.parse(readFileSync(new URL("../fixtures/worker-job-policy-cases.json", import.meta.url), "utf8"));
 
 test("worker policy covers every job and resolves contract fixture", () => {
-  assert.equal(allWorkerJobPolicies().length, 20);
+  assert.equal(allWorkerJobPolicies().length, 19);
   for (const item of fixture.cases) {
     const resolved = resolveWorkerJobPolicy(item.job_type, item.payload);
     assert.equal(resolved.concurrency_key, item.key, item.job_type);

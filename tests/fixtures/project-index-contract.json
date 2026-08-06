@@ -1,5 +1,5 @@
 {
-  "legacy_renderer": "worker.artifacts.generate_project_index_artifact",
+  "renderer": "server.projectIndex.buildProjectIndexDocument",
   "input": {
     "project": {
       "id": 7,

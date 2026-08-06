@@ -19,19 +19,6 @@ test("npm start initializes the schema before launching compute, api, and worker
   assert.deepEqual(order, ["init-db", "compute", "api", "worker"]);
 });
 
-test("legacy compute backend does not launch or require compute service", () => {
-  const previous = process.env.KRIS_COMPUTE_BACKEND;
-  process.env.KRIS_COMPUTE_BACKEND = "legacy";
-  const launched = [];
-  try {
-    main({ installSignals() {}, initialize() {}, launch(name) { launched.push(name); } });
-    assert.deepEqual(launched, ["api", "worker"]);
-  } finally {
-    if (previous === undefined) delete process.env.KRIS_COMPUTE_BACKEND;
-    else process.env.KRIS_COMPUTE_BACKEND = previous;
-  }
-});
-
 test("schema initialization failure prevents both long-running processes", () => {
   const launched = [];
 

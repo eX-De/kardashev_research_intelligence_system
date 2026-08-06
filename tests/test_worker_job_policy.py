@@ -12,7 +12,7 @@ class WorkerJobPolicyTests(unittest.TestCase):
         fixture = json.loads(
             (Path(__file__).parent / "fixtures" / "worker-job-policy-cases.json").read_text(encoding="utf-8")
         )
-        self.assertEqual(len(policy_document()["jobs"]), 20)
+        self.assertEqual(len(policy_document()["jobs"]), 19)
         for item in fixture["cases"]:
             resolved = resolve_worker_job_policy(item["job_type"], item["payload"])
             self.assertEqual(resolved["concurrency_key"], item["key"], item["job_type"])

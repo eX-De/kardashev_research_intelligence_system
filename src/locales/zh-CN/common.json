@@ -81,10 +81,7 @@
     "generate-reports": "生成研究报告",
     "sync-obsidian": "同步 Obsidian",
     "rank-papers": "论文排序",
-    "project-index": "构建项目索引",
-    "project-export-obsidian": "导出项目到 Obsidian",
-    "knowledge-document-index": "索引知识文档",
-    "project-context": "保存项目上下文（回滚）"
+    "knowledge-document-index": "索引知识文档"
   },
   "jobStatus": {
     "queued": "排队中",

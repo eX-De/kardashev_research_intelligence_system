@@ -81,15 +81,6 @@ class WorkerCliLifecycleTests(unittest.TestCase):
         lifecycle.mark_stale.assert_called_once_with(lifecycle.conn)
         self.assertTrue(lifecycle.conn.closed)
 
-    def test_api_jobs_cleanup_invokes_single_explicit_stale_scan(self) -> None:
-        with without_lifecycle_env(), patched_db_lifecycle({"stale_jobs_marked": 2}) as lifecycle, \
-            patch("worker.cli._print_json") as print_json:
-            cli.cmd_api_jobs_cleanup(SimpleNamespace())
-
-        lifecycle.init_db.assert_not_called()
-        lifecycle.mark_stale.assert_called_once_with(lifecycle.conn)
-        print_json.assert_called_once_with({"ok": True, "stale_jobs_marked": 2})
-        self.assertTrue(lifecycle.conn.closed)
 
 
 if __name__ == "__main__":

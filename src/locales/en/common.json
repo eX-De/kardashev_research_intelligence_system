@@ -81,10 +81,7 @@
     "generate-reports": "Generate research reports",
     "sync-obsidian": "Sync Obsidian",
     "rank-papers": "Rank papers",
-    "project-index": "Build project index",
-    "project-export-obsidian": "Export project to Obsidian",
-    "knowledge-document-index": "Index knowledge document",
-    "project-context": "Save project context (rollback)"
+    "knowledge-document-index": "Index knowledge document"
   },
   "jobStatus": {
     "queued": "Queued",

@@ -9,7 +9,7 @@ import {
 } from "../../server/workerJobInventory.js";
 
 test("worker job inventory has unique types, notification labels, and observation groups", () => {
-  assert.equal(WORKER_JOB_TYPES.length, 20);
+  assert.equal(WORKER_JOB_TYPES.length, 19);
   assert.equal(new Set(WORKER_JOB_TYPES).size, WORKER_JOB_TYPES.length);
   for (const entry of WORKER_JOB_INVENTORY) {
     assert.ok(entry.label.trim(), `${entry.type} label`);

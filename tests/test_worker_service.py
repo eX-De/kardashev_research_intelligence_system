@@ -25,7 +25,7 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         entries = worker_job_inventory()
         inventory_types = {str(entry["type"]) for entry in entries}
         self.assertEqual(inventory_types, set(service.SUPPORTED_WORKER_JOB_TYPES))
-        self.assertEqual(len(entries), 20)
+        self.assertEqual(len(entries), 19)
         for entry in entries:
             self.assertTrue(str(entry.get("label") or "").strip(), entry["type"])
             self.assertTrue(worker_job_concurrency_group(str(entry["type"])).strip(), entry["type"])
@@ -88,15 +88,6 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         automatic = _paper_report_result({**base, "source_type": "arxiv", "arxiv_id": "2607.00001"})
         self.assertFalse(automatic["manual_import"])
 
-    def test_dispatch_generate_paper_reports_is_removed(self) -> None:
-        worker_job = {
-            "id": 7,
-            "job_run_id": 42,
-            "job_type": "generate-paper-reports",
-            "payload": {"command": "generate-paper-reports", "args": ["--limit", "1"]},
-        }
-        with self.assertRaisesRegex(RuntimeError, "Unsupported worker job type"):
-            service.dispatch_worker_job(object(), object(), worker_job)
 
     def test_dispatch_ordinary_cli_job_disables_implicit_job_run_tracking(self) -> None:
         conn = object()
@@ -134,17 +125,6 @@ class WorkerServiceDispatchTests(unittest.TestCase):
             job_id=43,
         )
 
-    def test_removed_project_index_worker_dispatcher_is_rejected(self) -> None:
-        conn = object()
-        settings = object()
-        worker_job = {
-            "id": 10,
-            "job_run_id": 45,
-            "job_type": "project-index",
-            "payload": {"command": "project-index", "project_id": 5, "export_to_obsidian": True},
-        }
-        with self.assertRaisesRegex(RuntimeError, "Unsupported worker job type: project-index"):
-            service.dispatch_worker_job(conn, settings, worker_job)
 
     def test_dispatch_knowledge_document_index_uses_identity_and_content_hash_only(self) -> None:
         conn = object()

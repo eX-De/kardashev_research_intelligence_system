@@ -462,6 +462,9 @@ class WorkerConcurrencyPostgresTests(unittest.TestCase):
                     if worker: worker.wait(timeout=10)
 
     def test_init_rebinds_active_policy_and_terminalizes_unknown_legacy_job(self) -> None:
+        self.conn.execute(
+            "DELETE FROM app_settings WHERE key = 'schema_migration.worker_ownership_stage7'"
+        )
         known = self.enqueue("paper-report", {"paper_id": 77})
         self.conn.execute(
             "UPDATE worker_jobs SET concurrency_group = 'wrong', concurrency_key = '', policy_version = 0 WHERE id = ?",
@@ -479,6 +482,17 @@ class WorkerConcurrencyPostgresTests(unittest.TestCase):
                RETURNING id""",
             (run_id, to_json({"command": "generate-paper-reports"}), now, now, now),
         ).fetchone()["id"])
+        paper_id = int(self.conn.execute(
+            """INSERT INTO papers(canonical_key, title, created_at, updated_at)
+               VALUES ('stage7:migration', 'Stage 7 migration paper', ?, ?) RETURNING id""",
+            (now, now),
+        ).fetchone()["id"])
+        self.conn.execute(
+            """INSERT INTO artifacts(scope_type, scope_id, artifact_type, title, content_markdown,
+                   content_json, status, source_json, created_at, updated_at)
+               VALUES ('paper', ?, 'paper_report', 'Queued report', '', ?, 'queued', '{}', ?, ?)""",
+            (paper_id, to_json({"prompt": "Preserve this prompt"}), now, now),
+        )
         self.conn.commit()
 
         init_db(self.conn)
@@ -487,11 +501,82 @@ class WorkerConcurrencyPostgresTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual((rebound["concurrency_group"], rebound["concurrency_key"], int(rebound["policy_version"])),
                          ("paper-report", "paper:77:report", 1))
-        failed = self.conn.execute(
+        cancelled = self.conn.execute(
             "SELECT status, locked_by, locked_at FROM worker_jobs WHERE id = ?", (legacy,)
         ).fetchone()
-        self.assertEqual((failed["status"], failed["locked_by"], failed["locked_at"]), ("failed", "", None))
-        self.assertEqual(self.conn.execute("SELECT status FROM job_runs WHERE id = ?", (run_id,)).fetchone()["status"], "failed")
+        self.assertEqual((cancelled["status"], cancelled["locked_by"], cancelled["locked_at"]), ("cancelled", "", None))
+        self.assertEqual(self.conn.execute("SELECT status FROM job_runs WHERE id = ?", (run_id,)).fetchone()["status"], "cancelled")
+        report_jobs = self.conn.execute(
+            """SELECT payload_json, concurrency_key FROM worker_jobs
+               WHERE job_type = 'paper-report' AND status IN ('queued', 'running')
+                 AND payload_json::jsonb ->> 'paper_id' = ?""",
+            (str(paper_id),),
+        ).fetchall()
+        self.assertEqual(len(report_jobs), 1)
+        self.assertEqual(report_jobs[0]["concurrency_key"], f"paper:{paper_id}:report")
+
+        event_count_after_first_init = int(
+            self.conn.execute("SELECT COUNT(*) AS count FROM app_events").fetchone()["count"]
+        )
+        init_db(self.conn)
+        self.assertEqual(
+            self.conn.execute(
+                """SELECT COUNT(*) AS count FROM worker_jobs
+                   WHERE job_type = 'paper-report' AND status IN ('queued', 'running')
+                     AND payload_json::jsonb ->> 'paper_id' = ?""",
+                (str(paper_id),),
+            ).fetchone()["count"],
+            1,
+        )
+        self.assertEqual(
+            int(self.conn.execute("SELECT COUNT(*) AS count FROM app_events").fetchone()["count"]),
+            event_count_after_first_init,
+        )
+
+    def test_stage7_migration_rolls_back_and_retries_after_failure(self) -> None:
+        now = "2026-08-05T11:00:00+00:00"
+        self.conn.execute("DELETE FROM app_settings WHERE key = 'schema_migration.worker_ownership_stage7'")
+        paper_id = int(self.conn.execute(
+            """INSERT INTO papers(canonical_key, title, created_at, updated_at)
+               VALUES ('stage7:retry', 'Stage 7 retry paper', ?, ?) RETURNING id""",
+            (now, now),
+        ).fetchone()["id"])
+        self.conn.execute(
+            """INSERT INTO artifacts(scope_type, scope_id, artifact_type, title, content_markdown,
+                   content_json, status, source_json, created_at, updated_at)
+               VALUES ('paper', ?, 'paper_report', 'Retry report', '', '{}', 'queued', '{}', ?, ?)""",
+            (paper_id, now, now),
+        )
+        pump_id = int(self.conn.execute(
+            """INSERT INTO worker_jobs(job_type, status, payload_json, created_at, updated_at)
+               VALUES ('generate-paper-reports', 'running', '{}', ?, ?) RETURNING id""",
+            (now, now),
+        ).fetchone()["id"])
+        self.conn.commit()
+
+        with patch(
+            "worker.paper_reports.ensure_paper_report_worker_job",
+            side_effect=RuntimeError("controlled migration failure"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "controlled migration failure"):
+                init_db(self.conn)
+
+        self.assertEqual(
+            self.conn.execute("SELECT status FROM worker_jobs WHERE id = ?", (pump_id,)).fetchone()["status"],
+            "running",
+        )
+        self.assertIsNone(self.conn.execute(
+            "SELECT 1 FROM app_settings WHERE key = 'schema_migration.worker_ownership_stage7'"
+        ).fetchone())
+
+        init_db(self.conn)
+        self.assertEqual(
+            self.conn.execute("SELECT status FROM worker_jobs WHERE id = ?", (pump_id,)).fetchone()["status"],
+            "cancelled",
+        )
+        self.assertIsNotNone(self.conn.execute(
+            "SELECT 1 FROM app_settings WHERE key = 'schema_migration.worker_ownership_stage7'"
+        ).fetchone())
 
     def test_two_real_worker_services_execute_each_job_once(self) -> None:
         env = {
@@ -582,7 +667,6 @@ class WorkerConcurrencyPostgresTests(unittest.TestCase):
                 "PORT": str(port),
                 "PANEL_PASSWORD": "",
                 "KRIS_UPDATE_CHECK_ENABLED": "false",
-                "KRIS_PAPER_REPORT_LEGACY_SCANNER_ENABLED": "false",
                 "KRIS_OUTBOX_POLLER_ENABLED": "true",
                 "KRIS_OUTBOX_POLL_INTERVAL_MS": "1000",
                 "ARXIV_PDF_DIR": os.path.join(temp_dir, "pdf"),

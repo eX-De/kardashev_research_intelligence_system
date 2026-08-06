@@ -5,10 +5,9 @@ from pathlib import Path
 
 from helpers import connect_test_db
 from worker.arxiv_archive import archive_zero_match_papers
-from worker.api import library_paper_detail as api_library_paper_detail
 from worker.arxiv_text import replace_arxiv_chunks_for_paper
 from worker.config import Settings
-from worker.paper_reports import paper_report_payload, queue_paper_report
+from worker.paper_reports import paper_report_payload
 from worker.papers import (
     list_paper_library,
     paper_library_detail,
@@ -207,20 +206,6 @@ class PaperLibraryTests(unittest.TestCase):
         self.assertEqual([item["arxiv_id"] for item in first["items"]], ["2605.31001", "2605.31002"])
         self.assertEqual([item["arxiv_id"] for item in second["items"]], ["2605.31001", "2605.31002"])
         self.assertEqual([row["updated_at"] for row in timestamps], ["2026-05-18T00:00:00Z"])
-
-    def test_library_detail_exposes_existing_paper_report_link_target(self) -> None:
-        conn = _conn()
-        arxiv_paper_id = _insert_arxiv_paper(conn, "2605.32001")
-        row = conn.execute("SELECT * FROM arxiv_papers WHERE id = ?", (arxiv_paper_id,)).fetchone()
-        library_paper_id = upsert_paper_from_arxiv(conn, row)
-        queue_paper_report(conn, library_paper_id, prompt="Summarize")
-
-        detail = api_library_paper_detail(conn, library_paper_id)
-
-        self.assertNotIn("legacy_arxiv_paper_id", detail)
-        self.assertEqual(detail["id"], library_paper_id)
-        self.assertEqual(detail["paper_report"]["paper_id"], library_paper_id)
-        self.assertEqual(detail["paper_report"]["status"], "queued")
 
     def test_archive_zero_match_does_not_create_library_paper(self) -> None:
         conn = _conn()

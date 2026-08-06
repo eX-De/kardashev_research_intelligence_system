@@ -143,7 +143,9 @@ Source mode requires PostgreSQL. Set `DATABASE_URL` / `DATABASE_URL_FILE`, or pr
 
 `server.js` does not initialize the schema on every API request. Before the first source-mode start, or after a schema update, run `npm run init-db`. The Docker image entry command still runs `python -m worker.cli init-db` before starting the Node service.
 
-`KRIS_JOB_BACKEND=queue` is the default job backend. Node writes daily pipelines, synchronization, fetching, and report jobs to `worker_jobs`. After building the frontend, `npm start` starts the Node API/static service, persistent Python worker, and interactive compute service. The launcher generates a shared compute token for that process when none is configured.
+The system has exactly three execution modes: Node owns online APIs, transactional writes, and SSE; the compute service owns deep search, Reader streaming chat, and follow-up suggestions without creating job records; the Python worker only consumes persistent `worker_jobs`. Only daily pipelines keep `job_runs` as business-run records. Ordinary background jobs are not mirrored into `job_runs`.
+
+PDF/URL/web imports, paper reports, index generation, Obsidian exports, synchronization, fetching, and daily pipelines are asynchronous actions. After an endpoint returns `202` and a `worker_job_id`, follow queued, running, retry, cancellation, and completion state in Tasks or notifications; the browser does not poll a result table.
 
 To debug the worker separately, open another terminal and run:
 
@@ -151,7 +153,9 @@ To debug the worker separately, open another terminal and run:
 npm run worker
 ```
 
-Set `KRIS_JOB_BACKEND=cli` only when you temporarily need the legacy Node-spawned CLI behavior.
+One worker starts by default. To reduce queue wait while a daily pipeline is active, run `docker compose up -d --scale worker=2`. Concurrency groups, same-entity key mutexes, and PostgreSQL advisory locks remain effective across replicas. Global LLM/embedding limits are shared across workers and compute, while project judgment, Chat profile, and embedding local concurrency remain capped by the global limits. In the controlled baseline, a second worker added about 53 MiB RSS (about 105.5 MiB for two workers). Budget up to one active job connection per replica plus short heartbeat/resource-slot connections, and tune global limits using provider rate-limit/429 telemetry.
+
+Before upgrading an older deployment, stop services and back up PostgreSQL. The first `npm run init-db` (automatic during Docker startup) idempotently cancels the legacy `generate-paper-reports` pump, converts queued/processing report artifacts into per-paper `paper-report` jobs, and terminalizes active jobs whose removed type is no longer supported; history is retained. Start one worker after the upgrade, verify queue and notification state, then scale to two replicas if desired.
 
 On first entry, use onboarding to configure Obsidian or create the first in-system project. Then configure arXiv, RAG, LLM providers, and automation policies in Settings.
 
@@ -217,7 +221,6 @@ npm run run-daily
 npm run sync-obsidian
 npm run fetch-arxiv
 npm run cache-arxiv-text
-npm run generate-paper-reports
 npm run generate-reports
 ```
 
@@ -226,7 +229,6 @@ Recovery and retry commands can call the worker directly:
 ```powershell
 python -m worker.cli resume-daily --job-id 123
 python -m worker.cli retry-daily
-python -m worker.cli generate-paper-reports --limit 10
 ```
 
 ## Configuration
@@ -238,23 +240,18 @@ Key startup settings:
 - `PORT`: Node service port, default `3000`.
 - `DATABASE_URL` / `DATABASE_URL_FILE`: PostgreSQL connection URL. These take precedence when set.
 - `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` / `POSTGRES_PASSWORD_FILE`: PostgreSQL fields used when `DATABASE_URL` is absent. Docker Compose points them to its bundled PostgreSQL 17 service by default.
-- `PYTHON_BIN`: Python command used only by the `KRIS_JOB_BACKEND=cli` fallback and a small number of interactive CLI fallbacks.
+- `PYTHON_BIN`: Python command used for schema initialization, the worker, the compute service, and administrative CLIs.
 - `KRIS_REQUEST_TIMING_LOG`: set to `1` or `true` to emit a `KRIS_REQUEST_TIMING` line for each regular `/api/*` request, including method, path, status, duration, worker command, and response size.
 - `KRIS_WORKER_TIMING_LOG`: set to `1` or `true` to emit Python worker CLI timing for connection, schema initialization, stale cleanup, handler work, and total duration.
-- `KRIS_STALE_JOB_CLEANUP_ENABLED` / `KRIS_STALE_JOB_CLEANUP_INTERVAL_MS`: control Node's stale-job cleanup timer, enabled by default with a 60,000 ms interval.
+- `KRIS_WORKER_STALE_RECOVERY_INTERVAL_SECONDS`: interval for worker-side stale lease recovery, default 30 seconds.
 - `KRIS_WORKER_HEARTBEAT_INTERVAL_SECONDS` / `KRIS_WORKER_HEARTBEAT_TTL_SECONDS`: the Worker writes instance and current-task heartbeats every 5 seconds by default; Node considers it offline after 15 seconds without a heartbeat.
 - `KRIS_WORKER_MONITOR_INTERVAL_MS`: interval for Node to inspect Worker availability and stalled queues, default 5,000 ms.
-- `KRIS_WORKER_JOB_STALE_AFTER_SECONDS`: lease recovery threshold for `worker_jobs.running`, default 90 seconds. The Worker renews the lease while running; after a disconnect, a timed-out job is requeued while attempts remain, or failed and synchronized to `job_runs` after exhaustion.
+- `KRIS_WORKER_JOB_STALE_AFTER_SECONDS`: lease recovery threshold for `worker_jobs.running`, default 90 seconds. The Worker renews the lease while running; after a disconnect, a timed-out job is requeued while attempts remain or failed after exhaustion. Only jobs linked to a daily/business run synchronize that `job_runs` record.
 - `GLOBAL_LLM_REQUEST_CONCURRENCY`: aggregate outbound LLM request limit across all Worker/compute processes, default `4`.
 - `GLOBAL_EMBEDDING_REQUEST_CONCURRENCY`: aggregate outbound embedding request limit across all Worker/compute processes, default `4`. `embedding_concurrency`, project judgment, and Chat profile concurrency remain per-batch local limits and are capped by their global limit when saved.
-- `KRIS_JOB_BACKEND`: job execution backend, default `queue`. Node writes `worker_jobs` for `python -m worker.service`; set it to `cli` only for temporary legacy fallback.
-- `KRIS_COMPUTE_BACKEND`: interactive compute backend, default `service`. Deep search, Reader Chat, and follow-up suggestions call the persistent compute service directly and do not write `worker_jobs` / `job_runs`; use `legacy` only as a one-release rollback path to the old queue/CLI behavior.
-- `KRIS_PROJECT_CONTEXT_BACKEND`: project-context persistence backend, default `node`. Node persists raw context and enqueues `knowledge-document-index` in the project-save transaction; use `legacy` only for migration rollback, and the two paths never process the same save.
-- `KRIS_PROJECT_INDEX_BACKEND`: project-index artifact backend, default `node`. Node immediately creates or updates the Markdown artifact, writes its artifact event, and enqueues indexing/export work in one transaction; `legacy` is a one-release Python CLI rollback path, and the two paths never double-write.
 - `KRIS_COMPUTE_URL`, `KRIS_COMPUTE_TOKEN` / `KRIS_COMPUTE_TOKEN_FILE`, and `KRIS_COMPUTE_TIMEOUT_MS`: internal compute address, service identity, and request timeout. Compose runs `compute` without publishing a host port and requires a non-empty random `secrets/compute_token.txt`.
 - `KRIS_OUTBOX_POLLER_ENABLED` / `KRIS_OUTBOX_POLL_INTERVAL_MS`: control Node polling of the `app_events` outbox and forwarding to `/api/events`, enabled by default at 1,000 ms. Node write endpoints and the persistent worker both write cache-invalidation events to `app_events`.
 - `KRIS_WORKER_POLL_INTERVAL_MS` / `KRIS_WORKER_INIT_DB_ON_START`: configure queue polling and schema initialization for the persistent worker.
-- `KRIS_READER_FOLLOWUPS_SYNC_FALLBACK_ENABLED`: controls the synchronous Reader follow-up CLI fallback only when `KRIS_COMPUTE_BACKEND=legacy`.
 - Node owns online APIs and browser SSE adaptation; the Python worker owns persistent background jobs; the separate compute service owns deep search, Reader streaming chat, and follow-up questions. Interactive requests carry request IDs, timeouts, and browser-disconnect cancellation without occupying background job slots.
 - `KRIS_PG_POOL_MAX`, `KRIS_PG_IDLE_TIMEOUT_MS`, `KRIS_PG_CONNECTION_TIMEOUT_MS`: Node PostgreSQL connection-pool settings. Schema ownership remains with `npm run init-db` and the Python worker.
 - `PANEL_PASSWORD` / `PANEL_PASSWORD_FILE`: single-password protection. An empty value enables passwordless mode.
@@ -460,7 +457,6 @@ docker compose --profile nginx up -d
 | `npm run sync-obsidian` | Synchronize Obsidian and project context |
 | `npm run fetch-arxiv` | Fetch arXiv and cache full text retained by prefiltering |
 | `npm run cache-arxiv-text` | Backfill PDF/TXT caches for stored papers |
-| `npm run generate-paper-reports` | Process the paper-report queue |
 | `npm run generate-reports` | Generate the daily-report artifact |
 | `npm run run-daily` | Run the complete daily pipeline |
 | `npm run test` | Run Python unittest and Node helper tests |

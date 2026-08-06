@@ -97,7 +97,6 @@ test("project index artifact, jobs, dedupe, and outbox are one PostgreSQL transa
         PGOPTIONS: `-c search_path=${schema}`,
         PORT: String(port),
         PANEL_PASSWORD: "",
-        KRIS_PROJECT_INDEX_BACKEND: "node",
         KRIS_OUTBOX_POLLER_ENABLED: "false",
         KRIS_UPDATE_CHECK_ENABLED: "false"
       },

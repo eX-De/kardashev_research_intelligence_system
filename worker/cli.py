@@ -13,14 +13,7 @@ from dataclasses import replace
 from typing import Any, Callable
 
 from .api import (
-    export_artifact,
-    export_project_to_obsidian,
-    generate_paper_reading_report,
-    generate_project_index,
-    health,
-    job_history,
     receive_experiment_report,
-    update_paper_recommendation,
 )
 from .arxiv_archive import archive_zero_match_papers
 from .arxiv_client import ARXIV_RATE_LIMITED, ArxivRateLimitError, fetch_arxiv
@@ -43,25 +36,15 @@ from .llm import generate_missing_project_judgments
 from .knowledge import sync_project_context_documents_from_project_notes
 from .obsidian import OBSIDIAN_NOT_CONFIGURED, ObsidianNotConfiguredError, sync_obsidian
 from .obsidian_remote import obsidian_remote_enabled
-from .paper_reports import ensure_paper_reports_for_recommendations, process_paper_report_queue
+from .paper_reports import ensure_paper_reports_for_recommendations
 from .papers import prune_unqualified_arxiv_library_papers
 from .project_chat_profiles import refresh_project_chat_profiles
 from .search_backfill import backfill_search_indexes
-from .unified_search import deep_search
 from .project_status import run_daily_project_status_sql
-from .paper_reader import (
-    generate_reader_followup_questions,
-    import_reader_pdfs,
-    import_reader_urls,
-    import_reader_webpages,
-    paper_reader_chat_stream,
-    save_reader_note_to_obsidian,
-)
 from .recommendations import sync_project_paper_recommendations
 from .reports import generate_daily_report
 from .search import prefilter_papers, rank_project_papers, rank_unmatched_papers
 from .settings_store import apply_stored_settings
-from .update_check import check_for_updates, read_update_status, update_notification
 from .queue import insert_app_event
 
 
@@ -1632,29 +1615,6 @@ def cmd_generate_reports(_: argparse.Namespace) -> None:
     _print_json({"ok": True, "message": "Daily research report generated", **result})
 
 
-def run_generate_paper_reports_job(
-    conn: DbConnection,
-    settings,
-    *,
-    limit: int | None = None,
-    job_id: int | None = None,
-    track_job_run: bool = True,
-) -> dict[str, Any]:
-    """Legacy synchronous rollback path; never dispatched by the queue worker."""
-    with _job_context(conn, "generate-paper-reports", job_id, track_job_run=track_job_run) as active_job_id:
-        result = ensure_paper_reports_for_recommendations(conn, settings=settings, enqueue_jobs=False)
-        result.update(process_paper_report_queue(conn, settings, limit=limit))
-        if active_job_id:
-            update_job_meta(conn, active_job_id, "Full paper reports generated", result)
-    return result
-
-
-def cmd_generate_paper_reports(args: argparse.Namespace) -> None:
-    limit = int(args.limit) if str(args.limit or "").strip() else None
-    result = _with_db(lambda conn, settings: run_generate_paper_reports_job(conn, settings, limit=limit))
-    _print_json({"ok": True, "message": "Full paper reports generated", **result})
-
-
 def run_daily_job(
     conn: DbConnection,
     settings,
@@ -1966,36 +1926,8 @@ def cmd_run_daily(args: argparse.Namespace) -> None:
     _print_json({"ok": True, "message": "Daily run completed", **result})
 
 
-def cmd_api_paper_recommendation(args: argparse.Namespace) -> None:
-    payload = _read_json_stdin("paper recommendation")
-    result = _with_db(
-        lambda conn, settings: update_paper_recommendation(conn, settings, int(args.paper_id), payload)
-    )
-    _print_json(result)
-
-
 def cmd_backfill_search_indexes(_: argparse.Namespace) -> None:
     result = _with_db(lambda conn, settings: backfill_search_indexes(conn, settings))
-    _print_json(result)
-
-
-def cmd_api_unified_search(_: argparse.Namespace) -> None:
-    payload = _read_json_stdin("unified search")
-    result = _with_db(lambda conn, settings: deep_search(conn, settings, payload))
-    _print_json(result)
-
-
-def cmd_api_paper_report(args: argparse.Namespace) -> None:
-    payload = _read_json_stdin("paper report")
-    result = _with_db(
-        lambda conn, settings: generate_paper_reading_report(conn, settings, int(args.paper_id), payload)
-    )
-    _print_json(result)
-
-
-def cmd_api_artifact_export(args: argparse.Namespace) -> None:
-    payload = _read_json_stdin("artifact export")
-    result = _with_db(lambda conn, settings: export_artifact(conn, settings, int(args.artifact_id), payload))
     _print_json(result)
 
 
@@ -2003,88 +1935,6 @@ def cmd_api_experiment_report(_: argparse.Namespace) -> None:
     payload = _read_json_stdin("experiment report")
     result = _with_db(lambda conn, settings: receive_experiment_report(conn, settings, payload))
     _print_json(result)
-
-
-def _print_json_event(event: str, data: dict[str, object]) -> None:
-    payload = json.dumps(clean_unicode({"event": event, "data": data}), ensure_ascii=False)
-    sys.stdout.buffer.write(payload.encode("utf-8", "replace") + b"\n")
-    sys.stdout.buffer.flush()
-
-
-def cmd_api_reader_chat_stream(args: argparse.Namespace) -> None:
-    payload = _read_json_stdin("paper reader streaming chat")
-
-    def emit(event: str, data: dict[str, object]) -> None:
-        _print_json_event(event, data)
-
-    def run(conn, settings):
-        paper_reader_chat_stream(conn, settings, int(args.paper_id), payload, emit)
-
-    try:
-        _with_db(run)
-    except Exception as exc:
-        emit("error", {"error": str(exc)})
-
-
-def cmd_api_reader_upload(_: argparse.Namespace) -> None:
-    payload = _read_json_stdin("paper reader upload")
-    result = _with_db(lambda conn, settings: import_reader_pdfs(conn, settings, payload))
-    _print_json(result)
-
-
-def cmd_api_reader_urls(_: argparse.Namespace) -> None:
-    payload = _read_json_stdin("paper reader urls")
-    result = _with_db(lambda conn, settings: import_reader_urls(conn, settings, payload))
-    _print_json(result)
-
-
-def cmd_api_reader_web(_: argparse.Namespace) -> None:
-    payload = _read_json_stdin("paper reader webpages")
-    result = _with_db(lambda conn, settings: import_reader_webpages(conn, settings, payload))
-    _print_json(result)
-
-
-def cmd_api_reader_save(args: argparse.Namespace) -> None:
-    result = _with_db(
-        lambda conn, settings: save_reader_note_to_obsidian(conn, settings, int(args.paper_id))
-    )
-    _print_json(result)
-
-
-def cmd_api_reader_followups(args: argparse.Namespace) -> None:
-    payload = _read_json_stdin("paper reader follow-up questions")
-    result = _with_db(
-        lambda conn, settings: generate_reader_followup_questions(conn, settings, int(args.paper_id), payload)
-    )
-    _print_json(result)
-
-
-def cmd_api_project_export(args: argparse.Namespace) -> None:
-    result = _with_db(
-        lambda conn, settings: export_project_to_obsidian(conn, settings, int(args.project_id))
-    )
-    _print_json(result)
-
-
-def cmd_api_project_index(args: argparse.Namespace) -> None:
-    payload = _read_json_stdin("project index")
-    result = _with_db(lambda conn, settings: generate_project_index(conn, settings, int(args.project_id), payload))
-    _print_json(result)
-
-
-def cmd_api_health(_: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: health(conn, settings))
-    _print_json(result)
-
-
-def cmd_api_jobs_history(args: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: job_history(conn, int(args.limit)))
-    _print_json(result)
-
-
-def cmd_api_jobs_cleanup(_: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: mark_stale_job_runs(conn), cleanup_stale=False)
-    _print_json({"ok": True, **result})
 
 
 DAILY_RUN_SNAPSHOT_TABLES = ("daily_run_papers", "daily_run_steps", "daily_run_meta")
@@ -2179,24 +2029,6 @@ def cmd_delete_run(args: argparse.Namespace) -> None:
     _print_json(result)
 
 
-def _update_status_payload(status: dict[str, Any]) -> dict[str, Any]:
-    notification = update_notification(status)
-    result = dict(status)
-    if notification:
-        result["notification"] = notification
-    return result
-
-
-def cmd_api_update_status(_: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: _update_status_payload(read_update_status(conn)))
-    _print_json(result)
-
-
-def cmd_api_update_check(_: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: _update_status_payload(check_for_updates(conn)))
-    _print_json(result)
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="research-intelligence-worker")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2222,10 +2054,6 @@ def build_parser() -> argparse.ArgumentParser:
     reports = sub.add_parser("generate-reports")
     reports.set_defaults(func=cmd_generate_reports)
 
-    paper_reports = sub.add_parser("generate-paper-reports")
-    paper_reports.add_argument("--limit", default="")
-    paper_reports.set_defaults(func=cmd_generate_paper_reports)
-
     daily = sub.add_parser("run-daily")
     daily.add_argument("--resume", action="store_true")
     daily.set_defaults(func=cmd_run_daily, daily_mode="run-daily")
@@ -2243,68 +2071,8 @@ def build_parser() -> argparse.ArgumentParser:
     delete_run.add_argument("--force", action="store_true")
     delete_run.set_defaults(func=cmd_delete_run)
 
-    api_paper_recommendation = sub.add_parser("api-paper-recommendation")
-    api_paper_recommendation.add_argument("paper_id")
-    api_paper_recommendation.set_defaults(func=cmd_api_paper_recommendation)
-
-    api_unified_search = sub.add_parser("api-unified-search")
-    api_unified_search.set_defaults(func=cmd_api_unified_search)
-
-    api_paper_report = sub.add_parser("api-paper-report")
-    api_paper_report.add_argument("paper_id")
-    api_paper_report.set_defaults(func=cmd_api_paper_report)
-
-    api_artifact_export = sub.add_parser("api-artifact-export")
-    api_artifact_export.add_argument("artifact_id")
-    api_artifact_export.set_defaults(func=cmd_api_artifact_export)
-
     api_experiment_report = sub.add_parser("api-experiment-report")
     api_experiment_report.set_defaults(func=cmd_api_experiment_report)
-
-    api_reader_chat_stream = sub.add_parser("api-reader-chat-stream")
-    api_reader_chat_stream.add_argument("paper_id")
-    api_reader_chat_stream.set_defaults(func=cmd_api_reader_chat_stream)
-
-    api_reader_upload = sub.add_parser("api-reader-upload")
-    api_reader_upload.set_defaults(func=cmd_api_reader_upload)
-
-    api_reader_urls = sub.add_parser("api-reader-urls")
-    api_reader_urls.set_defaults(func=cmd_api_reader_urls)
-
-    api_reader_web = sub.add_parser("api-reader-web")
-    api_reader_web.set_defaults(func=cmd_api_reader_web)
-
-    api_reader_save = sub.add_parser("api-reader-save")
-    api_reader_save.add_argument("paper_id")
-    api_reader_save.set_defaults(func=cmd_api_reader_save)
-
-    api_reader_followups = sub.add_parser("api-reader-followups")
-    api_reader_followups.add_argument("paper_id")
-    api_reader_followups.set_defaults(func=cmd_api_reader_followups)
-
-    api_project_export = sub.add_parser("api-project-export")
-    api_project_export.add_argument("project_id")
-    api_project_export.set_defaults(func=cmd_api_project_export)
-
-    api_project_index = sub.add_parser("api-project-index")
-    api_project_index.add_argument("project_id")
-    api_project_index.set_defaults(func=cmd_api_project_index)
-
-    api_health = sub.add_parser("api-health")
-    api_health.set_defaults(func=cmd_api_health)
-
-    api_jobs_history = sub.add_parser("api-jobs-history")
-    api_jobs_history.add_argument("--limit", default="20")
-    api_jobs_history.set_defaults(func=cmd_api_jobs_history)
-
-    api_jobs_cleanup = sub.add_parser("api-jobs-cleanup")
-    api_jobs_cleanup.set_defaults(func=cmd_api_jobs_cleanup)
-
-    api_update_status = sub.add_parser("api-update-status")
-    api_update_status.set_defaults(func=cmd_api_update_status)
-
-    api_update_check = sub.add_parser("api-update-check")
-    api_update_check.set_defaults(func=cmd_api_update_check)
 
     return parser
 

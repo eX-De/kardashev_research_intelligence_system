@@ -892,13 +892,15 @@ def connect():
 def init_db(conn) -> None:
     if getattr(conn, "dialect", "") != "postgres":
         raise RuntimeError("PostgreSQL connection required")
-    if _postgres_schema_current(conn):
-        _refresh_active_worker_job_policies(conn)
-        conn.commit()
-        return
     try:
+        if _postgres_schema_current(conn):
+            _migrate_legacy_paper_report_dispatch(conn)
+            _refresh_active_worker_job_policies(conn)
+            conn.commit()
+            return
         conn.execute("SELECT pg_advisory_xact_lock(?)", (POSTGRES_INIT_LOCK_KEY,))
         if _postgres_schema_current(conn):
+            _migrate_legacy_paper_report_dispatch(conn)
             _refresh_active_worker_job_policies(conn)
             conn.commit()
             return
@@ -912,6 +914,78 @@ def init_db(conn) -> None:
         except Exception:
             pass
         raise
+
+
+def _migrate_legacy_paper_report_dispatch(conn: Any) -> dict[str, int]:
+    """One-time, idempotent handoff from the removed report pump to per-paper jobs."""
+    from .artifacts import PAPER_REPORT_ARTIFACT_TYPE
+    from .paper_reports import ensure_paper_report_worker_job
+    from .queue import insert_app_event, task_event_payload
+
+    marker_key = "schema_migration.worker_ownership_stage7"
+    if conn.execute("SELECT 1 FROM app_settings WHERE key = ?", (marker_key,)).fetchone():
+        return {"legacy_pumps_cancelled": 0, "paper_report_jobs_materialized": 0}
+
+    migrated_at = utc_now()
+    pumps = conn.execute(
+        """
+        UPDATE worker_jobs
+        SET status = 'cancelled', cancel_requested_at = COALESCE(cancel_requested_at, ?),
+            cancel_reason = CASE WHEN cancel_reason = '' THEN ? ELSE cancel_reason END,
+            locked_by = '', locked_at = NULL, finished_at = COALESCE(finished_at, ?), updated_at = ?
+        WHERE job_type = 'generate-paper-reports' AND status IN ('queued', 'running')
+        RETURNING *
+        """,
+        (migrated_at, "Replaced by per-paper report jobs during schema initialization", migrated_at, migrated_at),
+    ).fetchall()
+    for row in pumps:
+        pump = dict(row)
+        pump["payload"] = from_json(pump.get("payload_json"), {})
+        if pump.get("job_run_id") is not None:
+            conn.execute(
+                """UPDATE job_runs SET status = 'cancelled', finished_at = COALESCE(finished_at, ?),
+                       heartbeat_at = ?, message = ? WHERE id = ? AND status IN ('queued', 'running')""",
+                (migrated_at, migrated_at, "Replaced by per-paper report jobs", int(pump["job_run_id"])),
+            )
+        insert_app_event(
+            conn,
+            "task.cancelled",
+            task_event_payload(pump, "cancelled", message="Replaced by per-paper report jobs"),
+            created_at=migrated_at,
+            commit=False,
+        )
+
+    candidates = conn.execute(
+        """
+        SELECT DISTINCT artifact.scope_id AS paper_id, artifact.status, artifact.content_json
+        FROM artifacts artifact
+        JOIN papers paper ON paper.id = artifact.scope_id
+        WHERE artifact.scope_type = 'paper'
+          AND artifact.artifact_type = ?
+          AND artifact.status IN ('queued', 'processing')
+          AND artifact.scope_id IS NOT NULL
+        ORDER BY artifact.scope_id
+        """,
+        (PAPER_REPORT_ARTIFACT_TYPE,),
+    ).fetchall()
+    materialized = 0
+    for row in candidates:
+        content = from_json(row["content_json"], {})
+        result = ensure_paper_report_worker_job(
+            conn,
+            int(row["paper_id"]),
+            source="schema-upgrade",
+            force=str(row["status"] or "") == "processing",
+            prompt=str(content.get("prompt") or "") if isinstance(content, dict) else "",
+            commit=False,
+        )
+        materialized += int(bool(result.get("created")))
+    conn.execute(
+        """INSERT INTO app_settings(key, value_json, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(key) DO NOTHING""",
+        (marker_key, to_json({"completed_at": migrated_at}), migrated_at),
+    )
+    return {"legacy_pumps_cancelled": len(pumps), "paper_report_jobs_materialized": materialized}
 
 
 def _refresh_active_worker_job_policies(conn: Any) -> None:
@@ -1331,6 +1405,7 @@ def _migrate_postgres_db(conn) -> None:
             if column not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
 
+    _migrate_legacy_paper_report_dispatch(conn)
     _refresh_active_worker_job_policies(conn)
 
     _migrate_user_paper_relations_to_canonical(conn)

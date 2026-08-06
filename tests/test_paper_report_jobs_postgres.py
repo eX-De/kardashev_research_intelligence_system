@@ -289,39 +289,32 @@ class PaperReportJobPostgresTests(unittest.TestCase):
         self.assertEqual(final_artifact["status"], "cancelled")
         self.assertNotIn("Late result", final_artifact["content_markdown"])
 
-    def test_paper_report_worker_is_claimable_under_both_global_backends(self) -> None:
-        for backend in ("queue", "cli"):
-            with self.subTest(backend=backend):
-                self.conn.execute(
-                    "UPDATE worker_jobs SET status = 'cancelled', finished_at = ?, updated_at = ? WHERE status = 'queued'",
-                    (utc_now(), utc_now()),
-                )
-                self.conn.commit()
-                paper_id, queued = self._materialized(f"{backend} backend report")
-                worker_conn = connect_postgres(self.database_url)
-                worker_conn.execute(f'SET search_path TO "{self.schema}"')
-                worker_conn.commit()
-                with patch.dict(os.environ, {"KRIS_JOB_BACKEND": backend}), patch(
-                    "worker.service.connect", return_value=worker_conn
-                ), patch("worker.service.load_settings", return_value=self.settings), patch(
-                    "worker.service.apply_stored_settings", return_value=self.settings
-                ), patch("worker.paper_reports._ensure_full_text", return_value="full text"), patch(
-                    "worker.paper_reports._call_chat_text",
-                    return_value=json.dumps({"title": f"{backend} backend report", "markdown": f"# {backend}"}),
-                ):
-                    result = service.run_once(f"{backend}-worker")
-                self.assertTrue(result["claimed"])
-                self.assertEqual(int(result["worker_job"]["id"]), int(queued["id"]))
-                self.assertEqual(
-                    self.conn.execute("SELECT status FROM worker_jobs WHERE id = ?", (queued["id"],)).fetchone()["status"],
-                    "completed",
-                )
-                artifact = self.conn.execute(
-                    "SELECT status, content_markdown FROM artifacts WHERE scope_id = ? AND artifact_type = 'paper_report'",
-                    (paper_id,),
-                ).fetchone()
-                self.assertEqual(artifact["status"], "done")
-                self.assertEqual(artifact["content_markdown"], f"# {backend}")
+    def test_paper_report_worker_is_claimable(self) -> None:
+        paper_id, queued = self._materialized("worker report")
+        worker_conn = connect_postgres(self.database_url)
+        worker_conn.execute(f'SET search_path TO "{self.schema}"')
+        worker_conn.commit()
+        with patch("worker.service.connect", return_value=worker_conn), patch(
+            "worker.service.load_settings", return_value=self.settings
+        ), patch("worker.service.apply_stored_settings", return_value=self.settings), patch(
+            "worker.paper_reports._ensure_full_text", return_value="full text"
+        ), patch(
+            "worker.paper_reports._call_chat_text",
+            return_value=json.dumps({"title": "worker report", "markdown": "# worker"}),
+        ):
+            result = service.run_once("paper-report-worker")
+        self.assertTrue(result["claimed"])
+        self.assertEqual(int(result["worker_job"]["id"]), int(queued["id"]))
+        self.assertEqual(
+            self.conn.execute("SELECT status FROM worker_jobs WHERE id = ?", (queued["id"],)).fetchone()["status"],
+            "completed",
+        )
+        artifact = self.conn.execute(
+            "SELECT status, content_markdown FROM artifacts WHERE scope_id = ? AND artifact_type = 'paper_report'",
+            (paper_id,),
+        ).fetchone()
+        self.assertEqual(artifact["status"], "done")
+        self.assertEqual(artifact["content_markdown"], "# worker")
 
     def test_cancel_and_stale_recovery_cannot_leave_processing_or_commit_late_done(self) -> None:
         paper_id, queued = self._materialized("Cancelled paper")

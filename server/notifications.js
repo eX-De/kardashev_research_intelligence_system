@@ -408,7 +408,7 @@ function repository() {
   return envValue("KRIS_UPDATE_REPOSITORY", DEFAULT_REPOSITORY).trim().replace(/^\/+|\/+$/g, "") || DEFAULT_REPOSITORY;
 }
 
-function updateNotification(status = {}) {
+export function updateNotification(status = {}) {
   if (!status?.available) return null;
   const current = String(status.current_version || "当前版本");
   const latest = String(status.latest_version || status.latest_tag || "新版本");

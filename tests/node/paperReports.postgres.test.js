@@ -7,7 +7,6 @@ import { setPoolForTesting } from "../../server/db.js";
 import {
   cancelPaperReport,
   enqueuePaperReport,
-  materializeLegacyQueuedPaperReports,
   materializeRecommendedPaperReports,
   paperReportConcurrencyKey
 } from "../../server/paperReports.js";
@@ -15,7 +14,7 @@ import {
 const { Client, Pool } = pg;
 const databaseUrl = String(process.env.TEST_DATABASE_URL || "").trim();
 
-test("paper reports materialize, deduplicate, migrate, cancel, and roll back atomically", {
+test("paper reports materialize, deduplicate, cancel, and roll back atomically", {
   skip: databaseUrl ? false : "TEST_DATABASE_URL is not set; skipping PostgreSQL paper-report integration test"
 }, async () => {
   const schema = `ris_paper_report_${Date.now()}_${Math.random().toString(16).slice(2)}`;
@@ -122,57 +121,7 @@ test("paper reports materialize, deduplicate, migrate, cancel, and roll back ato
        VALUES ('paper', $1, 'paper_report', 'Legacy artifact', '', '{"prompt":"legacy"}', 'queued', '{}', '', '', '', $2, $2)`,
       [legacyArtifactPaper, now]
     );
-    const legacyJobPaper = await insertPaper("Legacy job");
-    await admin.query(
-      `INSERT INTO worker_jobs(job_type, status, priority, payload_json, max_attempts, created_at, updated_at)
-       VALUES ('paper-report', 'queued', 10, $1, 2, $2, $2)`,
-      [JSON.stringify({ command: "paper-report", paper_id: legacyJobPaper }), now]
-    );
-    await admin.query(
-      `INSERT INTO worker_jobs(job_type, status, priority, payload_json, max_attempts, created_at, updated_at)
-       VALUES ('paper-report', 'queued', 5, $1, 2, $2, $2)`,
-      [JSON.stringify({ command: "paper-report", paper_id: legacyJobPaper, legacy_duplicate: true }), now]
-    );
-    await admin.query(
-      `INSERT INTO worker_jobs(job_type, status, priority, payload_json, max_attempts, attempts,
-                               locked_by, locked_at, started_at, created_at, updated_at)
-       VALUES
-         ('generate-paper-reports', 'queued', 0, '{}', 1, 0, '', NULL, NULL, $1, $1),
-         ('generate-paper-reports', 'running', 0, '{}', 1, 1, 'legacy-worker', $1, $1, $1, $1)`,
-      [now]
-    );
-    const migrated = await materializeLegacyQueuedPaperReports();
-    assert.equal(migrated.created, 1);
-    assert.equal(migrated.deduplicated, 2);
-    assert.equal(migrated.legacy_pump_jobs_cancelled, 2);
-    assert.equal(Number((await admin.query(
-      "SELECT COUNT(*) AS count FROM worker_jobs WHERE job_type = 'generate-paper-reports' AND status IN ('queued', 'running')"
-    )).rows[0].count), 0);
-    assert.equal(Number((await admin.query(
-      `SELECT COUNT(*) AS count FROM app_events WHERE event_type = 'task.cancelled'
-       AND payload_json::jsonb #>> '{task,command}' = 'generate-paper-reports'`
-    )).rows[0].count), 2);
-    const migratedAgain = await materializeLegacyQueuedPaperReports();
-    assert.equal(migratedAgain.created, 0);
-    assert.equal(migratedAgain.deduplicated, 3);
-    assert.equal(migratedAgain.legacy_pump_jobs_cancelled, 0);
-    for (const id of [legacyArtifactPaper, legacyJobPaper]) {
-      assert.equal(Number((await admin.query("SELECT COUNT(*) AS count FROM artifacts WHERE scope_id = $1 AND artifact_type = 'paper_report'", [id])).rows[0].count), 1);
-      const rows = await admin.query(
-        `SELECT payload_json, concurrency_key FROM worker_jobs WHERE job_type = 'paper-report' AND status IN ('queued', 'running')
-         AND (payload_json::jsonb ->> 'paper_id') = $1`,
-        [String(id)]
-      );
-      assert.equal(rows.rows.length, 1);
-      assert.equal(rows.rows[0].concurrency_key, paperReportConcurrencyKey(id));
-      assert.equal(Object.hasOwn(JSON.parse(rows.rows[0].payload_json), "dedupe_key"), false);
-    }
-    assert.equal(Number((await admin.query(
-      `SELECT COUNT(*) AS count FROM worker_jobs WHERE job_type = 'paper-report' AND status = 'cancelled'
-       AND (payload_json::jsonb ->> 'paper_id') = $1`,
-      [String(legacyJobPaper)]
-    )).rows[0].count), 1);
-
+    await enqueuePaperReport(legacyArtifactPaper);
     const queuedCancellation = await cancelPaperReport(legacyArtifactPaper);
     assert.equal(queuedCancellation.paper_report.status, "cancelled");
     assert.equal((await admin.query("SELECT status FROM worker_jobs WHERE (payload_json::jsonb ->> 'paper_id') = $1", [String(legacyArtifactPaper)])).rows[0].status, "cancelled");

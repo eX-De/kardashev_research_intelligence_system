@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { createReadStream, existsSync } from "node:fs";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -33,6 +33,7 @@ import {
   getHealthSummary as getNodeHealthSummary
 } from "./server/health.js";
 import { getNotifications as getNodeNotifications } from "./server/notifications.js";
+import { checkForUpdates, readUpdateStatus } from "./server/updateCheck.js";
 import { insertAppEvent, listUnpublishedAppEvents, markAppEventsPublished } from "./server/outbox.js";
 import {
   getArtifactDetail as getNodeArtifactDetail,
@@ -77,7 +78,6 @@ import {
 import { ensureProjectIndex } from "./server/projectIndex.js";
 import {
   enqueuePaperReport,
-  materializeLegacyQueuedPaperReports,
   materializeRecommendedPaperReports
 } from "./server/paperReports.js";
 import {
@@ -108,10 +108,6 @@ const PANEL_SESSION_TTL_SECONDS = positiveInteger(process.env.PANEL_SESSION_TTL_
 const PANEL_SESSION_COOKIE_NAME = "panel_session";
 const KRIS_AGENT_TOKEN = envValue("KRIS_AGENT_TOKEN", "");
 const OBSIDIAN_NOT_CONFIGURED_CODE = "obsidian_not_configured";
-const IN_MEMORY_JOB_RECONCILE_GRACE_MS = Math.max(
-  5000,
-  Number(process.env.IN_MEMORY_JOB_RECONCILE_GRACE_MS || 60000)
-);
 const SSE_HEARTBEAT_MS = Math.max(5000, positiveInteger(process.env.SSE_HEARTBEAT_MS, 25000));
 const DAILY_PROGRESS_SSE_THROTTLE_MS = Math.max(
   250,
@@ -128,11 +124,6 @@ const UPDATE_CHECK_INTERVAL_MS = Math.max(
 );
 const REQUEST_TIMING_LOG_ENABLED = envBoolean("KRIS_REQUEST_TIMING_LOG", false);
 const WORKER_TIMING_LOG_ENABLED = envBoolean("KRIS_WORKER_TIMING_LOG", false);
-const JOB_BACKEND = String(envValue("KRIS_JOB_BACKEND", "queue") || "queue").trim().toLowerCase();
-const COMPUTE_BACKEND = String(envValue("KRIS_COMPUTE_BACKEND", "service") || "service").trim().toLowerCase();
-const PROJECT_CONTEXT_BACKEND = String(envValue("KRIS_PROJECT_CONTEXT_BACKEND", "node") || "node").trim().toLowerCase();
-const PROJECT_INDEX_BACKEND = String(envValue("KRIS_PROJECT_INDEX_BACKEND", "node") || "node").trim().toLowerCase();
-const PAPER_REPORT_LEGACY_SCANNER_ENABLED = envBoolean("KRIS_PAPER_REPORT_LEGACY_SCANNER_ENABLED", true);
 const OUTBOX_POLLER_ENABLED = envBoolean("KRIS_OUTBOX_POLLER_ENABLED", true);
 const OUTBOX_POLL_INTERVAL_MS = Math.max(
   250,
@@ -142,25 +133,13 @@ const WORKER_MONITOR_INTERVAL_MS = Math.max(
   1000,
   Number(process.env.KRIS_WORKER_MONITOR_INTERVAL_MS || 5000)
 );
-const READER_FOLLOWUPS_SYNC_FALLBACK_ENABLED = envBoolean("KRIS_READER_FOLLOWUPS_SYNC_FALLBACK_ENABLED", true);
 const READER_UPLOAD_MAX_FILE_BYTES = positiveInteger(
   process.env.READER_UPLOAD_MAX_FILE_BYTES,
   DEFAULT_READER_UPLOAD_MAX_FILE_BYTES
 );
 const READER_UPLOAD_MAX_FILES = positiveInteger(process.env.READER_UPLOAD_MAX_FILES, DEFAULT_READER_UPLOAD_MAX_FILES);
-const WORKER_PROGRESS_EVENT_PREFIX = "KRIS_PROGRESS_EVENT ";
-const DAILY_JOB_COMMANDS = new Set(["run-daily", "resume-daily", "retry-daily"]);
 const requestTimingStorage = new AsyncLocalStorage();
 
-if (!["service", "legacy"].includes(COMPUTE_BACKEND)) {
-  throw new Error("KRIS_COMPUTE_BACKEND must be service or legacy");
-}
-if (!["node", "legacy"].includes(PROJECT_CONTEXT_BACKEND)) {
-  throw new Error("KRIS_PROJECT_CONTEXT_BACKEND must be node or legacy");
-}
-if (!["node", "legacy"].includes(PROJECT_INDEX_BACKEND)) {
-  throw new Error("KRIS_PROJECT_INDEX_BACKEND must be node or legacy");
-}
 
 function abortOnClientDisconnect(req, res) {
   const controller = new AbortController();
@@ -183,7 +162,6 @@ function writeSseEvent(res, event, data) {
 }
 
 const jobRuntime = {
-  currentJob: null,
   lastJob: null
 };
 
@@ -363,160 +341,6 @@ function worker(args, input = null) {
   });
 }
 
-function handleWorkerProgressLine(line, onProgressEvent, stderrLines) {
-  if (line.startsWith(WORKER_PROGRESS_EVENT_PREFIX)) {
-    const rawPayload = line.slice(WORKER_PROGRESS_EVENT_PREFIX.length).trim();
-    try {
-      const payload = JSON.parse(rawPayload || "{}");
-      if (payload && typeof payload === "object" && typeof onProgressEvent === "function") {
-        try {
-          onProgressEvent(payload);
-        } catch (error) {
-          console.error(error.stack || error.message || error);
-        }
-      }
-    } catch {
-      stderrLines.push(line);
-    }
-    return;
-  }
-  if (line) stderrLines.push(line);
-}
-
-function managedWorker(args, input = null, { onProgressEvent = null } = {}) {
-  recordWorkerCommand(args);
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(PYTHON_BIN, ["-m", "worker.cli", ...args], {
-      cwd: __dirname,
-      env: {
-        ...process.env,
-        KRIS_WORKER_PROGRESS_EVENTS: "1",
-        PYTHONUTF8: "1",
-        PYTHONIOENCODING: "utf-8"
-      },
-      stdio: ["pipe", "pipe", "pipe"]
-    });
-
-    let stdout = "";
-    let stderrBuffer = "";
-    let settled = false;
-    const stderrLines = [];
-
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-    });
-
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk) => {
-      stderrBuffer += chunk;
-      const lines = stderrBuffer.split(/\r?\n/);
-      stderrBuffer = lines.pop() || "";
-      for (const line of lines) handleWorkerProgressLine(line, onProgressEvent, stderrLines);
-    });
-
-    child.on("error", (error) => {
-      if (settled) return;
-      settled = true;
-      if (stderrBuffer) handleWorkerProgressLine(stderrBuffer, onProgressEvent, stderrLines);
-      reject(workerErrorFromOutput(error, stdout, stderrLines.join("\n")));
-    });
-
-    child.on("close", (code, signal) => {
-      if (settled) return;
-      settled = true;
-      if (stderrBuffer) handleWorkerProgressLine(stderrBuffer, onProgressEvent, stderrLines);
-      const stderr = stderrLines.join("\n");
-      if (code === 0 && !signal) {
-        forwardWorkerTimingStderr(stderr);
-        resolvePromise(stdout);
-        return;
-      }
-      const message = signal
-        ? `Worker terminated by signal ${signal}`
-        : `Worker exited with code ${code}`;
-      reject(workerErrorFromOutput(new Error(message), stdout, stderr));
-    });
-
-    if (input !== null) child.stdin.end(input, "utf8");
-    else child.stdin.end();
-  });
-}
-
-function streamWorkerEvents(args, input, res) {
-  recordWorkerCommand(args);
-  return new Promise((resolvePromise) => {
-    const child = spawn(PYTHON_BIN, ["-m", "worker.cli", ...args], {
-      cwd: __dirname,
-      env: {
-        ...process.env,
-        PYTHONUTF8: "1",
-        PYTHONIOENCODING: "utf-8"
-      },
-      stdio: ["pipe", "pipe", "pipe"]
-    });
-
-    let buffer = "";
-    let stderr = "";
-    let closedByClient = false;
-
-    const writeEvent = (event, data) => {
-      if (closedByClient || res.writableEnded) return;
-      res.write(`event: ${event}\n`);
-      res.write(`data: ${JSON.stringify(data)}\n\n`);
-    };
-
-    const handleLine = (line) => {
-      const trimmed = line.trim();
-      if (!trimmed) return;
-      try {
-        const parsed = JSON.parse(trimmed);
-        writeEvent(parsed.event || "message", parsed.data || {});
-      } catch {
-        writeEvent("error", { error: `Worker stream returned invalid JSON: ${trimmed.slice(0, 300)}` });
-      }
-    };
-
-    res.on("close", () => {
-      if (!res.writableEnded) {
-        closedByClient = true;
-        child.kill();
-      }
-    });
-
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      buffer += chunk;
-      let index = buffer.indexOf("\n");
-      while (index !== -1) {
-        handleLine(buffer.slice(0, index));
-        buffer = buffer.slice(index + 1);
-        index = buffer.indexOf("\n");
-      }
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
-    child.on("error", (error) => {
-      writeEvent("error", { error: error.message });
-      if (!res.writableEnded) res.end();
-      resolvePromise();
-    });
-    child.on("close", (code) => {
-      if (buffer.trim()) handleLine(buffer);
-      if (code !== 0 && !closedByClient) {
-        writeEvent("error", { error: stderr.trim() || `Worker exited with code ${code}` });
-      } else {
-        forwardWorkerTimingStderr(stderr);
-      }
-      if (!res.writableEnded) res.end();
-      resolvePromise();
-    });
-    child.stdin.end(input ?? "", "utf8");
-  });
-}
-
 function toIso(date) {
   return date ? new Date(date).toISOString() : null;
 }
@@ -546,7 +370,7 @@ function schedulerStatus() {
   return {
     enabled: schedulerRuntime.enabled,
     next_run_at: toIso(schedulerRuntime.nextRunAt),
-    current_job: jobRuntime.currentJob,
+    current_job: null,
     last_job: jobRuntime.lastJob,
     last_error: schedulerRuntime.lastError,
     startup_daily: {
@@ -561,10 +385,8 @@ function schedulerStatus() {
 }
 
 const {
-  createDailyProgressPublisher,
   openEventStream,
-  publishEvent,
-  publishTaskEvent
+  publishEvent
 } = createEventPublisher({
   heartbeatMs: SSE_HEARTBEAT_MS,
   dailyProgressThrottleMs: DAILY_PROGRESS_SSE_THROTTLE_MS,
@@ -603,14 +425,6 @@ async function publishDurablePaperChanged(type, data = {}, fallbackId = null, ex
   return publishDurableEvent(type, compactPaperChangedPayload(data, fallbackId, extra));
 }
 
-function isDailyJobCommand(command) {
-  return DAILY_JOB_COMMANDS.has(String(command || ""));
-}
-
-function isQueueJobBackend() {
-  return JOB_BACKEND !== "cli";
-}
-
 function queuedTaskResponse(command, source, args, queued) {
   const workerJob = queued.worker_job || {};
   const jobRun = queued.job_run || null;
@@ -628,45 +442,6 @@ function queuedTaskResponse(command, source, args, queued) {
     job_run: jobRun,
     worker_job: workerJob
   };
-}
-
-async function enqueueProjectWorkerJob(command, projectId, payload = {}, { source = "project" } = {}) {
-  const normalizedProjectId = eventNumber(projectId);
-  if (!normalizedProjectId) {
-    const err = new Error("project_id is required");
-    err.statusCode = 400;
-    throw err;
-  }
-  await requireAvailableWorker();
-  const queued = await enqueueWorkerJob({
-    jobType: command,
-    payload: {
-      command,
-      source,
-      args: [],
-      project_id: normalizedProjectId,
-      ...payload
-    },
-    message: `${command} queued`
-  });
-  const response = {
-    ...queuedTaskResponse(command, source, [], queued),
-    project_id: normalizedProjectId
-  };
-  jobRuntime.lastJob = {
-    id: response.job_run_id || response.worker_job_id,
-    command,
-    source,
-    args: [],
-    status: "queued",
-    started_at: queued.job_run?.started_at || queued.worker_job?.created_at || new Date().toISOString(),
-    finished_at: null,
-    message: response.message,
-    worker_job_id: response.worker_job_id,
-    job_run_id: response.job_run_id,
-    project_id: normalizedProjectId
-  };
-  return response;
 }
 
 async function enqueueActionWorkerJob(command, payload = {}, { source = "action", args = [] } = {}) {
@@ -696,16 +471,6 @@ async function enqueueActionWorkerJob(command, payload = {}, { source = "action"
     ...payload
   };
   return response;
-}
-
-async function activeDatabaseJob({ ignoreDailyJobs = false, includeQueued = false } = {}) {
-  const statuses = includeQueued ? new Set(["queued", "running"]) : new Set(["running"]);
-  const history = await getJobsHistoryResponse(100);
-  return (history.items || []).find((job) => {
-    if (!statuses.has(job.status)) return false;
-    if (ignoreDailyJobs && isDailyJobCommand(job.job_type)) return false;
-    return true;
-  }) || null;
 }
 
 function updateVersionKey(data = {}) {
@@ -746,7 +511,7 @@ async function runUpdateCheck({ forceNotify = false, reschedule = true } = {}) {
   updateCheckRuntime.checking = true;
   updateCheckRuntime.lastCheckAt = new Date().toISOString();
   try {
-    const data = await jsonFromWorker(["api-update-check"]);
+    const data = await checkForUpdates();
     updateCheckRuntime.lastError = data.ok === false
       ? { message: data.error || "Update check failed", at: new Date().toISOString() }
       : null;
@@ -872,26 +637,6 @@ function startOutboxPoller() {
   scheduleOutboxPoller();
 }
 
-function projectContextText(payload = {}) {
-  return String(payload.raw_context || payload.context || payload.project_context || "").trim();
-}
-
-async function saveProjectWithContextBackend(payload) {
-  if (PROJECT_CONTEXT_BACKEND === "node") return saveNodeProject(payload);
-  const rawContext = projectContextText(payload);
-  if (rawContext && isQueueJobBackend()) await requireAvailableWorker();
-  const data = await saveNodeProject({ ...payload, raw_context: "", context: "", project_context: "" });
-  if (rawContext && data?.project?.id) {
-    data.context_job = await enqueueProjectWorkerJob(
-      "project-context",
-      data.project.id,
-      { raw_context: rawContext, title: `${data.project.name || "Project"} context` },
-      { source: "project-save-legacy" }
-    );
-  }
-  return data;
-}
-
 function workerUnavailableNotification(status) {
   const outageKey = String(status.last_heartbeat_at || "never").replace(/[^\w.-]/g, "-");
   return {
@@ -911,7 +656,7 @@ function workerUnavailableNotification(status) {
 }
 
 async function pollWorkerStatus() {
-  if (!isQueueJobBackend() || workerMonitorRuntime.inFlight) return workerMonitorRuntime.inFlight;
+  if (workerMonitorRuntime.inFlight) return workerMonitorRuntime.inFlight;
   workerMonitorRuntime.inFlight = (async () => {
     try {
       const status = await getWorkerStatus();
@@ -948,7 +693,6 @@ async function pollWorkerStatus() {
 }
 
 function scheduleWorkerMonitor(delayMs = WORKER_MONITOR_INTERVAL_MS) {
-  if (!isQueueJobBackend()) return;
   if (workerMonitorRuntime.timer) clearTimeout(workerMonitorRuntime.timer);
   workerMonitorRuntime.timer = setTimeout(() => {
     workerMonitorRuntime.timer = null;
@@ -958,45 +702,7 @@ function scheduleWorkerMonitor(delayMs = WORKER_MONITOR_INTERVAL_MS) {
 }
 
 function startWorkerMonitor() {
-  if (!isQueueJobBackend()) return;
   pollWorkerStatus().finally(() => scheduleWorkerMonitor());
-}
-
-function jobAgeMs(job) {
-  const startedAt = new Date(job?.started_at || 0).getTime();
-  return Number.isFinite(startedAt) ? Date.now() - startedAt : Number.POSITIVE_INFINITY;
-}
-
-async function runningDatabaseJob({ ignoreDailyJobs = false, ignorePaperReportQueueJobs = false } = {}) {
-  return activeDatabaseJob({ ignoreDailyJobs, ignorePaperReportQueueJobs, includeQueued: false });
-}
-
-async function reconcileCurrentJobWithDatabase() {
-  const current = jobRuntime.currentJob;
-  if (!current) return null;
-
-  const running = await runningDatabaseJob();
-  if (running) return running;
-
-  if (jobAgeMs(current) < IN_MEMORY_JOB_RECONCILE_GRACE_MS) {
-    return null;
-  }
-
-  const finishedAt = new Date().toISOString();
-  const message = "Cleared stale in-memory job state after database cleanup found no running job";
-  jobRuntime.lastJob = {
-    command: current.command,
-    source: current.source,
-    args: current.args || [],
-    status: "failed",
-    started_at: current.started_at,
-    finished_at: finishedAt,
-    message
-  };
-  jobRuntime.currentJob = null;
-  schedulerRuntime.lastError = { message, at: finishedAt };
-  publishTaskEvent(SERVER_EVENTS.TASK_FAILED, jobRuntime.lastJob, { stale: true });
-  return null;
 }
 
 function clearSchedulerTimer() {
@@ -1073,10 +779,7 @@ async function applySchedulerMode(mode) {
 }
 
 async function runManagedJob(command, source = "manual", args = []) {
-  if (isQueueJobBackend()) {
-    return enqueueManagedJob(command, source, args);
-  }
-  return runManagedCliJob(command, source, args);
+  return enqueueManagedJob(command, source, args);
 }
 
 async function enqueueManagedJob(command, source = "manual", args = []) {
@@ -1100,71 +803,6 @@ async function enqueueManagedJob(command, source = "manual", args = []) {
     job_run_id: response.job_run_id
   };
   return response;
-}
-
-async function runManagedCliJob(command, source = "manual", args = []) {
-  const isDailyJob = isDailyJobCommand(command);
-  if (jobRuntime.currentJob) {
-    await reconcileCurrentJobWithDatabase();
-  }
-  if (jobRuntime.currentJob) {
-    const err = new Error(`Another job is already running: ${jobRuntime.currentJob.command}`);
-    err.statusCode = 409;
-    throw err;
-  }
-  const running = await runningDatabaseJob();
-  if (running) {
-    const err = new Error(`Database job is already running: ${running.job_type} #${running.id}`);
-    err.statusCode = 409;
-    throw err;
-  }
-  const startedAt = new Date().toISOString();
-  jobRuntime.currentJob = { command, source, args, started_at: startedAt };
-  publishTaskEvent(SERVER_EVENTS.TASK_STARTED, { ...jobRuntime.currentJob, status: "running" });
-  const progressPublisher = DAILY_JOB_COMMANDS.has(command)
-    ? createDailyProgressPublisher(command)
-    : null;
-  try {
-    const data = progressPublisher
-      ? await jsonFromManagedWorker([command, ...args], null, {
-        onProgressEvent: (payload) => progressPublisher.queue(payload)
-      })
-      : await jsonFromWorker([command, ...args]);
-    progressPublisher?.flush();
-    const finishedAt = new Date().toISOString();
-    jobRuntime.lastJob = {
-      command,
-      source,
-      args,
-      status: "completed",
-      started_at: startedAt,
-      finished_at: finishedAt,
-      message: data.message || `${command} completed`,
-      result: data
-    };
-    jobRuntime.currentJob = null;
-    publishTaskEvent(SERVER_EVENTS.TASK_FINISHED, jobRuntime.lastJob, { result: data });
-    return data;
-  } catch (error) {
-    progressPublisher?.flush();
-    const finishedAt = new Date().toISOString();
-    jobRuntime.lastJob = {
-      command,
-      source,
-      args,
-      status: "failed",
-      started_at: startedAt,
-      finished_at: finishedAt,
-      message: error.message
-    };
-    schedulerRuntime.lastError = { message: error.message, at: finishedAt };
-    jobRuntime.currentJob = null;
-    publishTaskEvent(SERVER_EVENTS.TASK_FAILED, jobRuntime.lastJob);
-    throw error;
-  } finally {
-    progressPublisher?.stop();
-    jobRuntime.currentJob = null;
-  }
 }
 
 async function runScheduledDaily() {
@@ -1231,20 +869,6 @@ async function runDailyOnDashboardOpenIfNeeded(settings) {
     startupDailyRuntime.lastSkipReason = "trigger_in_flight";
     return { triggered: false, reason: "trigger_in_flight", scheduler: schedulerStatus() };
   }
-  if (jobRuntime.currentJob) {
-    await reconcileCurrentJobWithDatabase();
-  }
-  const running = jobRuntime.currentJob
-    ? null
-    : await runningDatabaseJob({ ignorePaperReportQueueJobs: true });
-  if (jobRuntime.currentJob) {
-    startupDailyRuntime.lastSkipReason = `busy:${jobRuntime.currentJob.command}`;
-    return { triggered: false, reason: startupDailyRuntime.lastSkipReason, scheduler: schedulerStatus() };
-  }
-  if (running) {
-    startupDailyRuntime.lastSkipReason = `busy:${running.job_type}`;
-    return { triggered: false, reason: startupDailyRuntime.lastSkipReason, scheduler: schedulerStatus() };
-  }
   const todayState = await runDailyStateToday();
   if (todayState === "running") {
     startupDailyRuntime.lastSkipReason = "already_running_today";
@@ -1284,17 +908,6 @@ async function runDailyOnDashboardOpenIfNeeded(settings) {
 
 async function jsonFromWorker(args, input = null) {
   const output = await worker(args, input);
-  try {
-    return JSON.parse(output || "{}");
-  } catch (error) {
-    const err = new Error(`Worker returned invalid JSON: ${output.slice(0, 300)}`);
-    err.statusCode = 500;
-    throw err;
-  }
-}
-
-async function jsonFromManagedWorker(args, input = null, options = {}) {
-  const output = await managedWorker(args, input, options);
   try {
     return JSON.parse(output || "{}");
   } catch (error) {
@@ -1691,7 +1304,7 @@ async function routeApi(req, res, url) {
 
   if (req.method === "POST" && url.pathname === "/api/projects") {
     const body = await readRequestJson(req);
-    const data = await saveProjectWithContextBackend(body);
+    const data = await saveNodeProject(body);
     sendJson(res, 200, data);
     await publishDurableProjectChanged(body.id ? SERVER_EVENTS.PROJECT_UPDATED : SERVER_EVENTS.PROJECT_CREATED, data, body.id);
     return;
@@ -1707,7 +1320,7 @@ async function routeApi(req, res, url) {
   if (req.method === "POST" && projectMatch) {
     const body = await readRequestJson(req);
     const payload = { ...body, id: Number(projectMatch[1]) };
-    const data = await saveProjectWithContextBackend(payload);
+    const data = await saveNodeProject(payload);
     sendJson(res, 200, data);
     await publishDurableProjectChanged(SERVER_EVENTS.PROJECT_UPDATED, data, projectMatch[1]);
     return;
@@ -1715,46 +1328,33 @@ async function routeApi(req, res, url) {
 
   const projectExportMatch = url.pathname.match(/^\/api\/projects\/(\d+)\/export-obsidian$/);
   if (req.method === "POST" && projectExportMatch) {
-    if (PROJECT_INDEX_BACKEND === "node") {
-      const ensured = await ensureProjectIndex(projectExportMatch[1], { exportToObsidian: true });
-      const data = await getNodeProjectDetail(projectExportMatch[1]);
-      data.generated_artifact = ensured.artifact;
-      data.index_job = ensured.index_job;
-      data.export_job = ensured.export_job;
-      data.ok = true;
-      data.queued = true;
-      data.command = "artifact-export-obsidian";
-      data.worker_job_id = ensured.export_job?.worker_job_id || null;
-      data.job_id = data.worker_job_id;
-      data.job_run_id = null;
-      sendJson(res, 202, data);
-      return;
-    }
-    const data = await jsonFromWorker(["api-project-export", projectExportMatch[1]]);
-    sendJson(res, 200, data);
-    await publishDurableProjectChanged(SERVER_EVENTS.PROJECT_UPDATED, data, projectExportMatch[1], { reason: "export_obsidian" });
+    const ensured = await ensureProjectIndex(projectExportMatch[1], { exportToObsidian: true });
+    const data = await getNodeProjectDetail(projectExportMatch[1]);
+    data.generated_artifact = ensured.artifact;
+    data.index_job = ensured.index_job;
+    data.export_job = ensured.export_job;
+    data.ok = true;
+    data.queued = true;
+    data.command = "artifact-export-obsidian";
+    data.worker_job_id = ensured.export_job?.worker_job_id || null;
+    data.job_id = data.worker_job_id;
+    data.job_run_id = null;
+    sendJson(res, 202, data);
     return;
   }
 
   const projectIndexMatch = url.pathname.match(/^\/api\/projects\/(\d+)\/artifacts\/project-index$/);
   if (req.method === "POST" && projectIndexMatch) {
     const body = await readRequestJson(req);
-    if (PROJECT_INDEX_BACKEND === "node") {
-      const ensured = await ensureProjectIndex(projectIndexMatch[1], {
-        exportToObsidian: Boolean(body.export_to_obsidian),
-        relativePath: body.relative_path || ""
-      });
-      const data = await getNodeProjectDetail(projectIndexMatch[1]);
-      data.generated_artifact = ensured.artifact;
-      data.index_job = ensured.index_job;
-      if (ensured.export_job) data.export_job = ensured.export_job;
-      sendJson(res, 200, data);
-      return;
-    }
-    const data = await jsonFromWorker(["api-project-index", projectIndexMatch[1]], JSON.stringify(body));
+    const ensured = await ensureProjectIndex(projectIndexMatch[1], {
+      exportToObsidian: Boolean(body.export_to_obsidian),
+      relativePath: body.relative_path || ""
+    });
+    const data = await getNodeProjectDetail(projectIndexMatch[1]);
+    data.generated_artifact = ensured.artifact;
+    data.index_job = ensured.index_job;
+    if (ensured.export_job) data.export_job = ensured.export_job;
     sendJson(res, 200, data);
-    await publishDurableProjectChanged(SERVER_EVENTS.PROJECT_UPDATED, data, projectIndexMatch[1], { reason: "project_index" });
-    await publishDurableArtifactChanged(SERVER_EVENTS.ARTIFACT_CREATED, data, data?.generated_artifact?.id);
     return;
   }
 
@@ -1887,7 +1487,7 @@ async function routeApi(req, res, url) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/update-status") {
-    const data = await jsonFromWorker(["api-update-status"]);
+    const data = await readUpdateStatus();
     sendJson(res, 200, data);
     return;
   }
@@ -2088,18 +1688,12 @@ async function routeApi(req, res, url) {
   const artifactExportMatch = url.pathname.match(/^\/api\/artifacts\/(\d+)\/export-obsidian$/);
   if (req.method === "POST" && artifactExportMatch) {
     const body = await readRequestJson(req);
-    if (isQueueJobBackend()) {
-      const data = await enqueueActionWorkerJob(
-        "artifact-export-obsidian",
-        { artifact_id: eventNumber(artifactExportMatch[1]), body },
-        { source: "artifact-export", args: [artifactExportMatch[1]] }
-      );
-      sendJson(res, 202, data);
-      return;
-    }
-    const data = await jsonFromWorker(["api-artifact-export", artifactExportMatch[1]], JSON.stringify(body));
-    sendJson(res, 200, data);
-    await publishDurableArtifactChanged(SERVER_EVENTS.ARTIFACT_UPDATED, data, artifactExportMatch[1], { reason: "export_obsidian" });
+    const data = await enqueueActionWorkerJob(
+      "artifact-export-obsidian",
+      { artifact_id: eventNumber(artifactExportMatch[1]), body },
+      { source: "artifact-export", args: [artifactExportMatch[1]] }
+    );
+    sendJson(res, 202, data);
     return;
   }
 
@@ -2125,26 +1719,12 @@ async function routeApi(req, res, url) {
     });
     const body = { files: stagedUpload.files };
     try {
-      if (isQueueJobBackend()) {
-        const data = await enqueueActionWorkerJob(
-          "reader-import-upload",
-          { body },
-          { source: "reader-upload" }
-        );
-        sendJson(res, 202, data);
-        return;
-      }
-      const data = await jsonFromWorker(["api-reader-upload"], JSON.stringify(body));
-      sendJson(res, 200, data);
-      await publishDurableEvent(SERVER_EVENTS.READER_PAPERS_IMPORTED, {
-        source: "upload",
-        imported: Array.isArray(data.imported) ? data.imported.map((item) => ({
-          paper_id: eventNumber(item.paper_id || item.id),
-          title: item.title || null
-        })).filter((item) => item.paper_id) : [],
-        imported_count: Array.isArray(data.imported) ? data.imported.length : 0,
-        error_count: Array.isArray(data.errors) ? data.errors.length : 0
-      });
+      const data = await enqueueActionWorkerJob(
+        "reader-import-upload",
+        { body },
+        { source: "reader-upload" }
+      );
+      sendJson(res, 202, data);
       return;
     } catch (error) {
       await discardStagedReaderUploads(stagedUpload.files).catch((cleanupError) => {
@@ -2207,11 +1787,6 @@ async function routeApi(req, res, url) {
       date_from: request.filters.date_from,
       date_to: request.filters.date_to
     };
-    if (COMPUTE_BACKEND === "legacy") {
-      const data = await jsonFromWorker(["api-unified-search"], JSON.stringify(computePayload));
-      sendJson(res, 200, data);
-      return;
-    }
     const disconnect = abortOnClientDisconnect(req, res);
     try {
       const data = await createComputeClient().deepSearch(computePayload, { signal: disconnect.signal });
@@ -2225,51 +1800,23 @@ async function routeApi(req, res, url) {
 
   if (req.method === "POST" && url.pathname === "/api/reader/papers/urls") {
     const body = await readRequestJson(req);
-    if (isQueueJobBackend()) {
-      const data = await enqueueActionWorkerJob(
-        "reader-import-url",
-        { body },
-          { source: "reader-url" }
-      );
-      sendJson(res, 202, data);
-      return;
-    }
-    const data = await jsonFromWorker(["api-reader-urls"], JSON.stringify(body));
-    sendJson(res, 200, data);
-    await publishDurableEvent(SERVER_EVENTS.READER_PAPERS_IMPORTED, {
-      source: "url",
-      imported: Array.isArray(data.imported) ? data.imported.map((item) => ({
-        paper_id: eventNumber(item.paper_id || item.id),
-        title: item.title || null
-      })).filter((item) => item.paper_id) : [],
-      imported_count: Array.isArray(data.imported) ? data.imported.length : 0,
-      error_count: Array.isArray(data.errors) ? data.errors.length : 0
-    });
+    const data = await enqueueActionWorkerJob(
+      "reader-import-url",
+      { body },
+      { source: "reader-url" }
+    );
+    sendJson(res, 202, data);
     return;
   }
 
   if (req.method === "POST" && url.pathname === "/api/reader/papers/web") {
     const body = await readRequestJson(req);
-    if (isQueueJobBackend()) {
-      const data = await enqueueActionWorkerJob(
-        "reader-import-web",
-        { body },
-        { source: "reader-web" }
-      );
-      sendJson(res, 202, data);
-      return;
-    }
-    const data = await jsonFromWorker(["api-reader-web"], JSON.stringify(body));
-    sendJson(res, 200, data);
-    await publishDurableEvent(SERVER_EVENTS.READER_PAPERS_IMPORTED, {
-      source: "web",
-      imported: Array.isArray(data.imported) ? data.imported.map((item) => ({
-        paper_id: eventNumber(item.paper_id || item.id),
-        title: item.title || null
-      })).filter((item) => item.paper_id) : [],
-      imported_count: Array.isArray(data.imported) ? data.imported.length : 0,
-      error_count: Array.isArray(data.errors) ? data.errors.length : 0
-    });
+    const data = await enqueueActionWorkerJob(
+      "reader-import-web",
+      { body },
+      { source: "reader-web" }
+    );
+    sendJson(res, 202, data);
     return;
   }
 
@@ -2334,14 +1881,6 @@ async function routeApi(req, res, url) {
       res.setHeader("connection", "keep-alive");
       res.setHeader("x-accel-buffering", "no");
       res.flushHeaders?.();
-      if (COMPUTE_BACKEND === "legacy") {
-        await streamWorkerEvents([
-          "api-reader-chat-stream",
-          readerChatMatch[1]
-        ], JSON.stringify(body), res);
-        await publishDurablePaperChanged(SERVER_EVENTS.READER_MESSAGE_UPDATED, {}, readerChatMatch[1], { action: "chat_stream" });
-        return;
-      }
       const disconnect = abortOnClientDisconnect(req, res);
       try {
         await createComputeClient().streamReaderChat(
@@ -2368,39 +1907,18 @@ async function routeApi(req, res, url) {
 
   const readerSaveMatch = url.pathname.match(/^\/api\/reader\/papers\/(\d+)\/save$/);
   if (req.method === "POST" && readerSaveMatch) {
-    if (isQueueJobBackend()) {
-      const data = await enqueueActionWorkerJob(
-        "reader-save-obsidian",
-        { paper_id: eventNumber(readerSaveMatch[1]) },
-        { source: "reader-save", args: [readerSaveMatch[1]] }
-      );
-      sendJson(res, 202, data);
-      return;
-    }
-    const data = await jsonFromWorker(["api-reader-save", readerSaveMatch[1]]);
-    sendJson(res, 200, data);
-    await publishDurablePaperChanged(SERVER_EVENTS.READER_PAPER_UPDATED, data, readerSaveMatch[1], { action: "save_obsidian" });
+    const data = await enqueueActionWorkerJob(
+      "reader-save-obsidian",
+      { paper_id: eventNumber(readerSaveMatch[1]) },
+      { source: "reader-save", args: [readerSaveMatch[1]] }
+    );
+    sendJson(res, 202, data);
     return;
   }
 
   const readerFollowupsMatch = url.pathname.match(/^\/api\/reader\/papers\/(\d+)\/follow-up-questions$/);
   if (req.method === "POST" && readerFollowupsMatch) {
     const body = await readRequestJson(req);
-    if (COMPUTE_BACKEND === "legacy" && !READER_FOLLOWUPS_SYNC_FALLBACK_ENABLED) {
-      sendJson(res, 501, {
-        error: "Reader follow-up questions require the synchronous interactive fallback until async suggestions are implemented.",
-        code: "reader_followups_sync_fallback_disabled"
-      });
-      return;
-    }
-    if (COMPUTE_BACKEND === "legacy") {
-      const data = await jsonFromWorker([
-        "api-reader-followups",
-        readerFollowupsMatch[1]
-      ], JSON.stringify(body));
-      sendJson(res, 200, data);
-      return;
-    }
     const disconnect = abortOnClientDisconnect(req, res);
     try {
       const data = await createComputeClient().readerFollowups(readerFollowupsMatch[1], body, { signal: disconnect.signal });
@@ -2552,11 +2070,6 @@ server.listen(PORT, () => {
   console.log(`Research Intelligence dashboard listening on http://localhost:${PORT}`);
   startOutboxPoller();
   startWorkerMonitor();
-  if (PAPER_REPORT_LEGACY_SCANNER_ENABLED) {
-    materializeLegacyQueuedPaperReports()
-      .then((result) => console.info(JSON.stringify({ event: "paper_report.legacy_materialized", ...result })))
-      .catch((error) => console.error("Paper report legacy materialization failed", error));
-  }
   scheduleUpdateCheck(UPDATE_CHECK_INITIAL_DELAY_MS);
   readAppSettings()
     .then(async (settings) => {

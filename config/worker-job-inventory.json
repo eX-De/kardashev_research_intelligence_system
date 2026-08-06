@@ -14,7 +14,6 @@
     { "type": "resume-daily", "label": "恢复每日流程" },
     { "type": "retry-daily", "label": "历史论文补跑" },
     { "type": "knowledge-document-index", "label": "知识文档索引" },
-    { "type": "project-context", "label": "项目上下文入库（回滚）" },
     { "type": "artifact-export-obsidian", "label": "产物导出" },
     { "type": "reader-import-upload", "label": "PDF 导入" },
     { "type": "reader-import-url", "label": "URL 导入" },

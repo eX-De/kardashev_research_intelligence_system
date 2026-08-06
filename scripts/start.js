@@ -89,7 +89,6 @@ export function initializeSchema({ run = spawnSync } = {}) {
 }
 
 export function ensureComputeIdentity() {
-  if (String(process.env.KRIS_COMPUTE_BACKEND || "service").trim().toLowerCase() === "legacy") return false;
   if (!envValue("KRIS_COMPUTE_TOKEN", "")) {
     delete process.env.KRIS_COMPUTE_TOKEN_FILE;
     process.env.KRIS_COMPUTE_TOKEN = randomBytes(32).toString("base64url");
@@ -105,7 +104,8 @@ function installSignalHandlers() {
 export function main({ initialize = initializeSchema, launch = startProcess, installSignals = installSignalHandlers } = {}) {
   installSignals();
   initialize();
-  if (ensureComputeIdentity()) launch("compute", PYTHON_BIN, ["-m", "worker.compute_service"]);
+  ensureComputeIdentity();
+  launch("compute", PYTHON_BIN, ["-m", "worker.compute_service"]);
   launch("api", process.execPath, ["server.js"]);
   launch("worker", PYTHON_BIN, ["-m", "worker.service"]);
 }
