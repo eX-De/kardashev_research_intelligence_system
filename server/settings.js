@@ -78,6 +78,87 @@ export function resolvePaperReaderPrompt(settings = {}, { locale = "", prompt = 
   return defaultPaperReaderPrompt(promptLocale);
 }
 
+export const DEFAULT_PROJECT_JUDGMENT_PROMPTS = Object.freeze({
+  "zh-CN": `你是严格的科研项目论文筛选器。判断依据必须是论文的主要研究问题和核心贡献，而不是共同出现的方法或术语。
+
+判定前，必须先分别识别：
+1. 项目当前正在解决的核心问题；
+2. 论文的主要研究问题和核心贡献；
+3. 论文中与项目重合的方法，是论文的研究对象，还是仅作为实现工具、基础组件、实验设置或背景技术使用。
+
+只有论文的核心贡献能够直接解决、改进或评估项目的核心问题时，才能判定为 direct 或 indirect。
+
+relation_type 的含义：
+- direct：论文的主要研究问题或核心贡献直接解决项目当前明确存在的核心问题。相关方法必须是论文重点研究、改进或系统评估的对象，不能只是论文使用的工具。
+- indirect：论文的主要任务与项目不同，但其核心贡献产生了可以明确迁移到项目的具体方法、实验结论或评估设计，并且项目证据能够证明项目确实存在对应需求。
+- weak：论文和项目共享某个方法、模型、框架或术语，但该内容只是论文的实现工具、基础组件、实验设置、数据处理步骤、基线或背景技术，而不是论文的主要研究对象或核心贡献。
+- none：论文的核心研究问题和核心贡献与项目无可靠关联。仅仅使用了项目中提到的方法，也应判为 none 或 weak。
+
+判定约束：
+- 不得因为论文和项目使用了相同方法，就判定论文与项目相关。
+- “使用某方法”不能作为“研究或改进该方法”的证据。
+- 如果重合的方法对论文和项目都只是辅助工具，relation_type 必须是 weak 或 none。
+- 如果项目证据不能证明项目正在解决对应问题，必须降为 weak 或 none。
+- 如果论文证据没有具体方法、实验、数据或指标，必须降低 usefulness_score。
+- evidence_mapping 必须说明项目的核心问题、论文的核心贡献，以及核心贡献如何解决项目问题。如果只能说明双方使用了相同方法，则返回空数组。
+- missing_evidence 用一句中文说明还缺什么证据；证据充分时返回空字符串。
+- 所有可读文本字段值必须使用中文。`,
+  en: `You are a strict paper screener for research projects. Base the judgment on the paper's primary research question and core contribution, not on shared methods or terminology.
+
+Before judging, identify separately:
+1. The core problem the project is currently solving;
+2. The paper's primary research question and core contribution;
+3. Whether a method shared by the paper and project is the paper's research subject or merely an implementation tool, component, experimental setting, or background technique.
+
+Classify a paper as direct or indirect only when its core contribution can directly solve, improve, or evaluate the project's core problem.
+
+Meanings of relation_type:
+- direct: The paper's primary research question or core contribution directly addresses a clearly evidenced core project problem. A related method must itself be studied, improved, or systematically evaluated, not merely used as a tool.
+- indirect: The paper studies a different task, but its core contribution provides a concrete method, experimental finding, or evaluation design that can clearly transfer to a need evidenced by the project.
+- weak: The paper and project share a method, model, framework, or term, but it is only an implementation tool, component, experimental setting, processing step, baseline, or background technique rather than the paper's core research subject or contribution.
+- none: The paper's core research question and contribution have no reliable connection to the project. Merely using a method mentioned by the project must be classified as none or weak.
+
+Judgment constraints:
+- Never infer project relevance merely because the paper and project use the same method.
+- Using a method is not evidence that the paper studies or improves that method.
+- If the shared method is auxiliary to both the paper and project, relation_type must be weak or none.
+- If project evidence does not show that the project is solving the corresponding problem, downgrade the relation to weak or none.
+- If paper evidence lacks a concrete method, experiment, dataset, or metric, lower usefulness_score.
+- evidence_mapping must identify the project's core problem, the paper's core contribution, and how that contribution addresses the project problem. Return an empty array if the only mapping is use of the same method.
+- missing_evidence must state missing evidence in one English sentence, or be an empty string when evidence is sufficient.
+- All human-readable text values must be in English.`
+});
+
+const PROJECT_JUDGMENT_PROMPT_MODES = new Set(["default", "custom"]);
+
+function isBuiltInProjectJudgmentPrompt(value) {
+  return Object.values(DEFAULT_PROJECT_JUDGMENT_PROMPTS).includes(String(value || "").trim());
+}
+
+export function normalizeProjectJudgmentPromptLocale(value) {
+  const locale = String(value || "").trim();
+  if (locale === "en" || locale.toLowerCase().startsWith("en-")) return "en";
+  return "zh-CN";
+}
+
+export function inferProjectJudgmentPromptMode(value, customPrompt = "") {
+  const explicit = String(value || "").trim().toLowerCase();
+  if (PROJECT_JUDGMENT_PROMPT_MODES.has(explicit)) return explicit;
+  const prompt = String(customPrompt || "").trim();
+  if (!prompt || isBuiltInProjectJudgmentPrompt(prompt)) return "default";
+  return "custom";
+}
+
+export function resolveProjectJudgmentPrompt(settings = {}, { locale = "", prompt = "" } = {}) {
+  const explicitPrompt = String(prompt || "").trim();
+  if (explicitPrompt) return explicitPrompt;
+  const promptLocale = normalizeProjectJudgmentPromptLocale(locale || settings.project_judgment_prompt_locale);
+  const customPrompt = String(settings.project_judgment_custom_prompt || "").trim();
+  const mode = inferProjectJudgmentPromptMode(settings.project_judgment_prompt_mode, customPrompt);
+  if (mode === "custom" && customPrompt) return customPrompt;
+  return DEFAULT_PROJECT_JUDGMENT_PROMPTS[promptLocale];
+}
+
 export const CSV_FIELDS = new Set([
   "obsidian_include_dirs",
   "obsidian_include_tags",
@@ -141,6 +222,9 @@ export const STRING_FIELDS = new Set([
   "paper_reader_prompt_mode",
   "paper_reader_prompt_locale",
   "paper_reader_default_prompt",
+  "project_judgment_prompt_mode",
+  "project_judgment_prompt_locale",
+  "project_judgment_custom_prompt",
   "paper_report_provider_id",
   "paper_report_model",
   "project_chat_profile_provider_id",
@@ -225,6 +309,9 @@ const DATACLASS_SETTING_FIELDS = new Set([
   "paper_reader_prompt_mode",
   "paper_reader_prompt_locale",
   "paper_reader_default_prompt",
+  "project_judgment_prompt_mode",
+  "project_judgment_prompt_locale",
+  "project_judgment_custom_prompt",
   "paper_report_provider_id",
   "paper_report_model",
   "project_chat_profile_provider_id",
@@ -470,6 +557,7 @@ function providersFromEnv() {
 export function loadBaseSettingsFromEnv() {
   const vault = envValue("OBSIDIAN_VAULT_PATH", "").trim();
   const paperReaderCustomPrompt = envValue("PAPER_READER_DEFAULT_PROMPT", "");
+  const projectJudgmentCustomPrompt = envValue("PROJECT_JUDGMENT_CUSTOM_PROMPT", "");
   return {
     obsidian_vault_path: vault ? expandUserPath(vault) : "",
     obsidian_include_dirs: csvValue(envValue("OBSIDIAN_INCLUDE_DIRS", "Research,Papers")),
@@ -545,6 +633,14 @@ export function loadBaseSettingsFromEnv() {
       "project_judgment_concurrency",
       8
     ),
+    project_judgment_prompt_mode: inferProjectJudgmentPromptMode(
+      envValue("PROJECT_JUDGMENT_PROMPT_MODE", ""),
+      projectJudgmentCustomPrompt
+    ),
+    project_judgment_prompt_locale: normalizeProjectJudgmentPromptLocale(
+      envValue("PROJECT_JUDGMENT_PROMPT_LOCALE", "zh-CN")
+    ),
+    project_judgment_custom_prompt: projectJudgmentCustomPrompt,
     reader_chat_provider_id: envValue("READER_CHAT_PROVIDER_ID", ""),
     reader_chat_model: envValue("READER_CHAT_MODEL", ""),
     reader_smart_save_provider_id: envValue("READER_SMART_SAVE_PROVIDER_ID", ""),
@@ -630,6 +726,20 @@ export function settingsPayloadFromStored(stored = {}) {
   const paperReaderCustomPromptPayload = paperReaderPromptMode === "default" && isBuiltInPaperReaderPrompt(paperReaderCustomPrompt)
     ? ""
     : paperReaderCustomPrompt;
+  const projectJudgmentCustomPrompt = String(
+    storedOr(stored, "project_judgment_custom_prompt", settings.project_judgment_custom_prompt || "")
+  );
+  const projectJudgmentPromptMode = inferProjectJudgmentPromptMode(
+    storedOr(stored, "project_judgment_prompt_mode", settings.project_judgment_prompt_mode),
+    projectJudgmentCustomPrompt
+  );
+  const projectJudgmentPromptLocale = normalizeProjectJudgmentPromptLocale(
+    storedOr(stored, "project_judgment_prompt_locale", settings.project_judgment_prompt_locale)
+  );
+  const projectJudgmentCustomPromptPayload = projectJudgmentPromptMode === "default"
+    && isBuiltInProjectJudgmentPrompt(projectJudgmentCustomPrompt)
+    ? ""
+    : projectJudgmentCustomPrompt;
   const globalLlmConcurrency = positiveInteger(
     storedOr(stored, "global_llm_request_concurrency", envValue("GLOBAL_LLM_REQUEST_CONCURRENCY", "4")), 4,
     "global_llm_request_concurrency"
@@ -715,6 +825,10 @@ export function settingsPayloadFromStored(stored = {}) {
       "project_judgment_concurrency",
       8
     ), globalLlmConcurrency),
+    project_judgment_prompt_mode: projectJudgmentPromptMode,
+    project_judgment_prompt_locale: projectJudgmentPromptLocale,
+    project_judgment_custom_prompt: projectJudgmentCustomPromptPayload,
+    project_judgment_prompt_defaults: DEFAULT_PROJECT_JUDGMENT_PROMPTS,
     reader_chat_provider_id: String(storedOr(stored, "reader_chat_provider_id", settings.reader_chat_provider_id || "")),
     reader_chat_model: String(storedOr(stored, "reader_chat_model", settings.reader_chat_model || "")),
     reader_smart_save_provider_id: String(
@@ -816,6 +930,17 @@ export function normalizeSettingsPayload(payload = {}, currentSettings = {}) {
       const locale = String(rawValue || "").trim();
       if (!["zh-CN", "en"].includes(locale)) {
         throw new ValidationError("paper_reader_prompt_locale must be zh-CN or en");
+      }
+      value = locale;
+    } else if (key === "project_judgment_prompt_mode") {
+      value = String(rawValue || "").trim().toLowerCase();
+      if (!PROJECT_JUDGMENT_PROMPT_MODES.has(value)) {
+        throw new ValidationError("project_judgment_prompt_mode must be default or custom");
+      }
+    } else if (key === "project_judgment_prompt_locale") {
+      const locale = String(rawValue || "").trim();
+      if (!["zh-CN", "en"].includes(locale)) {
+        throw new ValidationError("project_judgment_prompt_locale must be zh-CN or en");
       }
       value = locale;
     } else if (key === "scheduler_run_time") {

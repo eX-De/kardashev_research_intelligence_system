@@ -11,6 +11,25 @@ export function workerConcurrencyFlatValues(snapshot = {}) {
   return Object.fromEntries(WORKER_CONCURRENCY_FIELDS.map((field) => [field, snapshot[field]]));
 }
 
+export function buildWorkerConcurrencySettingsPayload(settings = {}, { includeWorkerConcurrency = true } = {}) {
+  const payload = { ...settings };
+  const snapshot = payload.worker_concurrency;
+  delete payload.worker_concurrency;
+  for (const field of WORKER_CONCURRENCY_FIELDS) delete payload[field];
+
+  if (!includeWorkerConcurrency || !snapshot?.revision) return payload;
+  payload.worker_concurrency = {
+    expected_revision: snapshot.revision,
+    ...workerConcurrencyFlatValues(snapshot),
+    group_limits: Object.fromEntries(
+      Object.entries(snapshot.groups || {})
+        .filter(([, group]) => group.editable)
+        .map(([name, group]) => [name, group.max_running])
+    )
+  };
+  return payload;
+}
+
 export function workerCapacityApplyDecision({ state, pool, desired, attempts, maxAttempts = 15 }) {
   if (state !== "reconciling") return state;
   if (pool

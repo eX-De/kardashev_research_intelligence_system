@@ -79,9 +79,9 @@ Cloudflare Tunnel 的价值是让 `cloudflared` 从服务器向 Cloudflare 建�
 - 实验进展接收：通过 [kris-agent](https://github.com/eX-De/kris-agent) 或其它脚本上报结构化实验报告，沉淀为项目 artifact 和项目上下文。
 - 论文阅读：支持导入 arXiv/PDF 链接、上传本地 PDF 或导入清洗后的网页正文，生成全文报告，与论文上下文对话，保存阅读笔记到 Obsidian。
 - 统一搜索：通过快速关键词搜索或显式选择的深度搜索，检索论文、研究产物、项目和独立用户提问。
-- 双语界面：支持简体中文与英语切换，包括本地化系统通知和随语言切换的默认论文阅读 Prompt。
+- 双语界面：支持简体中文与英语切换，包括本地化系统通知，以及随语言切换的默认论文阅读和项目—论文判定 Prompt；两类 Prompt 都可切换为不会被语言变化覆盖的自定义内容。
 - 自动产物：生成日报、论文报告、项目索引、实验进展记录等 Markdown artifact，并可导出到 Obsidian。
-- 调度与恢复：Node 服务管理手动任务、启动时每日任务、定时任务和论文报告队列；worker 记录任务历史并支持每日流程恢复/重试。
+- 调度与恢复：Node 负责在线 API、事务写入与 SSE，Compute Service 负责交互式模型请求，数据库驱动的 Worker 进程池负责持久后台任务；任务状态统一展示并支持每日流程恢复/重试和运行时并发热更新。
 - 部署选择：Docker Compose 默认使用 PostgreSQL 17；源代码部署通过 `DATABASE_URL` 或 `POSTGRES_*` 连接 PostgreSQL；可选 Nginx HTTPS 反向代理。
 
 ## 技术栈
@@ -90,9 +90,10 @@ Cloudflare Tunnel 的价值是让 `cloudflared` 从服务器向 Cloudflare 建�
 | --- | --- |
 | 前端 | Vite, React 19, React Router, React Markdown, KaTeX/GFM |
 | API 服务 | 原生 Node HTTP server，负责静态资源、认证、SSE、在线 CRUD/read 和任务 enqueue |
-| Worker | 常驻 Python worker service，负责 `worker_jobs` 中的重任务、文件/Obsidian、arXiv、RAG、LLM 和报告生成 |
+| Compute Service | 常驻 Python 交互式计算服务，负责 deep search、Reader streaming chat 和 follow-up questions，并传播请求超时与浏览器取消 |
+| Worker | Node pool supervisor 按数据库目标值管理 Python worker；worker 负责 `worker_jobs` 中的重任务、文件/Obsidian、arXiv、RAG、LLM 和报告生成 |
 | 数据库 | PostgreSQL；Docker Compose 默认提供 PostgreSQL 17，并使用 pgvector 作为向量能力路径 |
-| 部署 | `npm start`、开发双进程、Docker Compose、可选 Nginx profile |
+| 部署 | `npm start`、拆分的开发进程、Docker Compose、可选 Nginx profile |
 
 ## 仓库结构
 
@@ -100,7 +101,9 @@ Cloudflare Tunnel 的价值是让 `cloudflared` 从服务器向 Cloudflare 建�
 .
 ├── src/                         # React dashboard
 ├── public/                      # 静态资源，包含 research-mark.svg
-├── worker/                      # Python worker、API 适配、数据库和流水线逻辑
+├── server/                      # Node API 的领域模块、Compute client、任务和事件适配
+├── scripts/                     # 统一启动器与数据库驱动的 Worker pool supervisor
+├── worker/                      # Python worker、Compute Service、数据库和流水线逻辑
 ├── tests/                       # unittest 与 Node 测试
 ├── deploy/nginx/                # 可选 HTTPS 反向代理模板和证书目录
 ├── secrets/                     # Docker Compose secrets 示例说明，真实 *.txt 不进 Git
@@ -191,12 +194,12 @@ Vite 会把 `/api` 代理到 `http://localhost:3000`。生产模式下 `npm star
 - 论文：
   - 待判断：查看推荐论文、证据、项目判定，保存或丢弃，触发全文报告；保存时可在推荐项目之外手动补充任意已有项目，详情页也可直接打开对应论文仓库条目或 Chat。
   - 论文仓库：筛选、搜索和维护论文，在项目概览、论文报告和元信息之间切换，并管理项目关联、来源、PDF 与报告状态；从待判断、统一搜索或外部深链接进入时，列表会自动定位目标所在页，手动翻页后会立即加载新页第一篇论文。
-  - Chat：按论文集中查看报告和用户提问，基于全文、参考论文与项目上下文继续对话；消息按是否进入滚动区淡入淡出，超长回复和流式消息转为正式记录后仍能稳定显示。
+  - Chat：按论文集中查看报告和用户提问，基于全文、参考论文与项目上下文继续对话，并可用 Smart Save 将当前论文保存到 Obsidian；消息按是否进入滚动区淡入淡出，超长回复和流式消息转为正式记录后仍能稳定显示。
 - 项目：项目列表、新建项目、提醒和项目统计。
 - 项目详情：编辑项目关键词与 Obsidian 路径，关联论文/笔记，查看候选论文、实验进展和项目产物。
 - 产物：按类型、范围和状态筛选 artifact，查看 Markdown 与来源数据，导出到 Obsidian；从统一搜索或深链接进入时，列表会同步定位目标所在页。
 - 任务：运行每日流程、同步 Obsidian、抓取 arXiv、缓存全文、生成报告，并查看任务历史与后台执行状态。
-- 设置：配置数据库可见状态、Obsidian、arXiv、RAG、LLM provider、模型路由、调度策略和本地路径选择。
+- 设置：配置数据库可见状态、Obsidian、arXiv、RAG、LLM provider、模型路由、调度策略、本地路径、项目—论文判定 Prompt，以及可热更新的 Worker/Provider/任务组容量。
 
 ## 每日流水线
 
@@ -208,9 +211,9 @@ Vite 会把 `/api` 代理到 `http://localhost:3000`。生产模式下 `npm star
 4. 缓存全文：下载 PDF，用 PyMuPDF 提取 TXT。
 5. 全局排序：用 embedding、关键词、首页等 searcher 匹配研究上下文。
 6. 项目排序：把检索范围限制到项目关联上下文。
-7. 项目判定：用 LLM 对“项目 × 论文 × 证据”生成结构化判断。
+7. 项目判定：用 LLM 对“项目 × 论文 × 证据”生成结构化判断，要求论文核心贡献真正对应项目核心问题；可使用随界面语言切换的默认 Prompt 或持久化自定义规则。
 8. 同步推荐：生成项目论文推荐状态。
-9. 论文报告：为推荐或手动触发的论文处理报告队列。
+9. 论文报告：为推荐或手动触发的论文分别创建可独立排队、取消和重试的报告任务。
 10. 归档零命中论文：降低后续噪音。
 11. 生成日报 artifact：汇总指标、候选论文、风险和下一步动作。
 
@@ -250,7 +253,9 @@ python -m worker.cli retry-daily
 - `GLOBAL_LLM_REQUEST_CONCURRENCY`：所有 Worker/compute 进程合计的 LLM 外部请求上限，默认 `4`。
 - `GLOBAL_EMBEDDING_REQUEST_CONCURRENCY`：所有 Worker/compute 进程合计的 embedding 外部请求上限，默认 `4`。`embedding_concurrency`、项目判定和 Chat profile 并发是单批次局部上限，保存时不会超过对应全局上限。
 - worker 进程数、全局 LLM/embedding、三项局部并发和 capacity group 上限在首次初始化后以数据库 runtime policy 为唯一来源，并支持热更新。降低容量不会中断正在运行的任务或请求，只会阻止新的占用直到收敛；daily、Obsidian、backfill、同实体 key 互斥等正确性边界不可配置。
-- `paper-report` 的任务组上限固定为 unlimited，不提供独立容量开关；实际并发仍受在线 worker 数、全局 LLM 请求额度和 `paper:{paper_id}:report` 同论文互斥约束。
+- 为遵守 arXiv API 的访问约束，`arxiv` 抓取组与 `ingest` 全文获取组固定为单路执行，不提供 GUI override。独立 `generate-reports` 与 `run-daily`、恢复和补跑共享固定单路的 `daily` 组；已删除无产品入口的独立 `rank-papers` 任务。可配置任务组的内置默认值为：`artifact-index`、`library-paper-index`、`knowledge-index` 各 `8`，`reader-import` 与 `paper-report` 各 `4`；数据库中已有的有效显式 override 仍优先于这些默认值。
+- `paper-report` 可在 GUI 设置正整数上限或切换为 unlimited；实际并发仍受在线 worker 数、全局 LLM 请求额度和 `paper:{paper_id}:report` 同论文互斥约束。
+- GUI 将容量按作用域展示：共享硬上限放在“全局容量”；每日研究任务只显示项目判定的流程内部并行和不可修改的单路规则；embedding 批次、各类索引与外部同步放在“索引与同步”；`reader-import` 与其下游 `paper-report` 放在并列的“Reader 导入与论文报告”业务域。项目摘要并发只在“模型与路由”页随对应模型配置，避免在每日任务页重复维护。
 - `KRIS_COMPUTE_URL`、`KRIS_COMPUTE_TOKEN` / `KRIS_COMPUTE_TOKEN_FILE`、`KRIS_COMPUTE_TIMEOUT_MS`：Node 到 compute 的内部地址、服务身份和请求超时。Compose 使用不暴露宿主端口的 `compute` 服务，并要求 `secrets/compute_token.txt` 为非空随机值。
 - `KRIS_OUTBOX_POLLER_ENABLED` / `KRIS_OUTBOX_POLL_INTERVAL_MS`：控制 Node 轮询 `app_events` outbox 并转发到 `/api/events`，默认启用且间隔 1000ms。Node 写接口和常驻 worker 的缓存失效事件都会写入 `app_events`。
 - `KRIS_WORKER_POLL_INTERVAL_MS` / `KRIS_WORKER_INIT_DB_ON_START`：控制常驻 Python worker 的队列轮询间隔和启动时 schema 初始化。
@@ -304,6 +309,8 @@ LLM_PROVIDERS_JSON=[{"id":"openrouter","name":"OpenRouter","provider_type":"open
 
 OpenRouter 策略属于具体模型，而不是整个 provider profile。混合模型目录中的 GPT、Claude、Gemini 和 DeepSeek 模型分别读取自己的策略，不会互相继承 `provider.only`。通用 OpenAI-compatible provider 不会收到这些 OpenRouter 专属字段。旧版全局字段仅在 profile 只有一个 Chat 模型时安全迁移；多模型 profile 不会迁移全局上游限制。
 
+“设置 → 每日任务”中的项目—论文判定 Prompt 使用与论文解读 Prompt 相同的默认/自定义模式。默认模式按当前界面语言选择中英文内置规则；自定义模式保留用户文本，不会被语言切换覆盖。系统始终在判定规则后附加固定 JSON 输出契约和动态项目/论文证据。内置规则要求先区分项目核心问题、论文核心贡献与仅作为工具使用的共同方法，避免因共享术语或辅助技术产生误推荐。
+
 每日流程会在同步项目上下文后，按输入哈希增量生成完整的项目 Chat 摘要；只有项目资料或模型配置发生变化时才会再次请求模型。论文 Reader Chat 可由用户逐篇选择是否注入项目上下文；注入范围包含正式关联项目及 `pending` / `accepted` 推荐项目的完整摘要，不会另外生成短版 Chat 上下文。存在其中任意一种项目关系时开关即可用，全部不存在时开关保持禁用，后端也不会注入。`PROJECT_CHAT_PROFILE_*` 可指定该步骤使用的 provider 和模型；留空时会回退到默认 `LLM_CHAT_*`，未配置可用模型时该步骤只会跳过，不会阻断论文抓取和匹配。
 
 Reader Chat 还支持为当前论文持久化选择最多 3 篇参考论文。选择器只允许加入已经完成 TXT 提取的论文，不展示 token 估算，也不对组合后的总输入做额外裁剪。消息按 `当前论文全文 → 参考论文全文 → 已有报告 → 项目摘要 → 历史对话` 组织，并在助手消息中记录实际使用的参考论文 ID。
@@ -312,7 +319,7 @@ Reader Chat 还支持为当前论文持久化选择最多 3 篇参考论文。�
 
 ## API 和集成
 
-`server.js` 不使用 Express；Node 常驻 API 直接读写 PostgreSQL 并负责认证、SSE、缓存失效、在线 CRUD/read 和 `worker_jobs` enqueue。Python worker service 处理重任务/action job，完成后通过 `app_events` outbox 让 Node 转发缓存失效事件。主要 API 类别包括：
+`server.js` 不使用 Express；Node 常驻 API 直接读写 PostgreSQL 并负责认证、SSE、缓存失效、在线 CRUD/read 和 `worker_jobs` enqueue。独立 Compute Service 通过内部 token 认证处理 deep search、Reader streaming chat 和 follow-up questions；Python worker service 处理持久重任务/action job，完成后通过 `app_events` outbox 让 Node 转发缓存失效事件。主要 API 类别包括：
 
 - 认证：`/api/auth/status`、`/api/auth/login`、`/api/auth/logout`
 - 项目：项目列表、详情、保存、Obsidian 导出、项目索引、关联论文/笔记
@@ -373,9 +380,10 @@ Payload 约束：
 
 - `db`：`pgvector/pgvector:pg17`，数据在 named volume `pgdata17`。
 - `app`：Node 22 + Python venv，启动时先执行 `python -m worker.cli init-db`，再运行 `node server.js`。
+- `compute`：与 app 使用同一镜像，运行 `python -m worker.compute_service`，负责交互式模型请求；只在 Compose 内网监听，不暴露宿主端口，app 使用非空 `compute_token` secret 对调用进行认证。
 - `worker`：与 app 使用同一镜像，运行 `node scripts/worker-pool.js`；它按数据库期望值管理 Python worker 子进程，消费 `worker_jobs` 并写入 `app_events` outbox，不访问 Docker socket。
 - 默认期望进程数为 1。源码与 Docker 使用同一 supervisor 和数据库容量；在 GUI 管理进程、Provider 与任务组容量。降低上限时 busy 子进程先完成当前任务再排空退出。
-- `paper_report_queue_concurrency` / `PAPER_REPORT_QUEUE_CONCURRENCY` 已弃用；`paper-report` 没有独立 group cap，但仍受 worker pool、全局 LLM 和同论文互斥约束。
+- `paper_report_queue_concurrency` / `PAPER_REPORT_QUEUE_CONCURRENCY` 已弃用；请在 GUI 配置 `paper-report` 任务组容量。它仍受 worker pool、全局 LLM 和同论文互斥约束。
 - `./data:/data`：PDF/TXT 缓存、远端 Obsidian 镜像等文件数据。
 - 密钥只以 `_FILE` 路径形式注入容器；非密钥配置仍通过环境变量传入。
 

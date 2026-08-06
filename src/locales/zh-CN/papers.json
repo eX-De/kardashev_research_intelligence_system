@@ -20,7 +20,6 @@
   },
   "library": {
     "title": "论文仓库", "recentImport": "刚刚导入", "recentImportTitle": "最近 30 分钟手动导入", "live": { "loading": "读取仓库", "count": "{{count}} 篇论文" },
-    "queue": { "loading": "读取队列", "capacity": "队列 {{active}}/{{capacity}}", "disabled": "队列未启用" },
     "importStatus": {
       "aria": "论文导入状态", "queued": "等待导入", "queuedHint": "已进入后台任务队列", "running": "正在导入", "runningHint": "下载、解析并写入仓库", "latest": "最近结果", "noRecent": "最近 30 分钟暂无结果", "latestDetail": "{{type}} · 成功 {{count}} 篇", "latestFailed": "{{type}} · 导入失败",
       "type": { "url": "URL 导入", "web": "网页导入", "upload": "PDF 上传", "unknown": "论文导入" },

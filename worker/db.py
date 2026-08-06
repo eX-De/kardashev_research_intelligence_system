@@ -929,6 +929,7 @@ def init_db(conn) -> None:
         if _postgres_schema_current(conn):
             _seed_worker_runtime_policy(conn)
             _migrate_legacy_paper_report_dispatch(conn)
+            _retire_removed_worker_jobs(conn)
             _refresh_active_worker_job_policies(conn)
             conn.commit()
             return
@@ -936,6 +937,7 @@ def init_db(conn) -> None:
         if _postgres_schema_current(conn):
             _seed_worker_runtime_policy(conn)
             _migrate_legacy_paper_report_dispatch(conn)
+            _retire_removed_worker_jobs(conn)
             _refresh_active_worker_job_policies(conn)
             conn.commit()
             return
@@ -964,6 +966,7 @@ def _seed_worker_runtime_policy(conn: Any) -> dict[str, Any]:
         "paper_report_queue_concurrency",
     ]
     if conn.execute("SELECT 1 FROM worker_runtime_policy WHERE singleton_id = 1").fetchone():
+        _prune_worker_group_limit_overrides(conn)
         conn.execute("DELETE FROM app_settings WHERE key = ANY(?)", (legacy_keys,))
         return {"created": False, "corrections": []}
 
@@ -1018,10 +1021,29 @@ def _seed_worker_runtime_policy(conn: Any) -> dict[str, Any]:
     )
     if not conn.execute("SELECT 1 FROM worker_runtime_policy WHERE singleton_id = 1").fetchone():
         raise RuntimeError("worker runtime policy seed did not create the canonical row")
+    _prune_worker_group_limit_overrides(conn)
     conn.execute("DELETE FROM app_settings WHERE key = ANY(?)", (legacy_keys,))
     for correction in corrections:
         print(f"worker runtime policy seed correction: {correction}")
     return {"created": True, "corrections": corrections}
+
+
+def _prune_worker_group_limit_overrides(conn: Any) -> None:
+    """Remove overrides for groups whose static policy is no longer capacity-editable."""
+    from .job_policy import worker_group_policies
+
+    editable_groups = sorted(
+        group
+        for group, policy in worker_group_policies().items()
+        if policy["limit_mode"] == "capacity"
+    )
+    if editable_groups:
+        conn.execute(
+            "DELETE FROM worker_group_limit_overrides WHERE NOT (concurrency_group = ANY(?))",
+            (editable_groups,),
+        )
+    else:
+        conn.execute("DELETE FROM worker_group_limit_overrides")
 
 
 def _migrate_legacy_paper_report_dispatch(conn: Any) -> dict[str, int]:
@@ -1094,6 +1116,47 @@ def _migrate_legacy_paper_report_dispatch(conn: Any) -> dict[str, int]:
         (marker_key, to_json({"completed_at": migrated_at}), migrated_at),
     )
     return {"legacy_pumps_cancelled": len(pumps), "paper_report_jobs_materialized": materialized}
+
+
+def _retire_removed_worker_jobs(conn: Any) -> int:
+    """Cancel active jobs whose dispatch surface has been deliberately removed."""
+    from .queue import insert_app_event, task_event_payload
+
+    retired = {
+        "rank-papers": "Removed obsolete standalone rank-papers task",
+    }
+    retired_at = utc_now()
+    cancelled_count = 0
+    for job_type, reason in retired.items():
+        rows = conn.execute(
+            """
+            UPDATE worker_jobs
+            SET status = 'cancelled', cancel_requested_at = COALESCE(cancel_requested_at, ?),
+                cancel_reason = CASE WHEN cancel_reason = '' THEN ? ELSE cancel_reason END,
+                locked_by = '', locked_at = NULL, finished_at = COALESCE(finished_at, ?), updated_at = ?
+            WHERE job_type = ? AND status IN ('queued', 'running')
+            RETURNING *
+            """,
+            (retired_at, reason, retired_at, retired_at, job_type),
+        ).fetchall()
+        for row in rows:
+            worker_job = dict(row)
+            worker_job["payload"] = from_json(worker_job.get("payload_json"), {})
+            if worker_job.get("job_run_id") is not None:
+                conn.execute(
+                    """UPDATE job_runs SET status = 'cancelled', finished_at = COALESCE(finished_at, ?),
+                           heartbeat_at = ?, message = ? WHERE id = ? AND status IN ('queued', 'running')""",
+                    (retired_at, retired_at, reason, int(worker_job["job_run_id"])),
+                )
+            insert_app_event(
+                conn,
+                "task.cancelled",
+                task_event_payload(worker_job, "cancelled", message=reason),
+                created_at=retired_at,
+                commit=False,
+            )
+        cancelled_count += len(rows)
+    return cancelled_count
 
 
 def _refresh_active_worker_job_policies(conn: Any) -> None:
@@ -1514,6 +1577,7 @@ def _migrate_postgres_db(conn) -> None:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
 
     _migrate_legacy_paper_report_dispatch(conn)
+    _retire_removed_worker_jobs(conn)
     _refresh_active_worker_job_policies(conn)
 
     _migrate_user_paper_relations_to_canonical(conn)

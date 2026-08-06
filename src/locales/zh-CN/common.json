@@ -80,7 +80,6 @@
     "generate-paper-reports": "生成论文报告",
     "generate-reports": "生成研究报告",
     "sync-obsidian": "同步 Obsidian",
-    "rank-papers": "论文排序",
     "knowledge-document-index": "索引知识文档"
   },
   "jobStatus": {

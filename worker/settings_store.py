@@ -21,6 +21,12 @@ from .paper_prompts import (
     is_builtin_paper_reader_prompt,
     normalize_paper_reader_prompt_locale,
 )
+from .project_judgment_prompts import (
+    PROJECT_JUDGMENT_DEFAULT_PROMPTS,
+    infer_project_judgment_prompt_mode,
+    is_builtin_project_judgment_prompt,
+    normalize_project_judgment_prompt_locale,
+)
 from .runtime_policy import RUNTIME_FIELDS, load_runtime_policy
 
 CSV_FIELDS = {
@@ -83,6 +89,9 @@ STRING_FIELDS = {
     "paper_report_model",
     "project_chat_profile_provider_id",
     "project_chat_profile_model",
+    "project_judgment_prompt_mode",
+    "project_judgment_prompt_locale",
+    "project_judgment_custom_prompt",
     "reader_chat_provider_id",
     "reader_chat_model",
     "reader_smart_save_provider_id",
@@ -229,6 +238,22 @@ def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, An
         if paper_reader_prompt_mode == "default" and is_builtin_paper_reader_prompt(paper_reader_custom_prompt)
         else paper_reader_custom_prompt
     )
+    project_judgment_custom_prompt = str(
+        stored.get("project_judgment_custom_prompt", settings.project_judgment_custom_prompt or "")
+    )
+    project_judgment_prompt_mode = infer_project_judgment_prompt_mode(
+        stored.get("project_judgment_prompt_mode", settings.project_judgment_prompt_mode),
+        project_judgment_custom_prompt,
+    )
+    project_judgment_prompt_locale = normalize_project_judgment_prompt_locale(
+        stored.get("project_judgment_prompt_locale", settings.project_judgment_prompt_locale)
+    )
+    project_judgment_custom_prompt_payload = (
+        ""
+        if project_judgment_prompt_mode == "default"
+        and is_builtin_project_judgment_prompt(project_judgment_custom_prompt)
+        else project_judgment_custom_prompt
+    )
     llm_global = _positive_int(
         stored.get("global_llm_request_concurrency", env_value("GLOBAL_LLM_REQUEST_CONCURRENCY", "4")),
         settings.global_llm_request_concurrency or 4,
@@ -297,6 +322,10 @@ def _setting_payload(settings: Settings, stored: dict[str, Any]) -> dict[str, An
         "project_chat_profile_model": str(
             stored.get("project_chat_profile_model", settings.project_chat_profile_model or "")
         ),
+        "project_judgment_prompt_mode": project_judgment_prompt_mode,
+        "project_judgment_prompt_locale": project_judgment_prompt_locale,
+        "project_judgment_custom_prompt": project_judgment_custom_prompt_payload,
+        "project_judgment_prompt_defaults": PROJECT_JUDGMENT_DEFAULT_PROMPTS,
         "global_llm_request_concurrency": llm_global,
         "global_embedding_request_concurrency": embedding_global,
         "project_chat_profile_concurrency": min(_positive_int(
@@ -427,6 +456,16 @@ def apply_stored_settings(conn: Any, settings: Settings) -> Settings:
     updates["paper_reader_prompt_locale"] = normalize_paper_reader_prompt_locale(
         stored.get("paper_reader_prompt_locale", settings.paper_reader_prompt_locale)
     )
+    project_judgment_custom_prompt = updates.get(
+        "project_judgment_custom_prompt", settings.project_judgment_custom_prompt
+    )
+    updates["project_judgment_prompt_mode"] = infer_project_judgment_prompt_mode(
+        stored.get("project_judgment_prompt_mode", settings.project_judgment_prompt_mode),
+        project_judgment_custom_prompt,
+    )
+    updates["project_judgment_prompt_locale"] = normalize_project_judgment_prompt_locale(
+        stored.get("project_judgment_prompt_locale", settings.project_judgment_prompt_locale)
+    )
 
     return replace(settings, **updates)
 
@@ -493,6 +532,14 @@ def save_app_settings(conn: Any, payload: dict[str, Any]) -> dict[str, Any]:
             value = str(raw_value or "").strip()
             if value not in {"zh-CN", "en"}:
                 raise RuntimeError("paper_reader_prompt_locale must be zh-CN or en")
+        elif key == "project_judgment_prompt_mode":
+            value = str(raw_value or "").strip().lower()
+            if value not in {"default", "custom"}:
+                raise RuntimeError("project_judgment_prompt_mode must be default or custom")
+        elif key == "project_judgment_prompt_locale":
+            value = str(raw_value or "").strip()
+            if value not in {"zh-CN", "en"}:
+                raise RuntimeError("project_judgment_prompt_locale must be zh-CN or en")
         elif key == "scheduler_run_time":
             value = str(raw_value or "09:00")
             if not re.match(r"^\d{2}:\d{2}$", value):

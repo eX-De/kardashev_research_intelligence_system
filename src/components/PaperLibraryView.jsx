@@ -178,11 +178,6 @@ export function PaperLibraryView({
     () => api("/api/library/imports?limit=100"),
     { staleTime: 5000 }
   );
-  const jobStatusQuery = useCachedApi(
-    ["jobs", "status"],
-    () => api("/api/jobs/status"),
-    { staleTime: 5000 }
-  );
   const listData = listQuery.data || { items: [], total: 0 };
   const items = listData.items || [];
   const total = Number(listData.total || 0);
@@ -230,9 +225,6 @@ export function PaperLibraryView({
       title: importTargetTitle(target, t)
     }));
   }), [activeImportItems, t]);
-  const reportQueueStatus = jobStatusQuery.data?.worker?.queue?.by_type?.["paper-report"] || {};
-  const reportWorkerCapacity = Math.max(1, Number(jobStatusQuery.data?.worker?.online_workers || 0));
-
   useEffect(() => {
     if (!trackedImportJobIds.length) return undefined;
     const timer = window.setInterval(() => {
@@ -347,9 +339,9 @@ export function PaperLibraryView({
   }, [activeId, items, listQuery.hasData, listQuery.refreshing, listQuery.stale, onSelectPaper, selectedPaperId]);
 
   useEffect(() => {
-    const error = listQuery.error || locationQuery.error || detailQuery.error || projectsQuery.error || importStatusQuery.error || jobStatusQuery.error;
+    const error = listQuery.error || locationQuery.error || detailQuery.error || projectsQuery.error || importStatusQuery.error;
     if (error) setStatusMessage(error.message);
-  }, [detailQuery.error, importStatusQuery.error, jobStatusQuery.error, listQuery.error, locationQuery.error, projectsQuery.error, setStatusMessage]);
+  }, [detailQuery.error, importStatusQuery.error, listQuery.error, locationQuery.error, projectsQuery.error, setStatusMessage]);
 
   async function updateStatus(nextStatus) {
     if (!detail?.paper?.id) return;
@@ -391,7 +383,6 @@ export function PaperLibraryView({
     await Promise.all([
       listQuery.refresh({ force: true }),
       importStatusQuery.refresh({ force: true }),
-      jobStatusQuery.refresh({ force: true }),
       detailId ? detailQuery.refresh({ force: true }) : Promise.resolve()
     ]);
   }
@@ -621,7 +612,6 @@ export function PaperLibraryView({
       listQuery.refresh({ force: true }),
       shouldLocateRoute ? locationQuery.refresh({ force: true }) : Promise.resolve(),
       importStatusQuery.refresh({ force: true }),
-      jobStatusQuery.refresh({ force: true }),
       detailId ? detailQuery.refresh({ force: true }) : Promise.resolve()
     ]);
   }
@@ -634,14 +624,6 @@ export function PaperLibraryView({
           <h1>{t("library.title")}</h1>
         </div>
         <div className="vision-top-actions">
-          <span className={`vision-live-state ${Number(reportQueueStatus.active || 0) ? "running" : "ready"}`}>
-            <i aria-hidden="true" />
-            {!jobStatusQuery.hasData
-              ? t("library.queue.loading")
-              : jobStatusQuery.data?.worker?.required && !jobStatusQuery.data?.worker?.available
-                ? t("library.queue.disabled")
-                : t("library.queue.capacity", { active: Number(reportQueueStatus.active || 0), capacity: reportWorkerCapacity })}
-          </span>
           <RefreshButton className="vision-refresh" busy={listQuery.status === "loading" || importStatusQuery.status === "loading"} onClick={() => refresh().catch((error) => setStatusMessage(error.message))} />
         </div>
       </header>
@@ -1131,10 +1113,7 @@ export function PaperLibraryView({
           }
           cache.markStale(["library", "imports"]);
           cache.markStale(["jobs", "status"]);
-          await Promise.all([
-            importStatusQuery.refresh({ force: true }),
-            jobStatusQuery.refresh({ force: true })
-          ]);
+          await importStatusQuery.refresh({ force: true });
         }}
         open={importOpen}
         setStatusMessage={setStatusMessage}

@@ -26,7 +26,7 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         entries = worker_job_inventory()
         inventory_types = {str(entry["type"]) for entry in entries}
         self.assertEqual(inventory_types, set(service.SUPPORTED_WORKER_JOB_TYPES))
-        self.assertEqual(len(entries), 19)
+        self.assertEqual(len(entries), 18)
         for entry in entries:
             self.assertTrue(str(entry.get("label") or "").strip(), entry["type"])
             self.assertTrue(worker_job_concurrency_group(str(entry["type"])).strip(), entry["type"])
@@ -549,8 +549,8 @@ class WorkerServiceDispatchTests(unittest.TestCase):
         worker_job = {
             "id": 13,
             "job_run_id": 48,
-            "job_type": "rank-papers",
-            "payload": {"command": "rank-papers", "source": "manual", "args": []},
+            "job_type": "generate-reports",
+            "payload": {"command": "generate-reports", "source": "manual", "args": []},
             "started_at": "2026-07-06T10:00:00+00:00",
             "finished_at": None,
         }

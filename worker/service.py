@@ -32,7 +32,6 @@ from .cli import (
     run_daily_job,
     run_fetch_arxiv_job,
     run_generate_reports_job,
-    run_rank_job,
     run_sync_obsidian_job,
 )
 from .knowledge import index_knowledge_document
@@ -51,7 +50,6 @@ DISPATCHERS = {
     "sync-obsidian": run_sync_obsidian_job,
     "fetch-arxiv": run_fetch_arxiv_job,
     "cache-arxiv-text": run_cache_arxiv_text_job,
-    "rank-papers": run_rank_job,
     "generate-reports": run_generate_reports_job,
 }
 

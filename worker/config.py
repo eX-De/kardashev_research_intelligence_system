@@ -96,6 +96,9 @@ class Settings:
     project_chat_profile_model: str = ""
     project_chat_profile_concurrency: int = 2
     project_judgment_concurrency: int = 3
+    project_judgment_prompt_mode: str = "default"
+    project_judgment_prompt_locale: str = "zh-CN"
+    project_judgment_custom_prompt: str = ""
     reader_chat_provider_id: str = ""
     reader_chat_model: str = ""
     reader_smart_save_provider_id: str = ""
@@ -240,6 +243,10 @@ def load_settings() -> Settings:
     paper_reader_prompt_mode = env_value("PAPER_READER_PROMPT_MODE", "").strip().lower()
     if paper_reader_prompt_mode not in {"default", "custom"}:
         paper_reader_prompt_mode = "custom" if paper_reader_custom_prompt.strip() else "default"
+    project_judgment_custom_prompt = env_value("PROJECT_JUDGMENT_CUSTOM_PROMPT", "")
+    project_judgment_prompt_mode = env_value("PROJECT_JUDGMENT_PROMPT_MODE", "").strip().lower()
+    if project_judgment_prompt_mode not in {"default", "custom"}:
+        project_judgment_prompt_mode = "custom" if project_judgment_custom_prompt.strip() else "default"
     return Settings(
         obsidian_vault_path=Path(vault).expanduser() if vault else None,
         obsidian_include_dirs=_csv("OBSIDIAN_INCLUDE_DIRS", "Research,Papers"),
@@ -316,6 +323,9 @@ def load_settings() -> Settings:
             _positive_int("PROJECT_JUDGMENT_CONCURRENCY", 3, maximum=8),
             _positive_int("GLOBAL_LLM_REQUEST_CONCURRENCY", 4),
         ),
+        project_judgment_prompt_mode=project_judgment_prompt_mode,
+        project_judgment_prompt_locale=env_value("PROJECT_JUDGMENT_PROMPT_LOCALE", "zh-CN").strip() or "zh-CN",
+        project_judgment_custom_prompt=project_judgment_custom_prompt,
         reader_chat_provider_id=env_value("READER_CHAT_PROVIDER_ID", ""),
         reader_chat_model=env_value("READER_CHAT_MODEL", ""),
         reader_smart_save_provider_id=env_value("READER_SMART_SAVE_PROVIDER_ID", ""),

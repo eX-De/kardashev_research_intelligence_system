@@ -138,6 +138,17 @@ function createReaderFake() {
   const referencePapers = [];
   const workerJobs = [];
   const appEvents = [];
+  const workerRuntimePolicy = {
+    singleton_id: 1,
+    revision: 1,
+    worker_process_count: 1,
+    global_llm_request_concurrency: 4,
+    global_embedding_request_concurrency: 4,
+    embedding_concurrency: 2,
+    project_judgment_concurrency: 3,
+    project_chat_profile_concurrency: 2,
+    updated_at: T0
+  };
 
   function reportRows() {
     return artifacts.filter((artifact) => artifact.scope_type === "paper" && artifact.artifact_type === "paper_report" && artifact.status !== "removed");
@@ -150,8 +161,21 @@ function createReaderFake() {
       txCalls.push(normalized);
       return { rows: [] };
     }
+    if (normalized === "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY") {
+      return { rows: [] };
+    }
     if (normalized.startsWith("SELECT KEY, VALUE_JSON FROM APP_SETTINGS")) {
       return { rows: [{ key: "paper_reader_default_prompt", value_json: "\"Stored prompt\"" }] };
+    }
+    if (normalized.startsWith("SELECT POLICY.*, OVERRIDE_ROW.CONCURRENCY_GROUP")) {
+      return {
+        rows: [{
+          ...workerRuntimePolicy,
+          concurrency_group: null,
+          max_running: null,
+          policy_revision: null
+        }]
+      };
     }
     if (normalized.startsWith("SELECT STATUS, COUNT(*) AS COUNT, MAX(UPDATED_AT)")) {
       const grouped = new Map();

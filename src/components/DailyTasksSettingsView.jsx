@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { csv } from "../lib/dashboard.js";
 import { TaskControlPanel } from "./TaskControlPanel.jsx";
 import { TaskHistoryPanel } from "./TaskHistoryPanel.jsx";
+import { LocalizedPromptEditor } from "./LocalizedPromptEditor.jsx";
 import "../styles/SettingsForm.css";
 import "../styles/DailyTasksSettingsView.css";
 
@@ -53,6 +54,28 @@ function NumberField({ label, name, min, max, step, value, onChange }) {
   );
 }
 
+function CapacityField({ label, hint = "", max, unit, value, onChange }) {
+  return (
+    <label className="worker-capacity-field">
+      <span className="worker-capacity-field-head">
+        <strong>{label}</strong>
+        <small>1–{max}</small>
+      </span>
+      <span className="worker-capacity-input">
+        <input
+          max={max}
+          min="1"
+          type="number"
+          value={value ?? ""}
+          onChange={(event) => onChange(event.target.value)}
+        />
+        <em>{unit}</em>
+      </span>
+      {hint ? <small className="worker-capacity-field-note">{hint}</small> : null}
+    </label>
+  );
+}
+
 function CheckboxField({ label, name, checked, onChange }) {
   return (
     <label className="settings-checkbox-row">
@@ -83,22 +106,129 @@ function GroupLimitControl({ group, onChange, t }) {
   }
 
   return (
-    <div className="worker-limit-control">
+    <div className={`worker-limit-control ${unlimited ? "is-unlimited" : ""}`}>
       <label className="worker-unlimited-toggle">
         <input type="checkbox" checked={unlimited} onChange={(event) => onChange(event.target.checked ? null : group.default_max_running)} />
+        <span className="worker-toggle-track" aria-hidden="true"><i /></span>
         <span>{t("daily.workerConcurrency.unlimited")}</span>
       </label>
-      <input
-        aria-label={t("daily.workerConcurrency.effective")}
-        disabled={unlimited}
-        min="1"
-        type="number"
-        value={unlimited ? "" : value}
-        onBlur={commit}
-        onChange={(event) => setValue(event.target.value)}
-        onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
-      />
+      <span className="worker-limit-input">
+        <input
+          aria-label={t("daily.workerConcurrency.effective")}
+          disabled={unlimited}
+          min="1"
+          type="number"
+          value={unlimited ? "" : value}
+          onBlur={commit}
+          onChange={(event) => setValue(event.target.value)}
+          onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
+        />
+        <em aria-hidden="true">{unlimited ? "∞" : t("daily.workerConcurrency.slotUnit")}</em>
+      </span>
     </div>
+  );
+}
+
+const DAILY_EDITABLE_GROUPS = new Set();
+const DAILY_INVARIANT_GROUPS = new Set(["arxiv", "ingest", "daily"]);
+const READER_REPORT_EDITABLE_GROUPS = new Set(["reader-import", "paper-report"]);
+
+function WorkerGroupCard({ name, group, running, onChange, t }) {
+  return (
+    <article className="worker-group-card">
+      <div className="worker-group-card-head">
+        <div>
+          <strong>{name}</strong>
+          <p>{t(`daily.workerConcurrency.groupJobs.${name}`, { defaultValue: name })}</p>
+        </div>
+        <span className={running > 0 ? "is-running" : ""}>
+          <strong>{running}</strong>
+          {t("daily.workerConcurrency.running")}
+        </span>
+      </div>
+      <div className="worker-group-card-foot">
+        <span>{t("daily.workerConcurrency.default")} <strong>{group.default_max_running}</strong></span>
+        <GroupLimitControl group={group} onChange={onChange} t={t} />
+      </div>
+    </article>
+  );
+}
+
+function WorkerGuardrailCard({ name, group, t }) {
+  return (
+    <article>
+      <span className="worker-guardrail-mark" aria-hidden="true">●</span>
+      <div>
+        <strong>{name}</strong>
+        <p>
+          {t(`daily.workerConcurrency.groupJobs.${name}`, { defaultValue: name })}
+          {" · "}
+          {t(`daily.workerConcurrency.groupRules.${name}`, { defaultValue: t("daily.workerConcurrency.immutable", { limit: group.max_running }) })}
+        </p>
+      </div>
+      <em>{group.max_running}</em>
+    </article>
+  );
+}
+
+function WorkerWorkflowPanel({
+  description,
+  editableGroups,
+  eyebrow,
+  immutableGroups,
+  localControl,
+  occupancy,
+  onGroupChange,
+  title,
+  t
+}) {
+  return (
+    <section className="worker-workflow-panel">
+      <div className="worker-subsection-heading">
+        <div><span>{eyebrow}</span><h4>{title}</h4></div>
+        <p>{description}</p>
+      </div>
+      {localControl ? (
+        <div className="worker-workflow-block worker-workflow-local">
+          <div className="worker-workflow-block-head">
+            <strong>{t("daily.workerConcurrency.internalParallelism")}</strong>
+            <span>{t("daily.workerConcurrency.localLimit")}</span>
+          </div>
+          <div className="worker-workflow-local-fields">{localControl}</div>
+        </div>
+      ) : null}
+      {editableGroups.length ? (
+        <div className="worker-workflow-block">
+          <div className="worker-workflow-block-head">
+            <strong>{t("daily.workerConcurrency.taskCapacity")}</strong>
+            <span>{t("daily.workerConcurrency.editableCount", { count: editableGroups.length })}</span>
+          </div>
+          <div className="worker-group-grid">
+            {editableGroups.map(([name, group]) => (
+              <WorkerGroupCard
+                group={group}
+                key={name}
+                name={name}
+                onChange={(value) => onGroupChange(name, value)}
+                running={occupancy[name]?.running || 0}
+                t={t}
+              />
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {immutableGroups.length ? (
+        <div className="worker-workflow-block worker-workflow-fixed">
+          <div className="worker-workflow-block-head">
+            <strong>{t("daily.workerConcurrency.fixedRules")}</strong>
+            <span>{t("daily.workerConcurrency.fixedCount", { count: immutableGroups.length })}</span>
+          </div>
+          <div className="worker-guardrail-list">
+            {immutableGroups.map(([name, group]) => <WorkerGuardrailCard group={group} key={name} name={name} t={t} />)}
+          </div>
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -108,7 +238,15 @@ function WorkerConcurrencyCard({ settings, workerStatus, conflict, applyState, o
   const groups = Object.entries(policy.groups);
   const editableGroups = groups.filter(([, group]) => group.editable);
   const immutableGroups = groups.filter(([, group]) => !group.editable);
+  const dailyEditableGroups = editableGroups.filter(([name]) => DAILY_EDITABLE_GROUPS.has(name));
+  const readerReportEditableGroups = editableGroups.filter(([name]) => READER_REPORT_EDITABLE_GROUPS.has(name));
+  const indexEditableGroups = editableGroups.filter(([name]) => !DAILY_EDITABLE_GROUPS.has(name) && !READER_REPORT_EDITABLE_GROUPS.has(name));
+  const dailyImmutableGroups = immutableGroups.filter(([name]) => DAILY_INVARIANT_GROUPS.has(name));
+  const indexImmutableGroups = immutableGroups.filter(([name]) => !DAILY_INVARIANT_GROUPS.has(name));
   const occupancy = workerStatus?.group_occupancy || {};
+  const poolState = workerStatus?.pool?.state || "unknown";
+  const actualProcesses = workerStatus?.pool?.actual_processes ?? 0;
+  const drainingProcesses = workerStatus?.pool?.draining_processes ?? 0;
 
   function updateField(field, value) {
     onChange((current) => ({ ...current, [field]: value }));
@@ -127,44 +265,81 @@ function WorkerConcurrencyCard({ settings, workerStatus, conflict, applyState, o
         <div><span>{t("daily.workerConcurrency.eyebrow")}</span><h3>{t("daily.workerConcurrency.title")}</h3></div>
         <p>{t("daily.workerConcurrency.description")}</p>
       </div>
-      <div className="worker-pool-status" data-state={workerStatus?.pool?.state || "unknown"}>
-        <span>{t("daily.workerConcurrency.desired", { count: policy.worker_process_count })}</span>
-        <span>{t("daily.workerConcurrency.online", { count: workerStatus?.pool?.actual_processes ?? 0 })}</span>
-        <span>{t("daily.workerConcurrency.draining", { count: workerStatus?.pool?.draining_processes ?? 0 })}</span>
-        <strong>{t(`daily.workerConcurrency.applyState.${applyState}`, { defaultValue: applyState })}</strong>
-      </div>
-      {conflict ? (
-        <div className="worker-concurrency-conflict" role="alert">
-          <span>{t("daily.workerConcurrency.conflict", { revision: conflict.revision })}</span>
-          <button type="button" onClick={onReload}>{t("daily.workerConcurrency.reload")}</button>
+      <div className="worker-concurrency-workspace">
+        <div className="worker-pool-overview" data-state={poolState}>
+          <div className="worker-pool-heading">
+            <span className="worker-pool-indicator" aria-hidden="true"><i /></span>
+            <div>
+              <strong>{t("daily.workerConcurrency.poolTitle")}</strong>
+              <span>{t(`daily.workerConcurrency.poolState.${poolState}`, { defaultValue: poolState })}</span>
+            </div>
+          </div>
+          <div className="worker-pool-metrics">
+            <div><strong>{policy.worker_process_count}</strong><span>{t("daily.workerConcurrency.desiredLabel")}</span></div>
+            <div><strong>{actualProcesses}</strong><span>{t("daily.workerConcurrency.onlineLabel")}</span></div>
+            <div><strong>{drainingProcesses}</strong><span>{t("daily.workerConcurrency.drainingLabel")}</span></div>
+          </div>
+          <strong className={`worker-apply-state is-${applyState}`}>
+            <i aria-hidden="true" />
+            {t(`daily.workerConcurrency.applyState.${applyState}`, { defaultValue: applyState })}
+          </strong>
         </div>
-      ) : null}
-      <div className="settings-field-grid worker-capacity-fields">
-        <NumberField label={t("daily.workerConcurrency.fields.workerProcesses")} min="1" max="16" value={policy.worker_process_count} onChange={(_, value) => updateField("worker_process_count", value)} />
-        <NumberField label={t("daily.fields.globalLlmConcurrency")} min="1" max="64" value={policy.global_llm_request_concurrency} onChange={(_, value) => updateField("global_llm_request_concurrency", value)} />
-        <NumberField label={t("daily.fields.globalEmbeddingConcurrency")} min="1" max="64" value={policy.global_embedding_request_concurrency} onChange={(_, value) => updateField("global_embedding_request_concurrency", value)} />
-        <NumberField label={t("daily.fields.embeddingConcurrency")} min="1" max="32" value={policy.embedding_concurrency} onChange={(_, value) => updateField("embedding_concurrency", value)} />
-        <NumberField label={t("daily.fields.judgmentConcurrency")} min="1" max="8" value={policy.project_judgment_concurrency} onChange={(_, value) => updateField("project_judgment_concurrency", value)} />
-        <NumberField label={t("daily.workerConcurrency.fields.projectProfile")} min="1" max="8" value={policy.project_chat_profile_concurrency} onChange={(_, value) => updateField("project_chat_profile_concurrency", value)} />
-      </div>
-      <p className="worker-scale-note">{t("daily.workerConcurrency.scaleDownNote")}</p>
-      <div className="worker-group-table-wrap">
-        <table className="worker-group-table">
-          <thead><tr><th>{t("daily.workerConcurrency.group")}</th><th>{t("daily.workerConcurrency.default")}</th><th>{t("daily.workerConcurrency.effective")}</th><th>{t("daily.workerConcurrency.running")}</th></tr></thead>
-          <tbody>{editableGroups.map(([name, group]) => (
-            <tr key={name}>
-              <td><strong>{name}</strong><small>{t(`daily.workerConcurrency.groupJobs.${name}`, { defaultValue: name })}</small></td>
-              <td>{group.default_max_running}</td>
-              <td><GroupLimitControl group={group} onChange={(value) => updateGroup(name, value)} t={t} /></td>
-              <td>{occupancy[name]?.running || 0}</td>
-            </tr>
-          ))}</tbody>
-        </table>
-      </div>
-      <div className="worker-invariant-notes">
-        {immutableGroups.map(([name, group]) => (
-          <p key={name}><strong>{name}</strong> — {name === "paper-report" ? t("daily.workerConcurrency.paperReport") : t("daily.workerConcurrency.immutable", { limit: group.max_running })}</p>
-        ))}
+
+        {conflict ? (
+          <div className="worker-concurrency-conflict" role="alert">
+            <span>{t("daily.workerConcurrency.conflict", { revision: conflict.revision })}</span>
+            <button type="button" onClick={onReload}>{t("daily.workerConcurrency.reload")}</button>
+          </div>
+        ) : null}
+
+        <section className="worker-capacity-panel">
+          <div className="worker-subsection-heading">
+            <div><span>{t("daily.workerConcurrency.coreEyebrow")}</span><h4>{t("daily.workerConcurrency.coreTitle")}</h4></div>
+            <p>{t("daily.workerConcurrency.coreDescription")}</p>
+          </div>
+          <div className="worker-capacity-fields">
+            <CapacityField label={t("daily.workerConcurrency.fields.workerProcesses")} max="16" unit={t("daily.workerConcurrency.processUnit")} value={policy.worker_process_count} onChange={(value) => updateField("worker_process_count", value)} />
+            <CapacityField label={t("daily.fields.globalLlmConcurrency")} max="64" unit={t("daily.workerConcurrency.slotUnit")} value={policy.global_llm_request_concurrency} onChange={(value) => updateField("global_llm_request_concurrency", value)} />
+            <CapacityField label={t("daily.fields.globalEmbeddingConcurrency")} max="64" unit={t("daily.workerConcurrency.slotUnit")} value={policy.global_embedding_request_concurrency} onChange={(value) => updateField("global_embedding_request_concurrency", value)} />
+          </div>
+        </section>
+
+        <WorkerWorkflowPanel
+          description={t("daily.workerConcurrency.dailyDescription")}
+          editableGroups={dailyEditableGroups}
+          eyebrow={t("daily.workerConcurrency.dailyEyebrow")}
+          immutableGroups={dailyImmutableGroups}
+          localControl={<CapacityField hint={t("daily.workerConcurrency.judgmentHint")} label={t("daily.fields.judgmentConcurrency")} max="8" unit={t("daily.workerConcurrency.slotUnit")} value={policy.project_judgment_concurrency} onChange={(value) => updateField("project_judgment_concurrency", value)} />}
+          occupancy={occupancy}
+          onGroupChange={updateGroup}
+          title={t("daily.workerConcurrency.dailyTitle")}
+          t={t}
+        />
+
+        <WorkerWorkflowPanel
+          description={t("daily.workerConcurrency.indexDescription")}
+          editableGroups={indexEditableGroups}
+          eyebrow={t("daily.workerConcurrency.indexEyebrow")}
+          immutableGroups={indexImmutableGroups}
+          localControl={<CapacityField hint={t("daily.workerConcurrency.embeddingHint")} label={t("daily.fields.embeddingConcurrency")} max="32" unit={t("daily.workerConcurrency.slotUnit")} value={policy.embedding_concurrency} onChange={(value) => updateField("embedding_concurrency", value)} />}
+          occupancy={occupancy}
+          onGroupChange={updateGroup}
+          title={t("daily.workerConcurrency.indexTitle")}
+          t={t}
+        />
+
+        <WorkerWorkflowPanel
+          description={t("daily.workerConcurrency.readerReportDescription")}
+          editableGroups={readerReportEditableGroups}
+          eyebrow={t("daily.workerConcurrency.readerReportEyebrow")}
+          immutableGroups={[]}
+          occupancy={occupancy}
+          onGroupChange={updateGroup}
+          title={t("daily.workerConcurrency.readerReportTitle")}
+          t={t}
+        />
+
+        <p className="worker-scale-note"><i aria-hidden="true">i</i>{t("daily.workerConcurrency.scaleDownNote")}</p>
       </div>
     </section>
   );
@@ -271,6 +446,23 @@ export function DailyTasksSettingsView({
           onReload={onReloadWorkerConcurrency}
           t={t}
         />
+
+        <SettingsSection
+          eyebrow={t("daily.sections.judgmentPrompt.eyebrow")}
+          title={t("daily.sections.judgmentPrompt.title")}
+          description={t("daily.sections.judgmentPrompt.description")}
+        >
+          <LocalizedPromptEditor
+            customPromptField="project_judgment_custom_prompt"
+            defaultsField="project_judgment_prompt_defaults"
+            editorId="project-judgment-prompt"
+            localeField="project_judgment_prompt_locale"
+            modeField="project_judgment_prompt_mode"
+            onSettingChange={onSettingChange}
+            settings={settings}
+            translationPrefix="daily.judgmentPrompt"
+          />
+        </SettingsSection>
 
       </form>
 

@@ -98,19 +98,64 @@
         "eyebrow": "Capacity & recovery",
         "title": "Concurrency, cache & recovery",
         "description": "Limit downstream request capacity, retain full-text caches, and control historical retries."
+      },
+      "judgmentPrompt": {
+        "eyebrow": "LLM judgment",
+        "title": "Project-paper judgment prompt",
+        "description": "Configure the rules used by the daily pipeline's final LLM judgment of whether a paper truly helps a project's core problem. The JSON contract and dynamic input remain system-managed."
       }
+    },
+    "judgmentPrompt": {
+      "mode": {
+        "label": "Prompt mode",
+        "default": "Use default",
+        "custom": "Custom",
+        "defaultHint": "Daily judgments automatically use the built-in rules for the current interface language.",
+        "customHint": "Daily judgments use the custom rules saved below; language changes do not overwrite them."
+      },
+      "defaultField": "Default prompt for this language",
+      "customField": "Custom prompt",
+      "languageHint": "Current default language: {{language}}. The system appends the JSON output contract and project/paper evidence to these rules.",
+      "languages": { "zh-CN": "Chinese", "en": "English" }
     },
     "workerConcurrency": {
       "eyebrow": "Worker capacity",
       "title": "Workers and concurrency capacity",
       "description": "Manage the worker process pool shared by source and Docker modes, provider request budgets, and job-group capacity.",
+      "poolTitle": "Worker pool",
+      "poolState": { "online": "Healthy", "draining": "Draining", "degraded": "Degraded", "offline": "Offline", "unknown": "Awaiting status" },
+      "desiredLabel": "Desired",
+      "onlineLabel": "Online",
+      "drainingLabel": "Draining",
       "desired": "Desired {{count}}",
       "online": "Online {{count}}",
       "draining": "Draining {{count}}",
       "applyState": { "idle": "In sync", "unchanged": "Unchanged", "reconciling": "Reconciling", "applied": "Applied", "degraded": "Degraded" },
       "conflict": "Server capacity has advanced to revision {{revision}}. Your draft was preserved; reload before applying it again.",
       "reload": "Reload capacity",
-      "fields": { "workerProcesses": "Worker processes", "projectProfile": "Project profile concurrency" },
+      "fields": { "workerProcesses": "Worker processes" },
+      "processUnit": "processes",
+      "slotUnit": "slots",
+      "coreEyebrow": "Global capacity",
+      "coreTitle": "Global capacity",
+      "coreDescription": "Set the executor pool and provider request hard limits shared by every workflow in the system.",
+      "dailyEyebrow": "Daily pipeline",
+      "dailyTitle": "Daily research tasks",
+      "dailyDescription": "Manage parallelism for paper retrieval, project judgment, ranking, and daily brief generation.",
+      "indexEyebrow": "Index & sync",
+      "indexTitle": "Indexing and sync",
+      "indexDescription": "Manage parallelism for embedding batches, search indexes, and external synchronization.",
+      "readerReportEyebrow": "Reader workflow",
+      "readerReportTitle": "Reader imports and paper reports",
+      "readerReportDescription": "Keep Reader imports and their downstream single-paper reports in one domain while controlling capacity at each end of the workflow.",
+      "internalParallelism": "Workflow parallelism",
+      "localLimit": "Local limit",
+      "taskCapacity": "Job-group capacity",
+      "editableCount": "{{count}} editable groups",
+      "fixedRules": "Fixed rules",
+      "fixedCount": "{{count}} rules",
+      "judgmentHint": "Controls only project-paper judgment fan-out inside the daily workflow and remains bounded by the global LLM limit.",
+      "embeddingHint": "Controls only embedding fan-out inside indexing and content-processing workflows and remains bounded by the global embedding limit.",
       "scaleDownNote": "Lowering process, group, or provider limits affects only new jobs and requests; running work is not terminated.",
       "group": "Group and jobs",
       "default": "Default",
@@ -118,15 +163,24 @@
       "running": "Running",
       "unlimited": "Unlimited",
       "immutable": "Fixed correctness limit {{limit}}; settings cannot remove it.",
-      "paperReport": "No independent group cap; still limited by online workers, the global LLM budget, and the same-paper mutex.",
+      "groupRules": {
+        "arxiv": "Fixed at 1 to avoid triggering arXiv API rate limits with concurrent requests.",
+        "ingest": "Fixed at 1 to avoid arXiv throttling during concurrent downloads or reads.",
+        "obsidian": "Fixed at 1 so tasks cannot write the same vault or destination path concurrently.",
+        "artifact-backfill": "Fixed at 1 to keep whole-library backfills from contending for index resources.",
+        "daily": "Fixed at 1 so daily runs, recovery, retries, and standalone daily-report generation cannot update the same state concurrently."
+      },
       "groupJobs": {
         "arxiv": "arXiv ingestion",
         "ingest": "Paper full-text caching",
-        "llm": "Ranking and daily reports",
         "artifact-index": "Artifact and experiment-report indexing",
+        "artifact-backfill": "Historical artifact index backfill",
         "library-paper-index": "Library paper indexing",
         "knowledge-index": "Knowledge document indexing",
-        "reader-import": "Reader upload and web import"
+        "reader-import": "Reader upload and web import",
+        "obsidian": "Obsidian synchronization and export",
+        "daily": "Daily runs, recovery, historical retries, and standalone daily-report generation",
+        "paper-report": "Single-paper reports"
       }
     },
     "fields": {

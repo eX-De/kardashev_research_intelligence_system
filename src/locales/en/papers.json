@@ -27,7 +27,6 @@
   },
   "library": {
     "title": "Paper library", "recentImport": "Just imported", "recentImportTitle": "Manually imported in the last 30 minutes", "live": { "loading": "Loading library", "count": "{{count}} papers" },
-    "queue": { "loading": "Loading queue", "capacity": "Queue {{active}}/{{capacity}}", "disabled": "Queue disabled" },
     "importStatus": {
       "aria": "Paper import status", "queued": "Waiting to import", "queuedHint": "Added to the background task queue", "running": "Importing", "runningHint": "Downloading, parsing, and saving", "latest": "Latest result", "noRecent": "No result in the last 30 minutes", "latestDetail": "{{type}} · {{count}} imported", "latestFailed": "{{type}} · Import failed",
       "type": { "url": "URL import", "web": "Web import", "upload": "PDF upload", "unknown": "Paper import" },

@@ -24,6 +24,7 @@ class _SeedConnection:
         self.stored = stored or {}
         self.inserted = None
         self.deleted_keys = []
+        self.pruned_editable_groups = []
 
     def execute(self, sql, params=()):
         normalized = " ".join(str(sql).split())
@@ -33,6 +34,9 @@ class _SeedConnection:
             return _Cursor(rows=[{"key": key, "value_json": value} for key, value in self.stored.items()])
         if normalized.startswith("INSERT INTO worker_runtime_policy"):
             self.inserted = params
+            return _Cursor()
+        if normalized.startswith("DELETE FROM worker_group_limit_overrides"):
+            self.pruned_editable_groups.append(tuple(params[0]) if params else ())
             return _Cursor()
         if normalized.startswith("DELETE FROM app_settings"):
             self.deleted_keys.extend(params[0])
@@ -78,6 +82,9 @@ class WorkerRuntimePolicyTests(unittest.TestCase):
         self.assertEqual(conn.inserted, (1, 2, 3, 3, 2, 2, "2026-08-06T00:00:00+00:00"))
         self.assertEqual(conn.stored, {})
         self.assertIn("paper_report_queue_concurrency", conn.deleted_keys)
+        self.assertNotIn("arxiv", conn.pruned_editable_groups[-1])
+        self.assertNotIn("ingest", conn.pruned_editable_groups[-1])
+        self.assertIn("artifact-index", conn.pruned_editable_groups[-1])
         self.assertEqual(_seed_worker_runtime_policy(conn), {"created": False, "corrections": []})
 
     def test_revision_mismatch_and_unknown_group_are_fail_closed(self) -> None:

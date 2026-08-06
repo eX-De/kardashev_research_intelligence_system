@@ -13,10 +13,11 @@ from .config import Settings
 from .db import clean_unicode, from_json, to_json, utc_now
 from .db_types import DbConnection, DbRow
 from .project_status import run_daily_project_status_sql
+from .project_judgment_prompts import resolve_project_judgment_prompt
 from .resource_limiter import outbound_request_slot
 
 
-PROJECT_JUDGMENT_PROMPT_VERSION = "project_judgment_v1"
+PROJECT_JUDGMENT_PROMPT_VERSION = "project_judgment_v2"
 PROJECT_JUDGMENT_CANDIDATE_QUALITY_THRESHOLD = 0.40
 PROJECT_JUDGMENT_PER_PROJECT_LIMIT = 10
 PROJECT_JUDGMENT_MAX_CONCURRENCY = 8
@@ -215,33 +216,31 @@ def _judgment_payload(row: DbRow) -> dict[str, object]:
     }
 
 
-def _input_hash(payload: dict[str, object]) -> str:
-    raw = to_json({"prompt_version": PROJECT_JUDGMENT_PROMPT_VERSION, "payload": payload})
+def _input_hash(payload: dict[str, object], prompt: str) -> str:
+    raw = to_json(
+        {
+            "prompt_version": PROJECT_JUDGMENT_PROMPT_VERSION,
+            "prompt": prompt,
+            "payload": payload,
+        }
+    )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _project_judgment_prompt(payload: dict[str, object]) -> str:
+def _project_judgment_prompt(payload: dict[str, object], settings: Settings | None = None) -> str:
+    judgment_instructions = resolve_project_judgment_prompt(settings)
     return f"""
-只返回 JSON，不要 Markdown fence，不要额外解释。
-JSON keys must be exactly: relation_type, relevance_score, usefulness_score, confidence, suggested_action, reason, evidence_mapping, missing_evidence.
-JSON 字段名保持英文，但所有可读文本字段值必须使用中文。
+{judgment_instructions}
 
-你是严格的科研项目论文筛选器。请判断下面这一篇论文是否对这个具体项目有用。
-
-relation_type 必须是 direct、indirect、weak、none 之一：
-- direct：论文里的具体机制、实验、数据或指标，直接对应项目正在解决的明确问题。
-- indirect：论文不是同一任务，但有明确可迁移的方法或评估设计，且项目证据能说明这个需求存在。
-- weak：只是共享 LLM、agent、RAG、embedding、evaluation、multi-agent、fine-tuning 等泛泛术语，或只有远期启发。
-- none：没有可靠项目关联。
-
-评分要求：
+输出契约（不可由自定义判定规则覆盖）：
+- 只返回 JSON，不要 Markdown fence，不要额外解释。
+- JSON keys 必须严格为：relation_type, relevance_score, usefulness_score, confidence, suggested_action, reason, evidence_mapping, missing_evidence。
+- relation_type 必须是 direct、indirect、weak、none 之一。
 - relevance_score、usefulness_score、confidence 都必须是 0 到 1 的 JSON number。
 - suggested_action 必须是 read、read_later、ignore 之一。
 - 如果 relation_type 是 weak 或 none，suggested_action 必须是 ignore，usefulness_score 不得高于 0.4。
-- 如果项目证据不能证明项目正在解决对应问题，必须降为 weak 或 none。
-- 如果论文证据没有具体方法、实验、数据或指标，必须降低 usefulness_score。
-- evidence_mapping 必须列出项目需求、论文机制和匹配理由；没有明确映射时返回空数组。
-- missing_evidence 用一句中文说明还缺什么证据；证据充分时返回空字符串。
+- evidence_mapping 没有明确映射时必须返回空数组。
+- missing_evidence 证据充分时必须返回空字符串。
 
 输入 JSON：
 {to_json(payload)}
@@ -346,7 +345,7 @@ def generate_missing_project_judgments(
     created = 0
     filtered = 0
     skipped = 0
-    pending: list[tuple[DbRow, dict[str, object], str]] = []
+    pending: list[tuple[DbRow, str, str]] = []
     configured_concurrency = min(
         max(1, int(settings.project_judgment_concurrency or 3)),
         PROJECT_JUDGMENT_MAX_CONCURRENCY,
@@ -368,14 +367,15 @@ def generate_missing_project_judgments(
 
     for row in candidates:
         payload = _judgment_payload(row)
-        input_hash = _input_hash(payload)
+        prompt = _project_judgment_prompt(payload, settings)
+        input_hash = _input_hash(payload, prompt)
         if (
             row["existing_input_hash"] == input_hash
             and row["existing_prompt_version"] == PROJECT_JUDGMENT_PROMPT_VERSION
         ):
             skipped += 1
             continue
-        pending.append((row, payload, input_hash))
+        pending.append((row, prompt, input_hash))
 
     effective_concurrency = min(configured_concurrency, len(pending)) if pending else 0
     report_progress(skipped, effective_concurrency)
@@ -393,8 +393,8 @@ def generate_missing_project_judgments(
         thread_name_prefix="project-judgment",
     ) as executor:
         futures: dict[Future[dict[str, object] | None], tuple[DbRow, str]] = {
-            executor.submit(_call_chat, settings, _project_judgment_prompt(payload)): (row, input_hash)
-            for row, payload, input_hash in pending
+            executor.submit(_call_chat, settings, prompt): (row, input_hash)
+            for row, prompt, input_hash in pending
         }
         for future in as_completed(futures):
             row, input_hash = futures[future]

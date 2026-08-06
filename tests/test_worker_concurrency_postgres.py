@@ -583,7 +583,7 @@ class WorkerConcurrencyPostgresTests(unittest.TestCase):
                 for worker in (worker_a, worker_b):
                     if worker: worker.wait(timeout=10)
 
-    def test_init_rebinds_active_policy_and_terminalizes_unknown_legacy_job(self) -> None:
+    def test_init_rebinds_active_policy_and_retires_removed_jobs(self) -> None:
         self.conn.execute(
             "DELETE FROM app_settings WHERE key = 'schema_migration.worker_ownership_stage7'"
         )
@@ -604,6 +604,16 @@ class WorkerConcurrencyPostgresTests(unittest.TestCase):
                RETURNING id""",
             (run_id, to_json({"command": "generate-paper-reports"}), now, now, now),
         ).fetchone()["id"])
+        retired_run_id = int(self.conn.execute(
+            """INSERT INTO job_runs(job_type, status, started_at, heartbeat_at, meta_json)
+               VALUES ('rank-papers', 'queued', ?, ?, '{}') RETURNING id""",
+            (now, now),
+        ).fetchone()["id"])
+        retired_job_id = int(self.conn.execute(
+            """INSERT INTO worker_jobs(job_run_id, job_type, status, payload_json, created_at, updated_at)
+               VALUES (?, 'rank-papers', 'queued', '{}', ?, ?) RETURNING id""",
+            (retired_run_id, now, now),
+        ).fetchone()["id"])
         paper_id = int(self.conn.execute(
             """INSERT INTO papers(canonical_key, title, created_at, updated_at)
                VALUES ('stage7:migration', 'Stage 7 migration paper', ?, ?) RETURNING id""",
@@ -622,12 +632,21 @@ class WorkerConcurrencyPostgresTests(unittest.TestCase):
             "SELECT concurrency_group, concurrency_key, policy_version FROM worker_jobs WHERE id = ?", (known,)
         ).fetchone()
         self.assertEqual((rebound["concurrency_group"], rebound["concurrency_key"], int(rebound["policy_version"])),
-                         ("paper-report", "paper:77:report", 1))
+                         ("paper-report", "paper:77:report", 3))
         cancelled = self.conn.execute(
             "SELECT status, locked_by, locked_at FROM worker_jobs WHERE id = ?", (legacy,)
         ).fetchone()
         self.assertEqual((cancelled["status"], cancelled["locked_by"], cancelled["locked_at"]), ("cancelled", "", None))
         self.assertEqual(self.conn.execute("SELECT status FROM job_runs WHERE id = ?", (run_id,)).fetchone()["status"], "cancelled")
+        retired = self.conn.execute(
+            "SELECT status, cancel_reason FROM worker_jobs WHERE id = ?", (retired_job_id,)
+        ).fetchone()
+        self.assertEqual(retired["status"], "cancelled")
+        self.assertIn("Removed obsolete standalone rank-papers task", retired["cancel_reason"])
+        self.assertEqual(
+            self.conn.execute("SELECT status FROM job_runs WHERE id = ?", (retired_run_id,)).fetchone()["status"],
+            "cancelled",
+        )
         report_jobs = self.conn.execute(
             """SELECT payload_json, concurrency_key FROM worker_jobs
                WHERE job_type = 'paper-report' AND status IN ('queued', 'running')

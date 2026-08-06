@@ -79,9 +79,9 @@ Additional recommendations:
 - Experiment progress intake: receive structured experiment reports from [kris-agent](https://github.com/eX-De/kris-agent) or other scripts and preserve them as project artifacts and context.
 - Paper reading: import arXiv or PDF links, upload local PDFs, import cleaned webpage text, generate full-paper reports, chat with paper context, and save reading notes to Obsidian.
 - Unified search: search papers, research artifacts, projects, and individual user questions with quick lexical search or explicitly selected deep search.
-- Bilingual interface: switch between Simplified Chinese and English, including localized system notifications and language-aware default paper-reading prompts.
+- Bilingual interface: switch between Simplified Chinese and English, including localized system notifications and language-aware default paper-reading and project-paper judgment prompts; both prompt types can use custom content that language changes do not overwrite.
 - Automated artifacts: generate daily reports, paper reports, project indexes, experiment-progress records, and other Markdown artifacts, with optional Obsidian export.
-- Scheduling and recovery: the Node service manages manual jobs, startup daily runs, scheduled jobs, and the paper-report queue; the worker records job history and supports daily-pipeline recovery and retry.
+- Scheduling and recovery: Node owns online APIs, transactional writes, and SSE; the Compute Service owns interactive model requests; and a database-driven Worker pool owns persistent background jobs. Task state is presented consistently, with daily-pipeline recovery/retry and hot-reloadable runtime capacity.
 - Deployment choice: Docker Compose provides PostgreSQL 17 by default; source deployments connect through `DATABASE_URL` or `POSTGRES_*`; an optional Nginx HTTPS reverse proxy is available.
 
 ## Technology Stack
@@ -90,7 +90,8 @@ Additional recommendations:
 | --- | --- |
 | Frontend | Vite, React 19, React Router, React Markdown, KaTeX/GFM |
 | API service | Native Node HTTP server for static assets, authentication, SSE, online CRUD/read operations, and job enqueueing |
-| Worker | Persistent Python worker service for `worker_jobs`, files and Obsidian, arXiv, RAG, LLM calls, and report generation |
+| Compute Service | Persistent Python interactive-compute service for deep search, Reader streaming chat, and follow-up questions, including timeout and browser-cancellation propagation |
+| Worker | A Node pool supervisor manages Python workers from the database desired count; workers handle heavy `worker_jobs`, files and Obsidian, arXiv, RAG, LLM calls, and report generation |
 | Database | PostgreSQL; Docker Compose provides PostgreSQL 17 and uses pgvector for vector retrieval |
 | Deployment | `npm start`, split development processes, Docker Compose, and an optional Nginx profile |
 
@@ -100,7 +101,9 @@ Additional recommendations:
 .
 ├── src/                         # React dashboard
 ├── public/                      # Static assets, including research-mark.svg
-├── worker/                      # Python worker, API adapters, database, and pipeline logic
+├── server/                      # Node API domain modules, Compute client, and job/event adapters
+├── scripts/                     # Unified launcher and database-driven Worker pool supervisor
+├── worker/                      # Python workers, Compute Service, database, and pipeline logic
 ├── tests/                       # unittest and Node tests
 ├── deploy/nginx/                # Optional HTTPS reverse-proxy template and certificates
 ├── secrets/                     # Docker secret examples; real *.txt files are not committed
@@ -191,12 +194,12 @@ Vite proxies `/api` to `http://localhost:3000`. In production mode, `npm start` 
 - Papers:
   - Inbox: inspect recommended papers, evidence, and project judgments; save or discard papers and trigger full-paper reports. Saving can add any existing project beyond the recommended set, and the detail header can open the corresponding Paper Library entry or Chat directly.
   - Paper Library: filter, search, and maintain papers; switch among Project Overview, Paper Report, and Metadata; manage project associations, sources, PDFs, and report state. Links from Inbox, unified search, or external deep links automatically locate the target's list page, and manual pagination immediately loads the first paper on the new page.
-  - Chat: browse paper reports and user questions by paper and continue a conversation using full text, reference papers, and project context. Messages reveal as they enter the scroll area, while very long replies and streamed messages remain visible after becoming persisted records.
+  - Chat: browse paper reports and user questions by paper, continue a conversation using full text, reference papers, and project context, and use Smart Save to save the active paper to Obsidian. Messages reveal as they enter the scroll area, while very long replies and streamed messages remain visible after becoming persisted records.
 - Projects: project list, project creation, notifications, and project statistics.
 - Project details: edit keywords and Obsidian paths, associate papers and notes, and inspect candidate papers, experiment progress, and project artifacts.
 - Artifacts: filter artifacts by type, scope, and state; read Markdown and source data; export to Obsidian. Unified-search and deep-link navigation synchronizes the list to the target page.
 - Tasks: run the daily pipeline, synchronize Obsidian, fetch arXiv, cache full text, generate reports, and inspect job history and backend execution state.
-- Settings: inspect database status and configure Obsidian, arXiv, RAG, LLM providers, model routing, scheduling, and local path selection.
+- Settings: inspect database status and configure Obsidian, arXiv, RAG, LLM providers, model routing, scheduling, local paths, the project-paper judgment prompt, and hot-reloadable Worker/provider/job-group capacity.
 
 ## Daily Pipeline
 
@@ -208,9 +211,9 @@ Vite proxies `/api` to `http://localhost:3000`. In production mode, `npm start` 
 4. Cache full text: download PDFs and extract TXT with PyMuPDF.
 5. Global ranking: match research context through embeddings, keywords, and configured searchers.
 6. Project ranking: restrict retrieval to each project's associated context.
-7. Project judgment: use an LLM to generate structured judgments for each project-paper-evidence combination.
+7. Project judgment: use an LLM to generate structured judgments for each project-paper-evidence combination, requiring the paper's core contribution to address the project's core problem; use a language-aware default prompt or persisted custom rules.
 8. Synchronize recommendations: update project-paper recommendation states.
-9. Paper reports: process reports for recommended or manually requested papers through the queue.
+9. Paper reports: create an independently queueable, cancellable, and retryable report job for each recommended or manually requested paper.
 10. Archive zero-hit papers to reduce later noise.
 11. Generate the daily-report artifact with metrics, candidates, risks, and next actions.
 
@@ -250,7 +253,9 @@ Key startup settings:
 - `GLOBAL_LLM_REQUEST_CONCURRENCY`: aggregate outbound LLM request limit across all Worker/compute processes, default `4`.
 - `GLOBAL_EMBEDDING_REQUEST_CONCURRENCY`: aggregate outbound embedding request limit across all Worker/compute processes, default `4`. `embedding_concurrency`, project judgment, and Chat profile concurrency remain per-batch local limits and are capped by their global limit when saved.
 - After first initialization, worker count, global LLM/embedding budgets, three local limits, and capacity-group limits use the database runtime policy as their only source and support hot updates. Lowering capacity does not terminate running work; it blocks new acquisitions until usage converges. Daily, Obsidian, backfill, same-entity key mutexes, and other correctness boundaries are not configurable.
-- The `paper-report` group is permanently unlimited and has no independent capacity switch. Effective concurrency is still bounded by online workers, the global LLM budget, and the `paper:{paper_id}:report` same-paper mutex.
+- To respect arXiv API access constraints, the `arxiv` ingestion group and `ingest` full-text group are fixed to one active job and expose no GUI override. Standalone `generate-reports` shares the fixed single-slot `daily` group with `run-daily`, recovery, and retries; the standalone `rank-papers` task was removed because it had no product entry point. Built-in defaults for editable groups are `8` for `artifact-index`, `library-paper-index`, and `knowledge-index`, and `4` for `reader-import` and `paper-report`; an existing valid PostgreSQL override continues to take precedence.
+- Set `paper-report` to a positive integer limit or switch it to unlimited in the GUI. Effective concurrency remains bounded by online workers, the global LLM budget, and the `paper:{paper_id}:report` same-paper mutex.
+- The GUI presents capacity by scope: shared hard ceilings under Global capacity; Daily research tasks shows only internal project-judgment parallelism and immutable single-slot rules; embedding batches, indexes, and external synchronization under Indexing and sync; and `reader-import` with its downstream `paper-report` in a peer Reader imports and paper reports domain. Project-summary concurrency stays alongside its model route on the Models and routing page instead of being duplicated under Daily tasks.
 - `KRIS_COMPUTE_URL`, `KRIS_COMPUTE_TOKEN` / `KRIS_COMPUTE_TOKEN_FILE`, and `KRIS_COMPUTE_TIMEOUT_MS`: internal compute address, service identity, and request timeout. Compose runs `compute` without publishing a host port and requires a non-empty random `secrets/compute_token.txt`.
 - `KRIS_OUTBOX_POLLER_ENABLED` / `KRIS_OUTBOX_POLL_INTERVAL_MS`: control Node polling of the `app_events` outbox and forwarding to `/api/events`, enabled by default at 1,000 ms. Node write endpoints and the persistent worker both write cache-invalidation events to `app_events`.
 - `KRIS_WORKER_POLL_INTERVAL_MS` / `KRIS_WORKER_INIT_DB_ON_START`: configure queue polling and schema initialization for the persistent worker.
@@ -304,6 +309,8 @@ LLM_PROVIDERS_JSON=[{"id":"openrouter","name":"OpenRouter","provider_type":"open
 
 OpenRouter policies belong to individual models, not to the whole provider profile. GPT, Claude, Gemini, and DeepSeek entries in a mixed catalog resolve their own policies and never inherit another model’s `provider.only`. Generic OpenAI-compatible providers never receive these OpenRouter-specific fields. Legacy global fields migrate only when a profile has exactly one Chat model; a mixed catalog does not inherit a global upstream restriction.
 
+The project-paper judgment prompt under Settings → Daily tasks uses the same default/custom behavior as the paper-reading prompt. Default mode selects the built-in Chinese or English rules for the current interface language; custom mode preserves user text across language changes. The system always appends the fixed JSON output contract and dynamic project/paper evidence. The built-in rules distinguish the project's core problem, the paper's core contribution, and shared methods used only as tools so shared terminology or auxiliary techniques do not create false recommendations.
+
 After synchronizing project context, the daily pipeline incrementally generates a complete project Chat profile based on an input hash. It calls the model again only when project content or model configuration changes. For each paper, users can choose whether Reader Chat injects project context. The injected set includes formally associated projects and the complete profiles of `pending` or `accepted` project recommendations; it does not generate a separate short Chat profile. The toggle is available when any such relationship exists and remains disabled otherwise. `PROJECT_CHAT_PROFILE_*` selects a provider and model for profile generation and falls back to `LLM_CHAT_*` when empty. If no usable model exists, this stage is skipped without blocking paper fetching or matching.
 
 Reader Chat can persist up to three reference papers for the active paper. The selector only offers papers with completed TXT extraction, does not display token estimates, and does not additionally truncate the combined input. Messages are assembled in this order: `current paper full text → reference paper full text → existing report → project profiles → conversation history`. Assistant messages record the reference-paper IDs actually used.
@@ -312,7 +319,7 @@ Without an LLM provider, KRIS can still initialize PostgreSQL, synchronize Obsid
 
 ## API and Integrations
 
-`server.js` does not use Express. The persistent Node API reads and writes PostgreSQL directly and handles authentication, SSE, cache invalidation, online CRUD/read operations, and `worker_jobs` enqueueing. The Python worker service processes heavy and action jobs, then writes `app_events` so Node can forward cache-invalidation events. Major API groups include:
+`server.js` does not use Express. The persistent Node API reads and writes PostgreSQL directly and handles authentication, SSE, cache invalidation, online CRUD/read operations, and `worker_jobs` enqueueing. A separately token-authenticated Compute Service handles deep search, Reader streaming chat, and follow-up questions; the Python worker service processes persistent heavy and action jobs, then writes `app_events` so Node can forward cache-invalidation events. Major API groups include:
 
 - Authentication: `/api/auth/status`, `/api/auth/login`, `/api/auth/logout`
 - Projects: list, detail, save, Obsidian export, project index, and paper/note associations
@@ -373,9 +380,10 @@ The default published image is `exde1968/kardashev-research-intelligence-system:
 
 - `db`: `pgvector/pgvector:pg17`, storing data in the named volume `pgdata17`.
 - `app`: Node 22 plus a Python virtual environment. It runs `python -m worker.cli init-db` before starting `node server.js`.
+- `compute`: the same image running `python -m worker.compute_service` for interactive model requests. It listens only on the Compose network without publishing a host port, and app authenticates its calls with a non-empty `compute_token` secret.
 - `worker`: the same image running `node scripts/worker-pool.js`. It manages Python worker children from the database desired count, consumes `worker_jobs`, writes the `app_events` outbox, and never accesses the Docker socket.
 - Desired process count defaults to 1. Source and Docker modes use the same supervisor and database capacity; manage process, provider, and group capacity in the GUI. On scale-down, busy children finish their current job before draining.
-- `paper_report_queue_concurrency` / `PAPER_REPORT_QUEUE_CONCURRENCY` is deprecated. `paper-report` has no independent group cap, but remains bounded by the worker pool, global LLM budget, and same-paper mutex.
+- `paper_report_queue_concurrency` / `PAPER_REPORT_QUEUE_CONCURRENCY` is deprecated; configure the `paper-report` group in the GUI instead. It remains bounded by the worker pool, global LLM budget, and same-paper mutex.
 - `./data:/data`: PDF/TXT caches, the remote Obsidian mirror, and other file data.
 - Secrets are mounted only through `_FILE` paths; non-secret configuration remains in environment variables.
 

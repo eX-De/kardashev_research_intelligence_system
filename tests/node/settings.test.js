@@ -4,10 +4,12 @@ import test from "node:test";
 import { setPoolForTesting, toJson, ValidationError } from "../../server/db.js";
 import {
   DEFAULT_PAPER_READER_PROMPTS,
+  DEFAULT_PROJECT_JUDGMENT_PROMPTS,
   getAppSettings,
   normalizeProviderBaseUrl,
   normalizeSettingsPayload,
   resolvePaperReaderPrompt,
+  resolveProjectJudgmentPrompt,
   saveAppSettings,
   SETTING_SCHEMA
 } from "../../server/settings.js";
@@ -62,6 +64,9 @@ const SETTINGS_ENV_KEYS = [
   "PROJECT_CHAT_PROFILE_MODEL",
   "PROJECT_CHAT_PROFILE_CONCURRENCY",
   "PROJECT_JUDGMENT_CONCURRENCY",
+  "PROJECT_JUDGMENT_PROMPT_MODE",
+  "PROJECT_JUDGMENT_PROMPT_LOCALE",
+  "PROJECT_JUDGMENT_CUSTOM_PROMPT",
   "READER_CHAT_PROVIDER_ID",
   "READER_CHAT_MODEL",
   "READER_SMART_SAVE_PROVIDER_ID",
@@ -211,8 +216,13 @@ test("getAppSettings hides secrets and preserves settings response shape", async
       assert.equal(data.settings.paper_reader_prompt_locale, "zh-CN");
       assert.equal(data.settings.paper_reader_default_prompt, "");
       assert.deepEqual(data.settings.paper_reader_prompt_defaults, DEFAULT_PAPER_READER_PROMPTS);
+      assert.equal(data.settings.project_judgment_prompt_mode, "default");
+      assert.equal(data.settings.project_judgment_prompt_locale, "zh-CN");
+      assert.equal(data.settings.project_judgment_custom_prompt, "");
+      assert.deepEqual(data.settings.project_judgment_prompt_defaults, DEFAULT_PROJECT_JUDGMENT_PROMPTS);
       assert.equal(data.settings.worker_concurrency.revision, 1);
-      assert.equal(data.settings.worker_concurrency.groups["paper-report"].max_running, null);
+      assert.equal(data.settings.worker_concurrency.groups["paper-report"].max_running, 4);
+      assert.equal(data.settings.worker_concurrency.groups["paper-report"].editable, true);
       assert.ok(fake.txCalls.includes("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"));
       assert.deepEqual(data.settings.llm_providers, [{
         id: "openai",
@@ -571,6 +581,21 @@ test("paper reading prompt mode resolves localized defaults without overwriting 
   );
 });
 
+test("project judgment prompt mode resolves localized defaults without overwriting custom text", () => {
+  assert.equal(
+    resolveProjectJudgmentPrompt({ project_judgment_prompt_mode: "default", project_judgment_prompt_locale: "en" }),
+    DEFAULT_PROJECT_JUDGMENT_PROMPTS.en
+  );
+  assert.equal(
+    resolveProjectJudgmentPrompt({
+      project_judgment_prompt_mode: "custom",
+      project_judgment_prompt_locale: "zh-CN",
+      project_judgment_custom_prompt: "Judge only the paper's core contribution."
+    }, { locale: "en" }),
+    "Judge only the paper's core contribution."
+  );
+});
+
 test("legacy stored prompts infer default or custom mode without data loss", async () => {
   await withCleanSettingsEnv(async () => {
     const customFake = createSettingsPool({ paper_reader_default_prompt: "Analyze only the methods." });
@@ -616,6 +641,9 @@ test("SETTING_SCHEMA describes secret and worker-visible fields centrally", () =
   assert.equal(SETTING_SCHEMA.project_chat_profile_concurrency.worker_visible, true);
   assert.equal(SETTING_SCHEMA.project_judgment_concurrency.type, "int");
   assert.equal(SETTING_SCHEMA.project_judgment_concurrency.worker_visible, true);
+  assert.equal(SETTING_SCHEMA.project_judgment_prompt_mode.worker_visible, true);
+  assert.equal(SETTING_SCHEMA.project_judgment_prompt_locale.worker_visible, true);
+  assert.equal(SETTING_SCHEMA.project_judgment_custom_prompt.worker_visible, true);
   assert.equal(SETTING_SCHEMA.global_llm_request_concurrency.type, "int");
   assert.equal(SETTING_SCHEMA.global_embedding_request_concurrency.worker_visible, true);
 });

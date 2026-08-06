@@ -6,6 +6,7 @@ import { OPENROUTER_BASE_URL, providerType } from "../lib/settingsProviders.js";
 import openRouterGlyphDark from "../assets/openrouter-glyph-dark.svg";
 import openRouterGlyphLight from "../assets/openrouter-glyph-light.svg";
 import { WorkspaceSelect } from "./WorkspaceSelect.jsx";
+import { LocalizedPromptEditor } from "./LocalizedPromptEditor.jsx";
 import "../styles/SettingsForm.css";
 import "../styles/OpenRouterModelSettings.css";
 
@@ -259,26 +260,12 @@ function CompatibleProviderStudio({ providers, onAddProvider, onProviderChange, 
 }
 
 function ProviderAndRouting({ providers, settings, onAddProvider, onProviderChange, onRemoveProvider, onSettingChange }) {
-  const { i18n, t } = useTranslation("settings");
+  const { t } = useTranslation("settings");
   const providerOptions = providers.filter((provider) => provider.id);
   const providerSelectOptions = providerOptions.length ? providerOptions.map((provider) => [provider.id, provider.name || provider.id]) : [["", t("models.notConfigured")]];
   const modelsForProvider = (providerId, kind = "chat_models") => String(providerOptions.find((item) => item.id === providerId)?.[kind] || "").split(",").map((item) => item.trim()).filter(Boolean);
   const chatModels = modelsForProvider(settings.llm_chat_provider_id);
   const embeddingModels = modelsForProvider(settings.llm_embedding_provider_id, "embedding_models");
-  const promptLocale = String(i18n.resolvedLanguage || i18n.language || "zh-CN").toLowerCase().startsWith("en") ? "en" : "zh-CN";
-  const promptDefaults = settings.paper_reader_prompt_defaults || {};
-  const localizedDefaultPrompt = String(promptDefaults[promptLocale] || promptDefaults["zh-CN"] || settings.paper_reader_default_prompt || "");
-  const customPrompt = String(settings.paper_reader_default_prompt || "");
-  const promptMode = settings.paper_reader_prompt_mode === "custom" ? "custom" : "default";
-  const promptValue = promptMode === "custom" ? customPrompt : localizedDefaultPrompt;
-
-  function changePromptMode(nextMode) {
-    if (nextMode === promptMode) return;
-    if (nextMode === "custom" && (!customPrompt.trim() || Object.values(promptDefaults).includes(customPrompt.trim()))) onSettingChange("paper_reader_default_prompt", localizedDefaultPrompt);
-    onSettingChange("paper_reader_prompt_mode", nextMode);
-    onSettingChange("paper_reader_prompt_locale", promptLocale);
-  }
-
   return (
     <>
       <OpenRouterStudio onAddProvider={onAddProvider} onProviderChange={onProviderChange} onRemoveProvider={onRemoveProvider} providers={providers} />
@@ -318,11 +305,7 @@ function ProviderAndRouting({ providers, settings, onAddProvider, onProviderChan
       </div>
       <section className="settings-grid-wide prompt-field model-prompt-panel">
         <header className="routing-panel-heading"><div><span>{t("models.prompt.eyebrow")}</span><h3>{t("models.prompt.title")}</h3><p>{t("models.prompt.description")}</p></div></header>
-        <div className="paper-prompt-editor">
-          <div className="paper-prompt-mode-row"><span><strong>{t("models.prompt.mode.label")}</strong><small>{t(`models.prompt.mode.${promptMode}Hint`)}</small></span><div className="paper-prompt-mode-control" role="radiogroup" aria-label={t("models.prompt.mode.label")}>{["default", "custom"].map((mode) => <button aria-checked={promptMode === mode} className={promptMode === mode ? "active" : ""} key={mode} onClick={() => changePromptMode(mode)} role="radio" type="button">{t(`models.prompt.mode.${mode}`)}</button>)}</div></div>
-          <label><span>{t(promptMode === "custom" ? "models.prompt.customField" : "models.prompt.defaultField")}</span><textarea aria-describedby="paper-prompt-language-hint" onChange={(event) => onSettingChange("paper_reader_default_prompt", event.target.value)} readOnly={promptMode === "default"} value={promptValue} /></label>
-          <small className="paper-prompt-language-hint" id="paper-prompt-language-hint">{t("models.prompt.languageHint", { language: t(`models.prompt.languages.${promptLocale}`) })}</small>
-        </div>
+        <LocalizedPromptEditor customPromptField="paper_reader_default_prompt" defaultsField="paper_reader_prompt_defaults" editorId="paper-reader-prompt" localeField="paper_reader_prompt_locale" modeField="paper_reader_prompt_mode" onSettingChange={onSettingChange} settings={settings} translationPrefix="models.prompt" />
       </section>
     </>
   );

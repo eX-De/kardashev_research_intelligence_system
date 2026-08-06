@@ -98,19 +98,64 @@
         "eyebrow": "Capacity & recovery",
         "title": "并发、缓存与补跑",
         "description": "限制下游请求容量，保存全文缓存，并约束失败后的历史补洞规模。"
+      },
+      "judgmentPrompt": {
+        "eyebrow": "LLM judgment",
+        "title": "项目论文判定 Prompt",
+        "description": "配置每日任务最终判断论文是否真正有助于项目核心问题的判定规则。JSON 输出协议和动态输入由系统固定附加。"
       }
+    },
+    "judgmentPrompt": {
+      "mode": {
+        "label": "Prompt 模式",
+        "default": "使用默认",
+        "custom": "自定义",
+        "defaultHint": "每日判定会自动使用当前界面语言的内置规则。",
+        "customHint": "每日判定会使用下方保存的自定义规则，语言切换不会覆盖它。"
+      },
+      "defaultField": "当前语言的默认 Prompt",
+      "customField": "自定义 Prompt",
+      "languageHint": "当前默认语言：{{language}}。系统会在这些规则后自动附加 JSON 输出契约和项目/论文证据。",
+      "languages": { "zh-CN": "中文", "en": "English" }
     },
     "workerConcurrency": {
       "eyebrow": "Worker capacity",
       "title": "Worker 与并发容量",
       "description": "统一管理源码模式与 Docker 使用的 worker 进程池、Provider 请求额度和任务组容量。",
+      "poolTitle": "Worker 进程池",
+      "poolState": { "online": "运行正常", "draining": "正在排空", "degraded": "状态异常", "offline": "当前离线", "unknown": "等待状态" },
+      "desiredLabel": "目标进程",
+      "onlineLabel": "在线进程",
+      "drainingLabel": "排空中",
       "desired": "期望 {{count}}",
       "online": "在线 {{count}}",
       "draining": "排空 {{count}}",
       "applyState": { "idle": "已同步", "unchanged": "未改变", "reconciling": "正在收敛", "applied": "已生效", "degraded": "收敛异常" },
       "conflict": "服务端容量已更新到 revision {{revision}}。当前草稿未被覆盖，请重新载入后再应用。",
       "reload": "重新载入容量",
-      "fields": { "workerProcesses": "Worker 进程数", "projectProfile": "项目摘要并发数" },
+      "fields": { "workerProcesses": "Worker 进程数" },
+      "processUnit": "进程",
+      "slotUnit": "路",
+      "coreEyebrow": "Global capacity",
+      "coreTitle": "全局容量",
+      "coreDescription": "控制整个系统共享的执行器规模与 Provider 请求硬上限，所有业务流程都受这些额度约束。",
+      "dailyEyebrow": "Daily pipeline",
+      "dailyTitle": "每日研究任务",
+      "dailyDescription": "集中管理论文抓取、项目判定、排序和日报生成的并行容量。",
+      "indexEyebrow": "Index & sync",
+      "indexTitle": "索引与同步",
+      "indexDescription": "集中管理 Embedding 批处理、各类搜索索引以及外部同步的并行容量。",
+      "readerReportEyebrow": "Reader workflow",
+      "readerReportTitle": "Reader 导入与论文报告",
+      "readerReportDescription": "把 Reader 导入与其下游单篇论文报告放在同一业务域中，分别控制链路两端的任务容量。",
+      "internalParallelism": "流程内部并行",
+      "localLimit": "局部上限",
+      "taskCapacity": "任务组容量",
+      "editableCount": "{{count}} 个可调组",
+      "fixedRules": "固定规则",
+      "fixedCount": "{{count}} 条",
+      "judgmentHint": "仅控制每日流程中项目—论文判定的批内并行，仍受全局 LLM 上限约束。",
+      "embeddingHint": "仅控制索引与内容处理流程中的 Embedding 批内并行，仍受全局 Embedding 上限约束。",
       "scaleDownNote": "降低进程、任务组或 Provider 上限只影响新任务和新请求；正在运行的工作不会被终止。",
       "group": "任务组与涵盖任务",
       "default": "默认",
@@ -118,15 +163,24 @@
       "running": "运行中",
       "unlimited": "无限",
       "immutable": "固定正确性上限 {{limit}}，不可通过设置解除。",
-      "paperReport": "没有独立任务组上限；仍受在线 worker、全局 LLM 请求额度和同一论文互斥约束。",
+      "groupRules": {
+        "arxiv": "固定为 1，避免并发请求触发 arXiv API 限流。",
+        "ingest": "固定为 1，避免并发下载或读取触发 arXiv 限流。",
+        "obsidian": "固定为 1，避免多个任务同时写入相同 Vault 或目标路径。",
+        "artifact-backfill": "固定为 1，避免全库回填争用索引资源。",
+        "daily": "固定为 1，避免每日流水线、恢复/补跑和独立日报生成同时修改同一批状态。"
+      },
       "groupJobs": {
         "arxiv": "arXiv 抓取",
         "ingest": "论文全文缓存",
-        "llm": "排序与每日报告",
         "artifact-index": "Artifact 与实验报告索引",
+        "artifact-backfill": "历史 Artifact 索引回填",
         "library-paper-index": "论文库索引",
         "knowledge-index": "知识文档索引",
-        "reader-import": "Reader 上传与网页导入"
+        "reader-import": "Reader 上传与网页导入",
+        "obsidian": "Obsidian 同步与导出",
+        "daily": "每日流程、恢复、历史补跑与独立日报生成",
+        "paper-report": "单篇论文报告"
       }
     },
     "fields": {

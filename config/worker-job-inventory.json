@@ -4,7 +4,6 @@
     { "type": "sync-obsidian", "label": "Obsidian 同步" },
     { "type": "fetch-arxiv", "label": "arXiv 抓取" },
     { "type": "cache-arxiv-text", "label": "论文正文缓存" },
-    { "type": "rank-papers", "label": "论文匹配" },
     { "type": "generate-reports", "label": "每日总报告生成" },
     { "type": "artifact-index", "label": "产物索引" },
     { "type": "artifact-index-backfill", "label": "产物索引回填" },

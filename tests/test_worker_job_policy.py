@@ -4,20 +4,38 @@ import json
 from pathlib import Path
 import unittest
 
-from worker.job_policy import policy_document, resolve_worker_job_policy
+from worker.job_policy import policy_document, resolve_worker_job_policy, worker_group_policies
 from worker.runtime_policy import RuntimePolicyError, merge_runtime_policy
 
 
 class WorkerJobPolicyTests(unittest.TestCase):
+    def test_group_defaults_keep_arxiv_serial_and_raise_safe_capacity_groups(self) -> None:
+        groups = worker_group_policies()
+        self.assertEqual(groups["arxiv"], {"limit_mode": "invariant", "default_max_running": 1})
+        self.assertEqual(groups["ingest"], {"limit_mode": "invariant", "default_max_running": 1})
+        self.assertEqual(groups["daily"], {"limit_mode": "invariant", "default_max_running": 1})
+        self.assertNotIn("llm", groups)
+        report_policy = policy_document()["jobs"]["generate-reports"]
+        self.assertEqual(
+            {key: report_policy[key] for key in ("concurrency_group", "limit_mode", "default_max_running")},
+            {"concurrency_group": "daily", "limit_mode": "invariant", "default_max_running": 1},
+        )
+        for group in ("artifact-index", "library-paper-index", "knowledge-index"):
+            self.assertEqual(groups[group], {"limit_mode": "capacity", "default_max_running": 8})
+        for group in ("reader-import", "paper-report"):
+            self.assertEqual(groups[group], {"limit_mode": "capacity", "default_max_running": 4})
+
     def test_policy_covers_inventory_and_resolves_cross_language_fixture(self) -> None:
         fixture = json.loads(
             (Path(__file__).parent / "fixtures" / "worker-job-policy-cases.json").read_text(encoding="utf-8")
         )
-        self.assertEqual(len(policy_document()["jobs"]), 19)
+        self.assertEqual(len(policy_document()["jobs"]), 18)
         for item in fixture["cases"]:
             resolved = resolve_worker_job_policy(item["job_type"], item["payload"])
             self.assertEqual(resolved["concurrency_key"], item["key"], item["job_type"])
-            self.assertEqual(resolved["policy_version"], 2)
+            self.assertEqual(resolved["policy_version"], 3)
+        with self.assertRaisesRegex(RuntimeError, "No worker job policy"):
+            resolve_worker_job_policy("rank-papers", {})
 
     def test_reader_url_key_is_a_canonical_set_hash(self) -> None:
         left = resolve_worker_job_policy("reader-import-url", {

@@ -80,7 +80,6 @@
     "generate-paper-reports": "Generate paper reports",
     "generate-reports": "Generate research reports",
     "sync-obsidian": "Sync Obsidian",
-    "rank-papers": "Rank papers",
     "knowledge-document-index": "Index knowledge document"
   },
   "jobStatus": {

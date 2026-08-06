@@ -2311,6 +2311,28 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(lowered.global_embedding_request_concurrency, 3)
         self.assertEqual(lowered.embedding_concurrency, 3)
 
+    def test_project_judgment_prompt_settings_reach_worker_without_losing_custom_text(self) -> None:
+        conn = connect_test_db()
+        init_db(conn)
+        custom_prompt = "只接受论文核心贡献能够解决项目核心问题的情况。"
+
+        save_app_settings(
+            conn,
+            {
+                "project_judgment_prompt_mode": "custom",
+                "project_judgment_prompt_locale": "en",
+                "project_judgment_custom_prompt": custom_prompt,
+            },
+        )
+        applied = apply_stored_settings(conn, test_settings())
+        payload = get_app_settings(conn, applied)["settings"]
+
+        self.assertEqual(applied.project_judgment_prompt_mode, "custom")
+        self.assertEqual(applied.project_judgment_prompt_locale, "en")
+        self.assertEqual(applied.project_judgment_custom_prompt, custom_prompt)
+        self.assertEqual(payload["project_judgment_custom_prompt"], custom_prompt)
+        self.assertIn("zh-CN", payload["project_judgment_prompt_defaults"])
+
     def test_stored_path_settings_remain_paths(self) -> None:
         conn = connect_test_db()
         init_db(conn)
@@ -2577,7 +2599,7 @@ class WorkerTests(unittest.TestCase):
         with (
             patch("worker.llm._candidate_rows", return_value=candidates),
             patch("worker.llm._judgment_payload", side_effect=lambda row: {"paper_id": row["paper_id"]}),
-            patch("worker.llm._input_hash", side_effect=lambda payload: f"hash:{payload['paper_id']}"),
+            patch("worker.llm._input_hash", side_effect=lambda payload, prompt: f"hash:{payload['paper_id']}:{prompt}"),
             patch("worker.llm._project_judgment_prompt", return_value="prompt"),
             patch("worker.llm._call_chat", side_effect=fake_call),
         ):
@@ -2609,7 +2631,8 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("所有可读文本字段值必须使用中文", prompt)
         self.assertIn("relation_type 必须是 direct、indirect、weak、none", prompt)
         self.assertIn("suggested_action 必须是 read、read_later、ignore", prompt)
-        self.assertIn("JSON 字段名保持英文", prompt)
+        self.assertIn("JSON keys 必须严格为", prompt)
+        self.assertIn("使用某方法”不能作为“研究或改进该方法", prompt)
 
     def test_run_daily_project_pipeline_skips_paused_and_archived_projects(self) -> None:
         conn = connect_test_db()

@@ -14,6 +14,7 @@ import { dailyStepLabel, formatApiError } from "../lib/systemMessages.js";
 import { dailyRecoveryFromHistory, fallbackHistoryFromSummary } from "../lib/taskHistory.js";
 import {
   WORKER_CONCURRENCY_FIELDS,
+  buildWorkerConcurrencySettingsPayload,
   workerCapacityApplyDecision,
   workerConcurrencyFlatValues
 } from "../lib/workerConcurrency.js";
@@ -64,31 +65,10 @@ function settingsPayload(settings, providers, { includeWorkerConcurrency = true 
     scheduler_enabled: _schedulerEnabled,
     ...formSettings
   } = settings || {};
-  const workerConcurrency = formSettings.worker_concurrency;
   const payload = {
-    ...formSettings,
+    ...buildWorkerConcurrencySettingsPayload(formSettings, { includeWorkerConcurrency }),
     llm_providers: providerPayload(providers)
   };
-  if (workerConcurrency?.revision) {
-    payload.worker_concurrency = {
-      expected_revision: workerConcurrency.revision,
-      worker_process_count: workerConcurrency.worker_process_count,
-      global_llm_request_concurrency: workerConcurrency.global_llm_request_concurrency,
-      global_embedding_request_concurrency: workerConcurrency.global_embedding_request_concurrency,
-      embedding_concurrency: workerConcurrency.embedding_concurrency,
-      project_judgment_concurrency: workerConcurrency.project_judgment_concurrency,
-      project_chat_profile_concurrency: workerConcurrency.project_chat_profile_concurrency,
-      group_limits: Object.fromEntries(
-        Object.entries(workerConcurrency.groups || {})
-          .filter(([, group]) => group.editable)
-          .map(([name, group]) => [name, group.max_running])
-      )
-    };
-  }
-  if (!includeWorkerConcurrency) {
-    delete payload.worker_concurrency;
-    for (const field of WORKER_RUNTIME_FIELDS) delete payload[field];
-  }
   return payload;
 }
 

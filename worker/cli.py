@@ -1585,23 +1585,6 @@ def cmd_cache_arxiv_text(_: argparse.Namespace) -> None:
     _print_json({"ok": True, "message": "arXiv PDF text cache completed", **result})
 
 
-def run_rank_job(conn: DbConnection, settings, *, job_id: int | None = None, track_job_run: bool = True) -> dict[str, Any]:
-    with _job_context(conn, "rank-papers", job_id, track_job_run=track_job_run) as active_job_id:
-        result = rank_unmatched_papers(conn, settings)
-        result.update(rank_project_papers(conn, settings))
-        result.update(generate_missing_project_judgments(conn, settings))
-        result.update(sync_project_paper_recommendations(conn))
-        result.update(ensure_paper_reports_for_recommendations(conn, settings=settings))
-        if active_job_id:
-            update_job_meta(conn, active_job_id, "Ranking completed", result)
-    return result
-
-
-def cmd_rank(_: argparse.Namespace) -> None:
-    result = _with_db(lambda conn, settings: run_rank_job(conn, settings))
-    _print_json({"ok": True, "message": "Ranking completed", **result})
-
-
 def run_generate_reports_job(conn: DbConnection, settings, *, job_id: int | None = None, track_job_run: bool = True) -> dict[str, Any]:
     with _job_context(conn, "generate-reports", job_id, track_job_run=track_job_run) as active_job_id:
         result = generate_daily_report(conn, settings)
@@ -2047,9 +2030,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     cache_text = sub.add_parser("cache-arxiv-text")
     cache_text.set_defaults(func=cmd_cache_arxiv_text)
-
-    rank = sub.add_parser("rank-papers")
-    rank.set_defaults(func=cmd_rank)
 
     reports = sub.add_parser("generate-reports")
     reports.set_defaults(func=cmd_generate_reports)

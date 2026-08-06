@@ -361,13 +361,16 @@ function ServerEventBridge({ notify, notifyNotification }) {
   return null;
 }
 
-function PaperReaderPromptLocaleSync() {
+function DefaultPromptLocaleSync() {
   const { locale } = useLocale();
   const cache = useApiCacheClient();
 
   useEffect(() => {
     let active = true;
-    postJson("/api/settings", { paper_reader_prompt_locale: locale })
+    postJson("/api/settings", {
+      paper_reader_prompt_locale: locale,
+      project_judgment_prompt_locale: locale
+    })
       .then((data) => {
         if (active) cache.setCache(["settings"], data);
       })
@@ -385,7 +388,7 @@ function PaperReaderPromptLocaleSync() {
 function CachedProtectedShell(props) {
   return (
     <ApiCacheProvider>
-      <PaperReaderPromptLocaleSync />
+      <DefaultPromptLocaleSync />
       <ServerEventBridge notify={props.notify} notifyNotification={props.notifyNotification} />
       <ProtectedShell {...props} />
     </ApiCacheProvider>

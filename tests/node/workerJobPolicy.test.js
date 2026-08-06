@@ -14,12 +14,19 @@ import {
 const fixture = JSON.parse(readFileSync(new URL("../fixtures/worker-job-policy-cases.json", import.meta.url), "utf8"));
 
 test("worker policy covers every job and resolves contract fixture", () => {
-  assert.equal(allWorkerJobPolicies().length, 19);
+  const policies = allWorkerJobPolicies();
+  assert.equal(policies.length, 18);
+  assert.equal(policies.some((policy) => policy.concurrency_group === "llm"), false);
+  assert.deepEqual(
+    Object.fromEntries(["concurrency_group", "limit_mode", "default_max_running"].map((key) => [key, policies.find((policy) => policy.type === "generate-reports")[key]])),
+    { concurrency_group: "daily", limit_mode: "invariant", default_max_running: 1 }
+  );
   for (const item of fixture.cases) {
     const resolved = resolveWorkerJobPolicy(item.job_type, item.payload);
     assert.equal(resolved.concurrency_key, item.key, item.job_type);
-    assert.equal(resolved.policy_version, 2);
+    assert.equal(resolved.policy_version, 3);
   }
+  assert.throws(() => resolveWorkerJobPolicy("rank-papers", {}), /No worker job policy/);
   assert.throws(() => resolveWorkerJobPolicy("unknown-job", {}), /No worker job policy/);
 });
 
