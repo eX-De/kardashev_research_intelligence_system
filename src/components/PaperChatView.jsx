@@ -13,6 +13,7 @@ import {
   readResponseJson
 } from "../lib/dashboard.js";
 import { cacheNamespace, useApiCacheClient, useCachedApi } from "../lib/apiCache.jsx";
+import { friendlyObsidianMessage, postObsidianJson, useObsidianCapability } from "../lib/obsidianCapability.js";
 import { InlineLoader } from "./Loading.jsx";
 import { LazyMarkdownReport } from "./LazyMarkdownReport.jsx";
 import { RefreshButton } from "./RefreshButton.jsx";
@@ -329,8 +330,10 @@ function ChatWorkspace({
   onDeleteMessage,
   onProjectContextChange,
   onReferencePapersSave,
+  onSave,
   onSendMessage,
   onSendQuestion,
+  obsidianCapability,
   projectContextEnabled,
   referenceCandidates,
   savingChatModel,
@@ -372,6 +375,8 @@ function ChatWorkspace({
   const chatModels = chatModelList(settings || {});
   const selectedModel = currentChatModelValue(settings || {});
   const modelOptions = chatModels.length ? [{ label: t("reader.chat.selectModel"), value: "" }, ...chatModels] : [["", t("reader.chat.noModel")]];
+  const smartSaveDisabled = busy || !obsidianCapability?.available;
+  const obsidianHint = obsidianCapability?.disabledReason || t("reader.obsidian.configureHint");
   const navigationItems = useMemo(() => {
     const hasUserQuestions = displayedMessages.some((item) => item.role === "user" && item.source === "chat");
     if (!hasUserQuestions) return [];
@@ -687,6 +692,16 @@ function ChatWorkspace({
             <span>{t("reader.fullTextStatus", { status: paper.text_status || "pending" })}</span>
           </div>
           <div className="paper-detail-actions">
+            <button
+              aria-label={t("reader.obsidian.smartSaveAria")}
+              className="paper-detail-action"
+              disabled={smartSaveDisabled}
+              onClick={() => onSave(paper.id)}
+              title={obsidianCapability?.available ? t("reader.obsidian.smartSaveTitle") : obsidianHint}
+              type="button"
+            >
+              <span>{t("reader.obsidian.smartSave")}</span>
+            </button>
             <Link className="paper-detail-action" to={`/papers/library/${paper.id}`}>
               <span>{t("library.title")}</span><i aria-hidden="true">→</i>
             </Link>
@@ -786,6 +801,9 @@ export function PaperChatView({ onSelectPaper, setStatusMessage = () => {}, targ
   const settingsQuery = useCachedApi(["settings"], () => api("/api/settings"), { staleTime: Infinity });
   const referenceCandidatesQuery = useCachedApi(["reader", "papers", "reference-candidates"], () => api("/api/reader/papers?limit=300&offset=0"), { staleTime: 60000 });
   const detailQuery = useCachedApi(["reader", "paper", String(activePaperId || "")], () => api(`/api/reader/papers/${activePaperId}`), { enabled: Boolean(activePaperId), staleTime: 60000 });
+  const handleObsidianError = useCallback((error) => setStatusMessage(friendlyObsidianMessage(error, t)), [setStatusMessage, t]);
+  const readerSettings = settingsQuery.data?.settings || null;
+  const obsidianCapability = useObsidianCapability({ settings: readerSettings, onError: handleObsidianError });
   const items = conversationsQuery.data?.items || [];
   const detail = activePaperId ? detailQuery.data || null : null;
   const detailPaperId = Number(detail?.paper?.id || 0);
@@ -930,6 +948,28 @@ export function PaperChatView({ onSelectPaper, setStatusMessage = () => {}, targ
     }
   }
 
+  async function saveToObsidian(paperId) {
+    if (!obsidianCapability.available) {
+      setStatusMessage(obsidianCapability.disabledReason);
+      return;
+    }
+    setBusy(true);
+    try {
+      const data = await postObsidianJson(`/api/reader/papers/${paperId}/save`, {});
+      if (data?.queued) {
+        cache.markStale(["jobs", "summary"]);
+        cache.markStale(["jobs", "history"]);
+        setStatusMessage(t("reader.messages.saveQueued"));
+        return;
+      }
+      setStatusMessage(t("reader.messages.savedObsidian", { path: data.obsidian_path || "" }));
+    } catch (error) {
+      setStatusMessage(friendlyObsidianMessage(error, t));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <section className="view paper-chat-view reader-view vision-inbox">
       <header className="vision-topbar reader-queue-header chat-topbar">
@@ -938,7 +978,7 @@ export function PaperChatView({ onSelectPaper, setStatusMessage = () => {}, targ
       </header>
       <div className="reader-workspace inbox-workspace-grid">
         <ConversationList activePaperId={activePaperId} items={items} loading={!conversationsQuery.hasData} onSelect={selectPaper} query={query} questionFilter={questionFilter} setQuery={setQuery} setQuestionFilter={setQuestionFilter} total={Number(conversationsQuery.data?.total || 0)} />
-        <main className="detail-panel inbox-detail-panel reader-detail-panel">{activePaperId && !detailQuery.hasData ? <WorkspacePaneLoader description={t("reader.detail.loadingSelected")} title={t("reader.detail.opening")} variant="report" /> : <ChatWorkspace busy={busy} deletingMessageId={deletingMessageId} detail={detail} displayedMessages={displayedMessages} key={detail?.paper?.id || "empty"} message={message} messageAnchorId={anchorMessageId} onChatModelChange={changeChatModel} onDeleteMessage={deleteMessage} onProjectContextChange={(enabled) => setProjectContextPreferences((current) => ({ ...current, [detailPaperId]: enabled }))} onReferencePapersSave={saveReferencePapers} onSendMessage={sendMessage} onSendQuestion={(question) => sendReaderMessage(question, { restoreOnFailure: false })} projectContextEnabled={projectContextEnabled} referenceCandidates={referenceCandidatesQuery.data?.items || []} savingChatModel={savingChatModel} savingReferencePapers={savingReferencePapers} setMessage={setMessage} settings={settingsQuery.data?.settings || null} />}</main>
+        <main className="detail-panel inbox-detail-panel reader-detail-panel">{activePaperId && !detailQuery.hasData ? <WorkspacePaneLoader description={t("reader.detail.loadingSelected")} title={t("reader.detail.opening")} variant="report" /> : <ChatWorkspace busy={busy} deletingMessageId={deletingMessageId} detail={detail} displayedMessages={displayedMessages} key={detail?.paper?.id || "empty"} message={message} messageAnchorId={anchorMessageId} obsidianCapability={obsidianCapability} onChatModelChange={changeChatModel} onDeleteMessage={deleteMessage} onProjectContextChange={(enabled) => setProjectContextPreferences((current) => ({ ...current, [detailPaperId]: enabled }))} onReferencePapersSave={saveReferencePapers} onSave={saveToObsidian} onSendMessage={sendMessage} onSendQuestion={(question) => sendReaderMessage(question, { restoreOnFailure: false })} projectContextEnabled={projectContextEnabled} referenceCandidates={referenceCandidatesQuery.data?.items || []} savingChatModel={savingChatModel} savingReferencePapers={savingReferencePapers} setMessage={setMessage} settings={readerSettings} />}</main>
       </div>
     </section>
   );
