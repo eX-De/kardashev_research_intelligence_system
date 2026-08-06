@@ -409,8 +409,11 @@ async function publishDurableEvent(type, payload = {}) {
   }
 }
 
-async function publishDurableSettingsChanged(_settings, scheduler = schedulerStatus()) {
-  return publishDurableEvent(SERVER_EVENTS.SETTINGS_CHANGED, compactSettingsChangedPayload(scheduler));
+async function publishDurableSettingsChanged(settings, scheduler = schedulerStatus()) {
+  return publishDurableEvent(
+    SERVER_EVENTS.SETTINGS_CHANGED,
+    compactSettingsChangedPayload(scheduler, settings?.worker_concurrency?.revision)
+  );
 }
 
 async function publishDurableProjectChanged(type, data = {}, fallbackId = null, extra = {}) {
@@ -1128,6 +1131,7 @@ function errorResponseBody(error) {
     body.reason = String(error.reason || error.workerPayload?.reason || code);
   }
   if (error.workerStatus) body.worker = error.workerStatus;
+  if (error.latest) body.latest = error.latest;
   return body;
 }
 
@@ -1422,7 +1426,8 @@ async function routeApi(req, res, url) {
     if (schedulerRuntime.enabled) {
       scheduleNext(data.settings || {});
     }
-    const responseBody = { ...data, scheduler: schedulerStatus() };
+    const worker = await getWorkerStatus();
+    const responseBody = { ...data, scheduler: schedulerStatus(), worker };
     sendJson(res, 200, responseBody);
     await publishDurableSettingsChanged(data.settings, responseBody.scheduler);
     return;

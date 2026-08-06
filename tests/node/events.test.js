@@ -72,7 +72,7 @@ test("openEventStream sends named SSE event whose data JSON includes type", () =
 
 test("publishSettingsChanged compacts scheduler payload", () => {
   const publisher = createPublisher();
-  const event = publisher.publishSettingsChanged({}, undefined);
+  const event = publisher.publishSettingsChanged({ worker_concurrency: { revision: 7 } }, undefined);
 
   assert.equal(event.type, SERVER_EVENTS.SETTINGS_CHANGED);
   assert.deepEqual(event.data.scheduler.current_job, {
@@ -88,6 +88,7 @@ test("publishSettingsChanged compacts scheduler payload", () => {
     message: null
   });
   assert.equal(Object.hasOwn(event.data.scheduler, "paper_report_queue"), false);
+  assert.equal(event.data.worker_policy_revision, 7);
 });
 
 test("publishProjectChanged and publishPaperChanged preserve frontend id fields", () => {

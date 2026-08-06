@@ -23,6 +23,7 @@ class _SeedConnection:
     def __init__(self, stored=None):
         self.stored = stored or {}
         self.inserted = None
+        self.deleted_keys = []
 
     def execute(self, sql, params=()):
         normalized = " ".join(str(sql).split())
@@ -32,6 +33,11 @@ class _SeedConnection:
             return _Cursor(rows=[{"key": key, "value_json": value} for key, value in self.stored.items()])
         if normalized.startswith("INSERT INTO worker_runtime_policy"):
             self.inserted = params
+            return _Cursor()
+        if normalized.startswith("DELETE FROM app_settings"):
+            self.deleted_keys.extend(params[0])
+            for key in params[0]:
+                self.stored.pop(key, None)
             return _Cursor()
         raise AssertionError(normalized)
 
@@ -70,6 +76,8 @@ class WorkerRuntimePolicyTests(unittest.TestCase):
             result = _seed_worker_runtime_policy(conn)
         self.assertTrue(result["created"])
         self.assertEqual(conn.inserted, (1, 2, 3, 3, 2, 2, "2026-08-06T00:00:00+00:00"))
+        self.assertEqual(conn.stored, {})
+        self.assertIn("paper_report_queue_concurrency", conn.deleted_keys)
         self.assertEqual(_seed_worker_runtime_policy(conn), {"created": False, "corrections": []})
 
     def test_revision_mismatch_and_unknown_group_are_fail_closed(self) -> None:

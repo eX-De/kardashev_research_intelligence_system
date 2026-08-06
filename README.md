@@ -147,15 +147,15 @@ http://localhost:3000
 
 导入 PDF/URL/网页、生成论文报告、构建索引、导出 Obsidian、同步、抓取和每日流程都是异步动作。接口返回 `202` 和 `worker_job_id` 后，可在“任务”页或通知中查看排队、运行、重试、取消与完成状态；浏览器不轮询结果表。
 
-如需单独调试 worker，可另开终端运行：
+如需单独调试 worker pool supervisor，可另开终端运行：
 
 ```powershell
 npm run worker
 ```
 
-默认启动一个 worker。需要降低每日流程期间其他任务的排队时间时，可运行 `docker compose up -d --scale worker=2`。并发组、同实体 key 互斥和 PostgreSQL advisory lock 在多副本下仍生效；全局 LLM/embedding 上限跨 worker 与 compute 共享，项目判定、Chat profile 和 embedding 的局部并发仍受全局上限约束。受控基准中第二个 worker 约增加 53 MiB RSS（双 worker 约 105.5 MiB），并按每个副本最多一个活动任务连接外加短时 heartbeat/resource-slot 连接估算 PostgreSQL 容量。部署时应结合供应商 rate-limit/429 指标调整全局上限。
+`npm run worker` 与 Docker 的 `worker` service 都启动同一套 Node pool supervisor；每个 supervisor 按数据库中的期望进程数管理 `python -m worker.service` 子进程，每个子进程仍一次只执行一个顶层任务。正常扩缩容请在“设置 → 每日任务 → Worker 与并发容量”中完成，不要用 Compose replica 数代替进程池容量；`worker` service 保持一个 replica，数据库 leader lock 会阻止误启动的第二个 supervisor 重复扩容。
 
-升级旧版本前请先停止服务并备份 PostgreSQL。首次执行 `npm run init-db`（Docker 启动时自动执行）会幂等取消旧 `generate-paper-reports` 批量 pump，把 queued/processing 的论文报告产物转换为逐篇 `paper-report` 任务，并终止已删除类型的活动遗留任务；历史记录保留。建议升级后先启动一个 worker，确认队列和通知正常，再扩到两个副本。
+升级旧版本前请先停止 app、compute 和 worker（不要停止 PostgreSQL）并备份 PostgreSQL。首次执行 `npm run init-db`（Docker 启动时自动执行）会幂等创建 runtime policy 表，把旧容量字段迁移为 revision 1 后从 `app_settings` 清理，并删除已弃用的 `paper_report_queue_concurrency`；环境变量此后只作为首次 seed 默认值。先以期望进程数 1 启动并确认队列和通知正常，再在 GUI 中提高容量。
 
 首次进入 dashboard 后，按 onboarding 配置 Obsidian 或创建第一个系统内项目，再到“设置”里配置 arXiv、RAG、LLM provider 和自动化策略。
 
@@ -183,7 +183,7 @@ npm run dev
 http://localhost:5173
 ```
 
-Vite 会把 `/api` 代理到 `http://localhost:3000`。生产模式下 `npm start` 会先构建前端到 `dist/`，再同时启动 `server.js`、`python -m worker.service` 和 `python -m worker.compute_service`；如果 `dist/` 不存在，Node 会回退服务 `public/`。
+Vite 会把 `/api` 代理到 `http://localhost:3000`。生产模式下 `npm start` 会先构建前端到 `dist/`，再同时启动 `server.js`、worker pool supervisor 和 `python -m worker.compute_service`；如果 `dist/` 不存在，Node 会回退服务 `public/`。
 
 ## Dashboard 导航
 
@@ -249,6 +249,8 @@ python -m worker.cli retry-daily
 - `KRIS_WORKER_JOB_STALE_AFTER_SECONDS`：`worker_jobs.running` 的租约恢复阈值，默认 90 秒；Worker 会持续续期，失联超时后 attempts 未耗尽会重排队，耗尽则失败；仅每日流程等带关联业务运行的任务会同步其 `job_runs`。
 - `GLOBAL_LLM_REQUEST_CONCURRENCY`：所有 Worker/compute 进程合计的 LLM 外部请求上限，默认 `4`。
 - `GLOBAL_EMBEDDING_REQUEST_CONCURRENCY`：所有 Worker/compute 进程合计的 embedding 外部请求上限，默认 `4`。`embedding_concurrency`、项目判定和 Chat profile 并发是单批次局部上限，保存时不会超过对应全局上限。
+- worker 进程数、全局 LLM/embedding、三项局部并发和 capacity group 上限在首次初始化后以数据库 runtime policy 为唯一来源，并支持热更新。降低容量不会中断正在运行的任务或请求，只会阻止新的占用直到收敛；daily、Obsidian、backfill、同实体 key 互斥等正确性边界不可配置。
+- `paper-report` 的任务组上限固定为 unlimited，不提供独立容量开关；实际并发仍受在线 worker 数、全局 LLM 请求额度和 `paper:{paper_id}:report` 同论文互斥约束。
 - `KRIS_COMPUTE_URL`、`KRIS_COMPUTE_TOKEN` / `KRIS_COMPUTE_TOKEN_FILE`、`KRIS_COMPUTE_TIMEOUT_MS`：Node 到 compute 的内部地址、服务身份和请求超时。Compose 使用不暴露宿主端口的 `compute` 服务，并要求 `secrets/compute_token.txt` 为非空随机值。
 - `KRIS_OUTBOX_POLLER_ENABLED` / `KRIS_OUTBOX_POLL_INTERVAL_MS`：控制 Node 轮询 `app_events` outbox 并转发到 `/api/events`，默认启用且间隔 1000ms。Node 写接口和常驻 worker 的缓存失效事件都会写入 `app_events`。
 - `KRIS_WORKER_POLL_INTERVAL_MS` / `KRIS_WORKER_INIT_DB_ON_START`：控制常驻 Python worker 的队列轮询间隔和启动时 schema 初始化。
@@ -371,9 +373,9 @@ Payload 约束：
 
 - `db`：`pgvector/pgvector:pg17`，数据在 named volume `pgdata17`。
 - `app`：Node 22 + Python venv，启动时先执行 `python -m worker.cli init-db`，再运行 `node server.js`。
-- `worker`：与 app 使用同一镜像，运行 `python -m worker.service`，消费 `worker_jobs` 并写入 `app_events` outbox。
-- 默认启动 1 个 Worker；已完成并发策略迁移的部署可用 `docker compose up -d --scale worker=2` 启动 2 个实例。Worker 服务没有固定容器名或宿主机端口。估算供应商容量时，应按全局 LLM/embedding 上限计算，而不是用“实例数 × 单批次并发”；若供应商额度为每秒 `R` 个请求，建议全局并发从不高于 `R × 平均请求秒数` 的保守值开始。
-- `paper_report_queue_concurrency` / `PAPER_REPORT_QUEUE_CONCURRENCY` 已弃用；单篇报告现在是扁平 `paper-report` job，并由共享 policy 的 `paper-report` group（当前上限 2）控制。
+- `worker`：与 app 使用同一镜像，运行 `node scripts/worker-pool.js`；它按数据库期望值管理 Python worker 子进程，消费 `worker_jobs` 并写入 `app_events` outbox，不访问 Docker socket。
+- 默认期望进程数为 1。源码与 Docker 使用同一 supervisor 和数据库容量；在 GUI 管理进程、Provider 与任务组容量。降低上限时 busy 子进程先完成当前任务再排空退出。
+- `paper_report_queue_concurrency` / `PAPER_REPORT_QUEUE_CONCURRENCY` 已弃用；`paper-report` 没有独立 group cap，但仍受 worker pool、全局 LLM 和同论文互斥约束。
 - `./data:/data`：PDF/TXT 缓存、远端 Obsidian 镜像等文件数据。
 - 密钥只以 `_FILE` 路径形式注入容器；非密钥配置仍通过环境变量传入。
 

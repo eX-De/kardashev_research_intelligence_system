@@ -21,6 +21,7 @@ from .paper_prompts import (
     is_builtin_paper_reader_prompt,
     normalize_paper_reader_prompt_locale,
 )
+from .runtime_policy import RUNTIME_FIELDS, load_runtime_policy
 
 CSV_FIELDS = {
     "obsidian_include_dirs",
@@ -103,6 +104,7 @@ BOOL_FIELDS = {
 JSON_FIELDS = {"llm_providers"}
 
 ALLOWED_FIELDS = CSV_FIELDS | INT_FIELDS | FLOAT_FIELDS | STRING_FIELDS | BOOL_FIELDS | JSON_FIELDS
+RUNTIME_FIELD_SET = set(RUNTIME_FIELDS)
 SECRET_FIELDS = {"obsidian_remote_secret_access_key"}
 
 
@@ -382,7 +384,7 @@ def apply_stored_settings(conn: Any, settings: Settings) -> Settings:
         updates["obsidian_project_center_tags"] = _csv(stored["obsidian_project_center_tags"], tags=True)
     if "llm_providers" in stored:
         updates["llm_providers"] = _providers_from_value(stored["llm_providers"])
-    for field in INT_FIELDS:
+    for field in INT_FIELDS - RUNTIME_FIELD_SET:
         if field in stored and hasattr(settings, field):
             if field == "embedding_concurrency":
                 updates[field] = _positive_int(stored[field], settings.embedding_concurrency or 2, field)
@@ -399,17 +401,8 @@ def apply_stored_settings(conn: Any, settings: Settings) -> Settings:
     for field in FLOAT_FIELDS:
         if field in stored:
             updates[field] = float(stored[field])
-    llm_global = int(updates.get("global_llm_request_concurrency", settings.global_llm_request_concurrency))
-    embedding_global = int(updates.get("global_embedding_request_concurrency", settings.global_embedding_request_concurrency))
-    updates["project_chat_profile_concurrency"] = min(
-        int(updates.get("project_chat_profile_concurrency", settings.project_chat_profile_concurrency)), llm_global
-    )
-    updates["project_judgment_concurrency"] = min(
-        int(updates.get("project_judgment_concurrency", settings.project_judgment_concurrency)), llm_global
-    )
-    updates["embedding_concurrency"] = min(
-        int(updates.get("embedding_concurrency", settings.embedding_concurrency)), embedding_global
-    )
+    runtime_policy = load_runtime_policy(conn)
+    updates.update({field: runtime_policy[field] for field in RUNTIME_FIELDS if hasattr(settings, field)})
     for field in BOOL_FIELDS:
         if field in stored and hasattr(settings, field):
             updates[field] = _bool(stored[field])
@@ -439,7 +432,11 @@ def apply_stored_settings(conn: Any, settings: Settings) -> Settings:
 
 
 def get_app_settings(conn: Any, settings: Settings) -> dict[str, Any]:
-    return {"settings": _setting_payload(settings, _stored(conn))}
+    runtime_policy = load_runtime_policy(conn)
+    payload = _setting_payload(settings, _stored(conn))
+    payload.update({field: runtime_policy[field] for field in RUNTIME_FIELDS})
+    payload["worker_concurrency"] = runtime_policy
+    return {"settings": payload}
 
 
 def save_app_settings(conn: Any, payload: dict[str, Any]) -> dict[str, Any]:
@@ -463,6 +460,8 @@ def save_app_settings(conn: Any, payload: dict[str, Any]) -> dict[str, Any]:
         )
 
     for key, raw_value in payload.items():
+        if key in RUNTIME_FIELD_SET or key == "worker_concurrency":
+            continue
         if key not in ALLOWED_FIELDS:
             continue
         if key in SECRET_FIELDS and not str(raw_value or "").strip():
@@ -503,23 +502,6 @@ def save_app_settings(conn: Any, payload: dict[str, Any]) -> dict[str, Any]:
 
         normalized[key] = value
         store_setting(key, value)
-
-    llm_global = int(normalized.get(
-        "global_llm_request_concurrency", current_settings.get("global_llm_request_concurrency", 4)
-    ))
-    embedding_global = int(normalized.get(
-        "global_embedding_request_concurrency", current_settings.get("global_embedding_request_concurrency", 4)
-    ))
-    for field in ("project_chat_profile_concurrency", "project_judgment_concurrency"):
-        if field in normalized or "global_llm_request_concurrency" in normalized:
-            normalized[field] = min(int(normalized.get(field, current_settings.get(field, 1))), llm_global)
-            store_setting(field, normalized[field])
-    if "embedding_concurrency" in normalized or "global_embedding_request_concurrency" in normalized:
-        normalized["embedding_concurrency"] = min(
-            int(normalized.get("embedding_concurrency", current_settings.get("embedding_concurrency", 1))),
-            embedding_global,
-        )
-        store_setting("embedding_concurrency", normalized["embedding_concurrency"])
 
     if normalized.get("scheduler_enabled") and normalized.get("run_daily_on_startup_enabled"):
         raise RuntimeError("scheduler_enabled and run_daily_on_startup_enabled are mutually exclusive")

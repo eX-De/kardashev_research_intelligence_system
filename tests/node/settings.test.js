@@ -93,11 +93,30 @@ async function withCleanSettingsEnv(fn) {
 function createSettingsPool(initial = {}) {
   const store = new Map(Object.entries(initial).map(([key, value]) => [key, toJson(value)]));
   const txCalls = [];
+  const runtime = {
+    singleton_id: 1, revision: 1, worker_process_count: 1,
+    global_llm_request_concurrency: 4, global_embedding_request_concurrency: 4,
+    embedding_concurrency: 2, project_judgment_concurrency: 3,
+    project_chat_profile_concurrency: 2, updated_at: "now"
+  };
+  const overrides = new Map();
+  let transactionSnapshot = null;
 
   async function runQuery(sql, params = []) {
     const normalizedSql = String(sql).replace(/\s+/g, " ").trim().toUpperCase();
     if (["BEGIN", "COMMIT", "ROLLBACK"].includes(normalizedSql)) {
       txCalls.push(normalizedSql);
+      if (normalizedSql === "BEGIN") transactionSnapshot = {
+        store: new Map(store), runtime: { ...runtime }, overrides: new Map(overrides)
+      };
+      if (normalizedSql === "ROLLBACK" && transactionSnapshot) {
+        store.clear();
+        for (const [key, value] of transactionSnapshot.store) store.set(key, value);
+        Object.assign(runtime, transactionSnapshot.runtime);
+        overrides.clear();
+        for (const [key, value] of transactionSnapshot.overrides) overrides.set(key, value);
+      }
+      if (normalizedSql !== "BEGIN") transactionSnapshot = null;
       return { rows: [] };
     }
     if (normalizedSql.startsWith("SELECT KEY, VALUE_JSON FROM APP_SETTINGS")) {
@@ -105,11 +124,40 @@ function createSettingsPool(initial = {}) {
         rows: Array.from(store.entries()).map(([key, value_json]) => ({ key, value_json }))
       };
     }
+    if (normalizedSql.startsWith("SELECT * FROM WORKER_RUNTIME_POLICY")) return { rows: [{ ...runtime }] };
+    if (normalizedSql.startsWith("SELECT POLICY.*, OVERRIDE_ROW.CONCURRENCY_GROUP")) {
+      const rows = [...overrides].map(([concurrency_group, max_running]) => ({
+        ...runtime, concurrency_group, max_running, policy_revision: runtime.revision
+      }));
+      return { rows: rows.length ? rows : [{ ...runtime, concurrency_group: null, max_running: null, policy_revision: null }] };
+    }
+    if (normalizedSql.startsWith("SELECT CONCURRENCY_GROUP, MAX_RUNNING, POLICY_REVISION FROM WORKER_GROUP_LIMIT_OVERRIDES")) {
+      return { rows: [...overrides].map(([concurrency_group, max_running]) => ({ concurrency_group, max_running, policy_revision: runtime.revision })) };
+    }
+    if (normalizedSql.startsWith("UPDATE WORKER_RUNTIME_POLICY")) {
+      [runtime.revision, runtime.worker_process_count, runtime.global_llm_request_concurrency,
+        runtime.global_embedding_request_concurrency, runtime.embedding_concurrency,
+        runtime.project_judgment_concurrency, runtime.project_chat_profile_concurrency,
+        runtime.updated_at] = params;
+      return { rows: [] };
+    }
+    if (normalizedSql === "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY") {
+      txCalls.push(normalizedSql);
+      return { rows: [] };
+    }
+    if (normalizedSql.startsWith("DELETE FROM WORKER_GROUP_LIMIT_OVERRIDES")) {
+      overrides.clear();
+      return { rows: [] };
+    }
+    if (normalizedSql.startsWith("INSERT INTO WORKER_GROUP_LIMIT_OVERRIDES")) {
+      overrides.set(params[0], params[1]);
+      return { rows: [] };
+    }
     if (normalizedSql.startsWith("INSERT INTO APP_SETTINGS")) {
       store.set(params[0], params[1]);
       return { rows: [] };
     }
-    throw new Error(`Unexpected SQL in settings test: ${sql}`);
+    throw new ValidationError(`Unexpected SQL in settings test: ${sql}`);
   }
 
   return {
@@ -117,6 +165,8 @@ function createSettingsPool(initial = {}) {
     value(key) {
       return JSON.parse(store.get(key));
     },
+    has(key) { return store.has(key); },
+    runtime,
     pool: {
       async query(sql, params) {
         return runQuery(sql, params);
@@ -161,6 +211,9 @@ test("getAppSettings hides secrets and preserves settings response shape", async
       assert.equal(data.settings.paper_reader_prompt_locale, "zh-CN");
       assert.equal(data.settings.paper_reader_default_prompt, "");
       assert.deepEqual(data.settings.paper_reader_prompt_defaults, DEFAULT_PAPER_READER_PROMPTS);
+      assert.equal(data.settings.worker_concurrency.revision, 1);
+      assert.equal(data.settings.worker_concurrency.groups["paper-report"].max_running, null);
+      assert.ok(fake.txCalls.includes("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"));
       assert.deepEqual(data.settings.llm_providers, [{
         id: "openai",
         name: "OpenAI",
@@ -273,8 +326,10 @@ test("saveAppSettings preserves project Chat profile model routing", async () =>
       });
       assert.equal(fake.value("project_chat_profile_provider_id"), "openai");
       assert.equal(fake.value("project_chat_profile_model"), "gpt-4.1-mini");
-      assert.equal(fake.value("project_chat_profile_concurrency"), 3);
-      assert.equal(fake.value("project_judgment_concurrency"), 4);
+      assert.equal(fake.has("project_chat_profile_concurrency"), false);
+      assert.equal(fake.has("project_judgment_concurrency"), false);
+      assert.equal(fake.runtime.project_chat_profile_concurrency, 3);
+      assert.equal(fake.runtime.project_judgment_concurrency, 4);
       assert.equal(result.settings.project_chat_profile_provider_id, "openai");
       assert.equal(result.settings.project_chat_profile_model, "gpt-4.1-mini");
       assert.equal(result.settings.project_chat_profile_concurrency, 3);
@@ -283,6 +338,100 @@ test("saveAppSettings preserves project Chat profile model routing", async () =>
       setPoolForTesting(null);
     }
   });
+});
+
+function runtimeDraft(snapshot, updates = {}) {
+  return {
+    expected_revision: snapshot.revision,
+    worker_process_count: snapshot.worker_process_count,
+    global_llm_request_concurrency: snapshot.global_llm_request_concurrency,
+    global_embedding_request_concurrency: snapshot.global_embedding_request_concurrency,
+    embedding_concurrency: snapshot.embedding_concurrency,
+    project_judgment_concurrency: snapshot.project_judgment_concurrency,
+    project_chat_profile_concurrency: snapshot.project_chat_profile_concurrency,
+    group_limits: Object.fromEntries(
+      Object.entries(snapshot.groups).filter(([, group]) => group.editable).map(([name, group]) => [name, group.max_running])
+    ),
+    ...updates
+  };
+}
+
+test("saveAppSettings atomically saves nested worker capacity and increments revision", async () => {
+  const fake = createSettingsPool();
+  setPoolForTesting(fake.pool);
+  try {
+    const before = (await getAppSettings()).settings.worker_concurrency;
+    const result = await saveAppSettings({
+      paper_reader_prompt_mode: "custom",
+      paper_reader_default_prompt: "keep this prompt",
+      worker_concurrency: runtimeDraft(before, { worker_process_count: 2 })
+    });
+    assert.equal(result.settings.worker_concurrency.revision, 2);
+    assert.equal(result.settings.worker_concurrency.worker_process_count, 2);
+    assert.equal(result.settings.worker_process_count, 2);
+    assert.equal(result.apply_state, "reconciling");
+    assert.equal(fake.value("paper_reader_default_prompt"), "keep this prompt");
+    assert.equal(fake.has("worker_process_count"), false);
+    assert.deepEqual(fake.txCalls.slice(-3), ["BEGIN", "COMMIT", "RELEASE"]);
+  } finally {
+    setPoolForTesting(null);
+  }
+});
+
+test("saveAppSettings rejects stale revisions and rolls back mixed prompt writes", async () => {
+  const fake = createSettingsPool({ paper_reader_default_prompt: "original" });
+  setPoolForTesting(fake.pool);
+  try {
+    const snapshot = (await getAppSettings()).settings.worker_concurrency;
+    await saveAppSettings({ worker_concurrency: runtimeDraft(snapshot, { worker_process_count: 2 }) });
+    await assert.rejects(
+      () => saveAppSettings({
+        paper_reader_default_prompt: "must roll back",
+        worker_concurrency: runtimeDraft(snapshot, { worker_process_count: 3 })
+      }),
+      (error) => error.statusCode === 409
+        && error.structuredCode === "worker_policy_revision_conflict"
+        && error.latest?.revision === 2
+    );
+    assert.equal(fake.value("paper_reader_default_prompt"), "original");
+    assert.ok(fake.txCalls.includes("ROLLBACK"));
+  } finally {
+    setPoolForTesting(null);
+  }
+});
+
+test("saveAppSettings rejects invalid runtime invariants and immutable group overrides", async () => {
+  const fake = createSettingsPool();
+  setPoolForTesting(fake.pool);
+  try {
+    const snapshot = (await getAppSettings()).settings.worker_concurrency;
+    await assert.rejects(
+      () => saveAppSettings({ worker_concurrency: runtimeDraft(snapshot, {
+        global_llm_request_concurrency: 1,
+        project_judgment_concurrency: 2
+      }) }),
+      (error) => error.statusCode === 400 && error.structuredCode === "worker_policy_validation_error"
+    );
+    await assert.rejects(
+      () => saveAppSettings({ worker_concurrency: runtimeDraft(snapshot, {
+        group_limits: { ...runtimeDraft(snapshot).group_limits, daily: 2 }
+      }) }),
+      (error) => error.statusCode === 400
+    );
+    const incomplete = runtimeDraft(snapshot);
+    delete incomplete.embedding_concurrency;
+    await assert.rejects(
+      () => saveAppSettings({ worker_concurrency: incomplete }),
+      (error) => error.statusCode === 400 && error.structuredCode === "worker_policy_validation_error"
+    );
+    await assert.rejects(
+      () => saveAppSettings({ worker_concurrency: runtimeDraft(snapshot), worker_process_count: 2 }),
+      (error) => error.statusCode === 400 && error.structuredCode === "validation_error"
+    );
+    assert.equal(fake.runtime.revision, 1);
+  } finally {
+    setPoolForTesting(null);
+  }
 });
 
 test("normalizeSettingsPayload matches csv tags, validation, and provider URL rules", () => {

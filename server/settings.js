@@ -1,7 +1,14 @@
 import { homedir } from "node:os";
 
 import { envBoolean, envValue } from "./env.js";
-import { parseJson, query, toJson, ValidationError, withTransaction } from "./db.js";
+import { ConflictError, parseJson, query, toJson, ValidationError, withTransaction } from "./db.js";
+import {
+  loadWorkerRuntimePolicy,
+  saveWorkerRuntimePolicy,
+  WorkerRuntimePolicyConflictError,
+  WorkerRuntimePolicyValidationError,
+  WORKER_RUNTIME_FIELDS
+} from "./workerRuntimePolicy.js";
 
 export const DEFAULT_PAPER_READER_PROMPTS = Object.freeze({
   "zh-CN": `请阅读这份研究文档，输出结构化解读：
@@ -101,6 +108,8 @@ export const INT_FIELDS = new Set([
   "project_chat_profile_concurrency",
   "project_judgment_concurrency"
 ]);
+
+const WORKER_RUNTIME_FIELD_SET = new Set(WORKER_RUNTIME_FIELDS);
 
 export const FLOAT_FIELDS = new Set([
   "arxiv_request_interval_seconds",
@@ -845,18 +854,100 @@ export function normalizeSettingsPayload(payload = {}, currentSettings = {}) {
 }
 
 export async function getAppSettings() {
-  const stored = await readStoredSettings();
-  return { settings: settingsPayloadFromStored(stored) };
+  return withTransaction(async (client) => {
+    await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    const stored = await readStoredSettings(client);
+    const workerConcurrency = await loadWorkerRuntimePolicy(client);
+    return { settings: withWorkerConcurrency(settingsPayloadFromStored(stored), workerConcurrency) };
+  });
 }
 
 export async function saveAppSettings(payload = {}) {
   return withTransaction(async (client) => {
     const current = await readStoredSettings(client);
-    const normalized = normalizeSettingsPayload(payload, current);
+    const currentWorkerConcurrency = await loadWorkerRuntimePolicy(client);
+    const runtimeDraft = workerRuntimeDraftFromPayload(payload, currentWorkerConcurrency);
+    const appPayload = Object.fromEntries(
+      Object.entries(payload || {}).filter(([key]) => key !== "worker_concurrency" && !WORKER_RUNTIME_FIELD_SET.has(key))
+    );
+    const normalized = normalizeSettingsPayload(appPayload, current);
     const now = utcNow();
     for (const [key, value] of Object.entries(normalized)) {
       await storeSetting(client, key, value, now);
     }
-    return { settings: settingsPayloadFromStored({ ...current, ...normalized }) };
+    let workerConcurrency = currentWorkerConcurrency;
+    if (runtimeDraft) {
+      try {
+        workerConcurrency = await saveWorkerRuntimePolicy(client, runtimeDraft);
+      } catch (error) {
+        if (error instanceof WorkerRuntimePolicyConflictError) {
+          const conflict = new ConflictError(error.message, {
+            code: "worker_policy_revision_conflict",
+            reason: "worker_policy_revision_conflict"
+          });
+          conflict.latest = error.snapshot;
+          throw conflict;
+        }
+        if (error instanceof WorkerRuntimePolicyValidationError) {
+          throw new ValidationError(error.message, {
+            code: "worker_policy_validation_error",
+            reason: "worker_policy_validation_error"
+          });
+        }
+        throw error;
+      }
+    }
+    return {
+      settings: withWorkerConcurrency(settingsPayloadFromStored({ ...current, ...normalized }), workerConcurrency),
+      worker_concurrency: workerConcurrency,
+      apply_state: runtimeDraft ? "reconciling" : "unchanged"
+    };
   });
+}
+
+function withWorkerConcurrency(settings, snapshot) {
+  const result = { ...settings, worker_concurrency: snapshot };
+  for (const field of WORKER_RUNTIME_FIELDS) result[field] = snapshot[field];
+  return result;
+}
+
+function editableGroupLimits(snapshot) {
+  return Object.fromEntries(
+    Object.entries(snapshot.groups || {})
+      .filter(([, group]) => group.editable)
+      .map(([name, group]) => [name, group.max_running])
+  );
+}
+
+function integerPayloadValue(value) {
+  if (typeof value === "number") return value;
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) return Number(value);
+  return value;
+}
+
+export function workerRuntimeDraftFromPayload(payload = {}, currentSnapshot) {
+  const nested = payload?.worker_concurrency;
+  const flatFields = WORKER_RUNTIME_FIELDS.filter((field) => Object.hasOwn(payload || {}, field));
+  if (nested === undefined && flatFields.length === 0) return null;
+  if (nested !== undefined && flatFields.length > 0) {
+    throw new ValidationError("worker_concurrency cannot be combined with legacy flat concurrency fields");
+  }
+  if (nested !== undefined && (!nested || typeof nested !== "object" || Array.isArray(nested))) {
+    throw new ValidationError("worker_concurrency must be an object");
+  }
+  if (nested !== undefined) {
+    return {
+      expected_revision: integerPayloadValue(nested.expected_revision),
+      ...Object.fromEntries(WORKER_RUNTIME_FIELDS.map((field) => [field, integerPayloadValue(nested[field])])),
+      group_limits: nested.group_limits
+    };
+  }
+  const draft = {
+    expected_revision: currentSnapshot.revision,
+    group_limits: editableGroupLimits(currentSnapshot)
+  };
+  for (const field of WORKER_RUNTIME_FIELDS) {
+    draft[field] = integerPayloadValue(payload[field] ?? currentSnapshot[field]);
+  }
+  return draft;
 }

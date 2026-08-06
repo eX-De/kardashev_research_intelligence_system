@@ -26,3 +26,20 @@
 .daily-tasks-settings-form .daily-tasks-settings-section:first-child {
   padding-top: 24px;
 }
+
+.worker-concurrency-card { display: grid; gap: 18px; }
+.worker-pool-status { display: flex; flex-wrap: wrap; gap: 8px; }
+.worker-pool-status > * { border: 1px solid var(--border-color, #d8d8d2); border-radius: 999px; padding: 6px 10px; font-size: 0.78rem; }
+.worker-concurrency-conflict,
+.worker-scale-note { border-left: 3px solid #c58a2c; background: color-mix(in srgb, #c58a2c 9%, transparent); padding: 10px 12px; }
+.worker-concurrency-conflict { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.worker-group-table-wrap { overflow-x: auto; }
+.worker-group-table { width: 100%; border-collapse: collapse; }
+.worker-group-table th,
+.worker-group-table td { border-bottom: 1px solid var(--border-color, #deded8); padding: 10px; text-align: left; }
+.worker-group-table td small { display: block; margin-top: 3px; opacity: 0.65; }
+.worker-limit-control { display: flex; align-items: center; gap: 8px; }
+.worker-limit-control input[type="number"] { width: 88px; }
+.worker-unlimited-toggle { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.worker-invariant-notes { display: grid; gap: 6px; color: var(--text-secondary, #666); }
+.worker-invariant-notes p { margin: 0; }

@@ -215,9 +215,10 @@ export function compactProjectPayload(data = {}, fallbackId = null) {
   };
 }
 
-export function compactSettingsChangedPayload(scheduler = {}) {
+export function compactSettingsChangedPayload(scheduler = {}, workerPolicyRevision = null) {
   return {
-    scheduler: compactSchedulerPayload(scheduler)
+    scheduler: compactSchedulerPayload(scheduler),
+    worker_policy_revision: eventNumber(workerPolicyRevision)
   };
 }
 
@@ -464,8 +465,11 @@ export function createEventPublisher({
     return { flush: emit, queue, stop };
   }
 
-  function publishSettingsChanged(_settings, scheduler = getSchedulerStatus()) {
-    return publishEvent(SERVER_EVENTS.SETTINGS_CHANGED, compactSettingsChangedPayload(scheduler));
+  function publishSettingsChanged(settings, scheduler = getSchedulerStatus()) {
+    return publishEvent(
+      SERVER_EVENTS.SETTINGS_CHANGED,
+      compactSettingsChangedPayload(scheduler, settings?.worker_concurrency?.revision)
+    );
   }
 
   function publishProjectChanged(type, data = {}, fallbackId = null, extra = {}) {

@@ -100,6 +100,35 @@
         "description": "Limit downstream request capacity, retain full-text caches, and control historical retries."
       }
     },
+    "workerConcurrency": {
+      "eyebrow": "Worker capacity",
+      "title": "Workers and concurrency capacity",
+      "description": "Manage the worker process pool shared by source and Docker modes, provider request budgets, and job-group capacity.",
+      "desired": "Desired {{count}}",
+      "online": "Online {{count}}",
+      "draining": "Draining {{count}}",
+      "applyState": { "idle": "In sync", "unchanged": "Unchanged", "reconciling": "Reconciling", "applied": "Applied", "degraded": "Degraded" },
+      "conflict": "Server capacity has advanced to revision {{revision}}. Your draft was preserved; reload before applying it again.",
+      "reload": "Reload capacity",
+      "fields": { "workerProcesses": "Worker processes", "projectProfile": "Project profile concurrency" },
+      "scaleDownNote": "Lowering process, group, or provider limits affects only new jobs and requests; running work is not terminated.",
+      "group": "Group and jobs",
+      "default": "Default",
+      "effective": "Effective limit",
+      "running": "Running",
+      "unlimited": "Unlimited",
+      "immutable": "Fixed correctness limit {{limit}}; settings cannot remove it.",
+      "paperReport": "No independent group cap; still limited by online workers, the global LLM budget, and the same-paper mutex.",
+      "groupJobs": {
+        "arxiv": "arXiv ingestion",
+        "ingest": "Paper full-text caching",
+        "llm": "Ranking and daily reports",
+        "artifact-index": "Artifact and experiment-report indexing",
+        "library-paper-index": "Library paper indexing",
+        "knowledge-index": "Knowledge document indexing",
+        "reader-import": "Reader upload and web import"
+      }
+    },
     "fields": {
       "schedulerRunTime": "Daily run time",
       "schedulerInterval": "Interval in hours",

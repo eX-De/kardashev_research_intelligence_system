@@ -100,6 +100,35 @@
         "description": "限制下游请求容量，保存全文缓存，并约束失败后的历史补洞规模。"
       }
     },
+    "workerConcurrency": {
+      "eyebrow": "Worker capacity",
+      "title": "Worker 与并发容量",
+      "description": "统一管理源码模式与 Docker 使用的 worker 进程池、Provider 请求额度和任务组容量。",
+      "desired": "期望 {{count}}",
+      "online": "在线 {{count}}",
+      "draining": "排空 {{count}}",
+      "applyState": { "idle": "已同步", "unchanged": "未改变", "reconciling": "正在收敛", "applied": "已生效", "degraded": "收敛异常" },
+      "conflict": "服务端容量已更新到 revision {{revision}}。当前草稿未被覆盖，请重新载入后再应用。",
+      "reload": "重新载入容量",
+      "fields": { "workerProcesses": "Worker 进程数", "projectProfile": "项目摘要并发数" },
+      "scaleDownNote": "降低进程、任务组或 Provider 上限只影响新任务和新请求；正在运行的工作不会被终止。",
+      "group": "任务组与涵盖任务",
+      "default": "默认",
+      "effective": "当前上限",
+      "running": "运行中",
+      "unlimited": "无限",
+      "immutable": "固定正确性上限 {{limit}}，不可通过设置解除。",
+      "paperReport": "没有独立任务组上限；仍受在线 worker、全局 LLM 请求额度和同一论文互斥约束。",
+      "groupJobs": {
+        "arxiv": "arXiv 抓取",
+        "ingest": "论文全文缓存",
+        "llm": "排序与每日报告",
+        "artifact-index": "Artifact 与实验报告索引",
+        "library-paper-index": "论文库索引",
+        "knowledge-index": "知识文档索引",
+        "reader-import": "Reader 上传与网页导入"
+      }
+    },
     "fields": {
       "schedulerRunTime": "每日执行时间",
       "schedulerInterval": "执行间隔小时",

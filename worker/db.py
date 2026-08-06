@@ -953,8 +953,18 @@ def init_db(conn) -> None:
 
 
 def _seed_worker_runtime_policy(conn: Any) -> dict[str, Any]:
-    """Seed the canonical capacity row once without deleting legacy settings yet."""
+    """Seed the canonical capacity row once, then remove legacy capacity sources."""
+    legacy_keys = [
+        "worker_process_count",
+        "global_llm_request_concurrency",
+        "global_embedding_request_concurrency",
+        "embedding_concurrency",
+        "project_judgment_concurrency",
+        "project_chat_profile_concurrency",
+        "paper_report_queue_concurrency",
+    ]
     if conn.execute("SELECT 1 FROM worker_runtime_policy WHERE singleton_id = 1").fetchone():
+        conn.execute("DELETE FROM app_settings WHERE key = ANY(?)", (legacy_keys,))
         return {"created": False, "corrections": []}
 
     defaults = {
@@ -1006,6 +1016,9 @@ def _seed_worker_runtime_policy(conn: Any) -> dict[str, Any]:
             values["project_judgment_concurrency"], values["project_chat_profile_concurrency"], seeded_at,
         ),
     )
+    if not conn.execute("SELECT 1 FROM worker_runtime_policy WHERE singleton_id = 1").fetchone():
+        raise RuntimeError("worker runtime policy seed did not create the canonical row")
+    conn.execute("DELETE FROM app_settings WHERE key = ANY(?)", (legacy_keys,))
     for correction in corrections:
         print(f"worker runtime policy seed correction: {correction}")
     return {"created": True, "corrections": corrections}

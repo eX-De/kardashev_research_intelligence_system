@@ -12,6 +12,11 @@ import { friendlyObsidianMessage, obsidianCapabilityFrom } from "../lib/obsidian
 import { normalizeProviders, OPENROUTER_BASE_URL, providerPayload, providerType } from "../lib/settingsProviders.js";
 import { dailyStepLabel, formatApiError } from "../lib/systemMessages.js";
 import { dailyRecoveryFromHistory, fallbackHistoryFromSummary } from "../lib/taskHistory.js";
+import {
+  WORKER_CONCURRENCY_FIELDS,
+  workerCapacityApplyDecision,
+  workerConcurrencyFlatValues
+} from "../lib/workerConcurrency.js";
 import "../styles/ControlView.css";
 
 const AUTO_SAVE_DELAY_MS = 850;
@@ -21,6 +26,7 @@ const QUICK_SAVE_FIELDS = new Set([
   "rag_prefilter_enabled"
 ]);
 const SUCCESS_TOAST_THROTTLE_MS = 2500;
+const WORKER_RUNTIME_FIELDS = new Set(WORKER_CONCURRENCY_FIELDS);
 const SETTINGS_PAGES = {
   "/settings/daily-tasks": { key: "daily-tasks", translationKey: "pages.daily" },
   "/settings/data": { key: "data", translationKey: "pages.data" },
@@ -52,16 +58,37 @@ const ABOUT_LINKS = [
   }
 ];
 
-function settingsPayload(settings, providers) {
+function settingsPayload(settings, providers, { includeWorkerConcurrency = true } = {}) {
   const {
     run_daily_on_startup_enabled: _runDailyOnStartupEnabled,
     scheduler_enabled: _schedulerEnabled,
     ...formSettings
   } = settings || {};
+  const workerConcurrency = formSettings.worker_concurrency;
   const payload = {
     ...formSettings,
     llm_providers: providerPayload(providers)
   };
+  if (workerConcurrency?.revision) {
+    payload.worker_concurrency = {
+      expected_revision: workerConcurrency.revision,
+      worker_process_count: workerConcurrency.worker_process_count,
+      global_llm_request_concurrency: workerConcurrency.global_llm_request_concurrency,
+      global_embedding_request_concurrency: workerConcurrency.global_embedding_request_concurrency,
+      embedding_concurrency: workerConcurrency.embedding_concurrency,
+      project_judgment_concurrency: workerConcurrency.project_judgment_concurrency,
+      project_chat_profile_concurrency: workerConcurrency.project_chat_profile_concurrency,
+      group_limits: Object.fromEntries(
+        Object.entries(workerConcurrency.groups || {})
+          .filter(([, group]) => group.editable)
+          .map(([name, group]) => [name, group.max_running])
+      )
+    };
+  }
+  if (!includeWorkerConcurrency) {
+    delete payload.worker_concurrency;
+    for (const field of WORKER_RUNTIME_FIELDS) delete payload[field];
+  }
   return payload;
 }
 
@@ -182,6 +209,8 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
   const [settings, setSettings] = useState({});
   const [providers, setProviders] = useState([]);
   const [saveStatus, setSaveStatus] = useState("idle");
+  const [concurrencyConflict, setConcurrencyConflict] = useState(null);
+  const [capacityApplyState, setCapacityApplyState] = useState("idle");
   const settingsRef = useRef(settings);
   const providersRef = useRef(providers);
   const hydratedRef = useRef(false);
@@ -191,6 +220,8 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
   const pendingAutosaveRef = useRef(null);
   const lastSavedSignatureRef = useRef("");
   const lastSuccessToastAtRef = useRef(0);
+  const workerConcurrencyDirtyRef = useRef(false);
+  const capacityPollAttemptsRef = useRef(0);
   const taskDetailsLoadedRef = useRef(false);
   const cache = useApiCacheClient();
   const settingsQuery = useCachedApi(["settings"], () => api("/api/settings"), { staleTime: Infinity });
@@ -205,6 +236,7 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
   const refreshHealthCache = healthQuery.refresh;
   const health = healthQuery.data || null;
   const scheduler = jobStatusQuery.data?.scheduler || {};
+  const workerStatus = jobStatusQuery.data?.worker || {};
   const jobsSummary = jobsSummaryQuery.data || {};
   const fallbackHistory = fallbackHistoryFromSummary(jobsSummary);
   const history = historyQuery.hasData ? historyQuery.data?.items || [] : fallbackHistory;
@@ -278,8 +310,10 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
   }, [notify, t]);
 
   const saveCurrentSettings = useCallback(async ({ forceSuccessToast = false, force = false } = {}) => {
-    const payload = settingsPayload(settingsRef.current, providersRef.current);
-    const requestedSignature = JSON.stringify(payload);
+    const requestedSignature = settingsSignature(settingsRef.current, providersRef.current);
+    const payload = settingsPayload(settingsRef.current, providersRef.current, {
+      includeWorkerConcurrency: workerConcurrencyDirtyRef.current
+    });
     if (!force && requestedSignature === lastSavedSignatureRef.current) {
       setSaveStatus("idle");
       return;
@@ -298,23 +332,56 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
       const savedSettings = data.settings || payload;
       const savedProviders = normalizeProviders(savedSettings.llm_providers || payload.llm_providers || []);
       cache.setCache(["settings"], data);
-      if (data.scheduler) cache.setCache(["jobs", "status"], { scheduler: data.scheduler });
+      if (data.scheduler || data.worker) cache.setCache(["jobs", "status"], {
+        scheduler: data.scheduler || {},
+        worker: data.worker || {}
+      });
       cache.markStale(["health"]);
       lastSavedSignatureRef.current = settingsSignature(savedSettings, savedProviders);
+      workerConcurrencyDirtyRef.current = false;
       setSettings(savedSettings);
       setProviders(savedProviders);
       setSaveStatus("saved");
+      setConcurrencyConflict(null);
+      capacityPollAttemptsRef.current = 0;
+      setCapacityApplyState(data.apply_state || "idle");
       setStatusMessage(t("save.saved"));
       showSaveSuccess({ force: forceSuccessToast });
       refreshControl({ hydrate: false }).catch((error) => setStatusMessage(formatApiError(error, t)));
     } catch (error) {
       if (requestId !== saveRequestRef.current || editVersion !== editVersionRef.current) return;
       setSaveStatus("error");
+      if (error.code === "worker_policy_revision_conflict") {
+        setConcurrencyConflict(error.data?.latest || {});
+      }
       const message = formatApiError(error, t);
       setStatusMessage(message);
       notify(message, { type: "error" });
     }
-  }, [notify, refreshControl, setStatusMessage, showSaveSuccess, t]);
+  }, [cache, notify, refreshControl, setStatusMessage, showSaveSuccess, t]);
+
+  useEffect(() => {
+    if (capacityApplyState !== "reconciling") return undefined;
+    const desired = Number(settings.worker_concurrency?.worker_process_count);
+    const pool = jobStatusQuery.data?.worker?.pool;
+    const decision = workerCapacityApplyDecision({
+      state: capacityApplyState,
+      pool,
+      desired,
+      attempts: capacityPollAttemptsRef.current
+    });
+    if (decision !== "reconciling") {
+      setCapacityApplyState(decision);
+      return undefined;
+    }
+    const timer = setTimeout(() => {
+      capacityPollAttemptsRef.current += 1;
+      refreshJobStatusCache({ force: true }).catch(() => {
+        if (capacityPollAttemptsRef.current >= 15) setCapacityApplyState("degraded");
+      });
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, [capacityApplyState, jobStatusQuery.data, refreshJobStatusCache, settings.worker_concurrency?.worker_process_count]);
 
   useEffect(() => {
     if (!hydratedRef.current) return undefined;
@@ -376,6 +443,10 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
     });
     setSettings((current) => {
       const next = { ...current, [name]: value };
+      if (WORKER_RUNTIME_FIELDS.has(name) && current.worker_concurrency) {
+        workerConcurrencyDirtyRef.current = true;
+        next.worker_concurrency = { ...current.worker_concurrency, [name]: value };
+      }
       return next;
     });
   }
@@ -522,6 +593,34 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
     });
   }
 
+  function updateWorkerConcurrency(updater) {
+    workerConcurrencyDirtyRef.current = true;
+    queueAutosave();
+    setSettings((current) => {
+      const workerConcurrency = updater(current.worker_concurrency || {});
+      return {
+        ...current,
+        worker_concurrency: workerConcurrency,
+        ...workerConcurrencyFlatValues(workerConcurrency)
+      };
+    });
+  }
+
+  function reloadWorkerConcurrency() {
+    if (!concurrencyConflict?.revision) return;
+    editVersionRef.current += 1;
+    workerConcurrencyDirtyRef.current = false;
+    capacityPollAttemptsRef.current = 0;
+    setCapacityApplyState("idle");
+    setSettings((current) => ({
+      ...current,
+      worker_concurrency: concurrencyConflict,
+      ...workerConcurrencyFlatValues(concurrencyConflict)
+    }));
+    setConcurrencyConflict(null);
+    setSaveStatus("idle");
+  }
+
   const taskControlProps = {
     scheduler,
     recovery: dailyRecovery,
@@ -550,6 +649,11 @@ export function ControlView({ setStatusMessage = () => {}, notify = () => {} }) 
           saveStatus={saveStatus}
           taskControlProps={taskControlProps}
           taskHistoryProps={taskHistoryProps}
+          workerStatus={workerStatus}
+          concurrencyConflict={concurrencyConflict}
+          capacityApplyState={capacityApplyState}
+          onWorkerConcurrencyChange={updateWorkerConcurrency}
+          onReloadWorkerConcurrency={reloadWorkerConcurrency}
         />
       );
     }

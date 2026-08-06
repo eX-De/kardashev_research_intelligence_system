@@ -147,15 +147,15 @@ The system has exactly three execution modes: Node owns online APIs, transaction
 
 PDF/URL/web imports, paper reports, index generation, Obsidian exports, synchronization, fetching, and daily pipelines are asynchronous actions. After an endpoint returns `202` and a `worker_job_id`, follow queued, running, retry, cancellation, and completion state in Tasks or notifications; the browser does not poll a result table.
 
-To debug the worker separately, open another terminal and run:
+To debug the worker pool supervisor separately, open another terminal and run:
 
 ```powershell
 npm run worker
 ```
 
-One worker starts by default. To reduce queue wait while a daily pipeline is active, run `docker compose up -d --scale worker=2`. Concurrency groups, same-entity key mutexes, and PostgreSQL advisory locks remain effective across replicas. Global LLM/embedding limits are shared across workers and compute, while project judgment, Chat profile, and embedding local concurrency remain capped by the global limits. In the controlled baseline, a second worker added about 53 MiB RSS (about 105.5 MiB for two workers). Budget up to one active job connection per replica plus short heartbeat/resource-slot connections, and tune global limits using provider rate-limit/429 telemetry.
+`npm run worker` and Docker's `worker` service now start the same Node pool supervisor. It manages `python -m worker.service` child processes from the desired count stored in PostgreSQL, while each child still runs only one top-level job at a time. Use Settings → Daily tasks → Workers and concurrency capacity for normal scaling; keep one Compose `worker` replica. A database leader lock prevents an accidentally started second supervisor from multiplying the pool.
 
-Before upgrading an older deployment, stop services and back up PostgreSQL. The first `npm run init-db` (automatic during Docker startup) idempotently cancels the legacy `generate-paper-reports` pump, converts queued/processing report artifacts into per-paper `paper-report` jobs, and terminalizes active jobs whose removed type is no longer supported; history is retained. Start one worker after the upgrade, verify queue and notification state, then scale to two replicas if desired.
+Before upgrading, stop app, compute, and worker processes without stopping PostgreSQL, then back up PostgreSQL. The first `npm run init-db` (automatic during Docker startup) creates the runtime-policy tables, migrates old capacity values into revision 1, removes those keys from `app_settings`, and deletes deprecated `paper_report_queue_concurrency`. Environment variables are bootstrap defaults only after initialization. Start with desired count 1, verify queue and notification state, then raise capacity in the GUI.
 
 On first entry, use onboarding to configure Obsidian or create the first in-system project. Then configure arXiv, RAG, LLM providers, and automation policies in Settings.
 
@@ -183,7 +183,7 @@ Open:
 http://localhost:5173
 ```
 
-Vite proxies `/api` to `http://localhost:3000`. In production mode, `npm start` first builds the frontend into `dist/`, then starts `server.js`, `python -m worker.service`, and `python -m worker.compute_service`. If `dist/` does not exist, Node falls back to serving `public/`.
+Vite proxies `/api` to `http://localhost:3000`. In production mode, `npm start` first builds the frontend into `dist/`, then starts `server.js`, the worker pool supervisor, and `python -m worker.compute_service`. If `dist/` does not exist, Node falls back to serving `public/`.
 
 ## Dashboard Navigation
 
@@ -249,6 +249,8 @@ Key startup settings:
 - `KRIS_WORKER_JOB_STALE_AFTER_SECONDS`: lease recovery threshold for `worker_jobs.running`, default 90 seconds. The Worker renews the lease while running; after a disconnect, a timed-out job is requeued while attempts remain or failed after exhaustion. Only jobs linked to a daily/business run synchronize that `job_runs` record.
 - `GLOBAL_LLM_REQUEST_CONCURRENCY`: aggregate outbound LLM request limit across all Worker/compute processes, default `4`.
 - `GLOBAL_EMBEDDING_REQUEST_CONCURRENCY`: aggregate outbound embedding request limit across all Worker/compute processes, default `4`. `embedding_concurrency`, project judgment, and Chat profile concurrency remain per-batch local limits and are capped by their global limit when saved.
+- After first initialization, worker count, global LLM/embedding budgets, three local limits, and capacity-group limits use the database runtime policy as their only source and support hot updates. Lowering capacity does not terminate running work; it blocks new acquisitions until usage converges. Daily, Obsidian, backfill, same-entity key mutexes, and other correctness boundaries are not configurable.
+- The `paper-report` group is permanently unlimited and has no independent capacity switch. Effective concurrency is still bounded by online workers, the global LLM budget, and the `paper:{paper_id}:report` same-paper mutex.
 - `KRIS_COMPUTE_URL`, `KRIS_COMPUTE_TOKEN` / `KRIS_COMPUTE_TOKEN_FILE`, and `KRIS_COMPUTE_TIMEOUT_MS`: internal compute address, service identity, and request timeout. Compose runs `compute` without publishing a host port and requires a non-empty random `secrets/compute_token.txt`.
 - `KRIS_OUTBOX_POLLER_ENABLED` / `KRIS_OUTBOX_POLL_INTERVAL_MS`: control Node polling of the `app_events` outbox and forwarding to `/api/events`, enabled by default at 1,000 ms. Node write endpoints and the persistent worker both write cache-invalidation events to `app_events`.
 - `KRIS_WORKER_POLL_INTERVAL_MS` / `KRIS_WORKER_INIT_DB_ON_START`: configure queue polling and schema initialization for the persistent worker.
@@ -371,9 +373,9 @@ The default published image is `exde1968/kardashev-research-intelligence-system:
 
 - `db`: `pgvector/pgvector:pg17`, storing data in the named volume `pgdata17`.
 - `app`: Node 22 plus a Python virtual environment. It runs `python -m worker.cli init-db` before starting `node server.js`.
-- `worker`: the same image running `python -m worker.service`, consuming `worker_jobs` and writing the `app_events` outbox.
-- One Worker starts by default. Deployments that have adopted the concurrency policy can run two instances with `docker compose up -d --scale worker=2`. The Worker service has no fixed container name or host port. Size provider capacity from the global LLM/embedding limits, not “replicas × local batch concurrency”; for a provider allowance of `R` requests per second, start conservatively at no more than `R × average request duration in seconds`.
-- `paper_report_queue_concurrency` / `PAPER_REPORT_QUEUE_CONCURRENCY` is deprecated. Each paper is now a flat `paper-report` job controlled by the shared policy's `paper-report` group (currently limited to 2).
+- `worker`: the same image running `node scripts/worker-pool.js`. It manages Python worker children from the database desired count, consumes `worker_jobs`, writes the `app_events` outbox, and never accesses the Docker socket.
+- Desired process count defaults to 1. Source and Docker modes use the same supervisor and database capacity; manage process, provider, and group capacity in the GUI. On scale-down, busy children finish their current job before draining.
+- `paper_report_queue_concurrency` / `PAPER_REPORT_QUEUE_CONCURRENCY` is deprecated. `paper-report` has no independent group cap, but remains bounded by the worker pool, global LLM budget, and same-paper mutex.
 - `./data:/data`: PDF/TXT caches, the remote Obsidian mirror, and other file data.
 - Secrets are mounted only through `_FILE` paths; non-secret configuration remains in environment variables.
 

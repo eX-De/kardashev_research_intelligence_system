@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { csv } from "../lib/dashboard.js";
@@ -70,6 +71,105 @@ function CheckboxField({ label, name, checked, onChange }) {
   );
 }
 
+function GroupLimitControl({ group, onChange, t }) {
+  const [value, setValue] = useState(group.max_running ?? "");
+  useEffect(() => setValue(group.max_running ?? ""), [group.max_running]);
+  const unlimited = group.max_running === null;
+
+  function commit() {
+    const parsed = Number(value);
+    if (Number.isInteger(parsed) && parsed >= 1) onChange(parsed);
+    else setValue(group.max_running ?? "");
+  }
+
+  return (
+    <div className="worker-limit-control">
+      <label className="worker-unlimited-toggle">
+        <input type="checkbox" checked={unlimited} onChange={(event) => onChange(event.target.checked ? null : group.default_max_running)} />
+        <span>{t("daily.workerConcurrency.unlimited")}</span>
+      </label>
+      <input
+        aria-label={t("daily.workerConcurrency.effective")}
+        disabled={unlimited}
+        min="1"
+        type="number"
+        value={unlimited ? "" : value}
+        onBlur={commit}
+        onChange={(event) => setValue(event.target.value)}
+        onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }}
+      />
+    </div>
+  );
+}
+
+function WorkerConcurrencyCard({ settings, workerStatus, conflict, applyState, onChange, onReload, t }) {
+  const policy = settings.worker_concurrency;
+  if (!policy?.groups) return null;
+  const groups = Object.entries(policy.groups);
+  const editableGroups = groups.filter(([, group]) => group.editable);
+  const immutableGroups = groups.filter(([, group]) => !group.editable);
+  const occupancy = workerStatus?.group_occupancy || {};
+
+  function updateField(field, value) {
+    onChange((current) => ({ ...current, [field]: value }));
+  }
+
+  function updateGroup(name, maxRunning) {
+    onChange((current) => ({
+      ...current,
+      groups: { ...current.groups, [name]: { ...current.groups[name], max_running: maxRunning } }
+    }));
+  }
+
+  return (
+    <section className="settings-section daily-tasks-settings-section worker-concurrency-card">
+      <div className="settings-section-head">
+        <div><span>{t("daily.workerConcurrency.eyebrow")}</span><h3>{t("daily.workerConcurrency.title")}</h3></div>
+        <p>{t("daily.workerConcurrency.description")}</p>
+      </div>
+      <div className="worker-pool-status" data-state={workerStatus?.pool?.state || "unknown"}>
+        <span>{t("daily.workerConcurrency.desired", { count: policy.worker_process_count })}</span>
+        <span>{t("daily.workerConcurrency.online", { count: workerStatus?.pool?.actual_processes ?? 0 })}</span>
+        <span>{t("daily.workerConcurrency.draining", { count: workerStatus?.pool?.draining_processes ?? 0 })}</span>
+        <strong>{t(`daily.workerConcurrency.applyState.${applyState}`, { defaultValue: applyState })}</strong>
+      </div>
+      {conflict ? (
+        <div className="worker-concurrency-conflict" role="alert">
+          <span>{t("daily.workerConcurrency.conflict", { revision: conflict.revision })}</span>
+          <button type="button" onClick={onReload}>{t("daily.workerConcurrency.reload")}</button>
+        </div>
+      ) : null}
+      <div className="settings-field-grid worker-capacity-fields">
+        <NumberField label={t("daily.workerConcurrency.fields.workerProcesses")} min="1" max="16" value={policy.worker_process_count} onChange={(_, value) => updateField("worker_process_count", value)} />
+        <NumberField label={t("daily.fields.globalLlmConcurrency")} min="1" max="64" value={policy.global_llm_request_concurrency} onChange={(_, value) => updateField("global_llm_request_concurrency", value)} />
+        <NumberField label={t("daily.fields.globalEmbeddingConcurrency")} min="1" max="64" value={policy.global_embedding_request_concurrency} onChange={(_, value) => updateField("global_embedding_request_concurrency", value)} />
+        <NumberField label={t("daily.fields.embeddingConcurrency")} min="1" max="32" value={policy.embedding_concurrency} onChange={(_, value) => updateField("embedding_concurrency", value)} />
+        <NumberField label={t("daily.fields.judgmentConcurrency")} min="1" max="8" value={policy.project_judgment_concurrency} onChange={(_, value) => updateField("project_judgment_concurrency", value)} />
+        <NumberField label={t("daily.workerConcurrency.fields.projectProfile")} min="1" max="8" value={policy.project_chat_profile_concurrency} onChange={(_, value) => updateField("project_chat_profile_concurrency", value)} />
+      </div>
+      <p className="worker-scale-note">{t("daily.workerConcurrency.scaleDownNote")}</p>
+      <div className="worker-group-table-wrap">
+        <table className="worker-group-table">
+          <thead><tr><th>{t("daily.workerConcurrency.group")}</th><th>{t("daily.workerConcurrency.default")}</th><th>{t("daily.workerConcurrency.effective")}</th><th>{t("daily.workerConcurrency.running")}</th></tr></thead>
+          <tbody>{editableGroups.map(([name, group]) => (
+            <tr key={name}>
+              <td><strong>{name}</strong><small>{t(`daily.workerConcurrency.groupJobs.${name}`, { defaultValue: name })}</small></td>
+              <td>{group.default_max_running}</td>
+              <td><GroupLimitControl group={group} onChange={(value) => updateGroup(name, value)} t={t} /></td>
+              <td>{occupancy[name]?.running || 0}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+      <div className="worker-invariant-notes">
+        {immutableGroups.map(([name, group]) => (
+          <p key={name}><strong>{name}</strong> — {name === "paper-report" ? t("daily.workerConcurrency.paperReport") : t("daily.workerConcurrency.immutable", { limit: group.max_running })}</p>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 /**
  * 每日任务二级页面。
  *
@@ -82,7 +182,12 @@ export function DailyTasksSettingsView({
   onSubmit,
   saveStatus = "idle",
   taskControlProps = null,
-  taskHistoryProps = {}
+  taskHistoryProps = {},
+  workerStatus = {},
+  concurrencyConflict = null,
+  capacityApplyState = "idle",
+  onWorkerConcurrencyChange = () => {},
+  onReloadWorkerConcurrency = () => {}
 }) {
   const { t } = useTranslation("settings");
 
@@ -154,12 +259,18 @@ export function DailyTasksSettingsView({
           <CheckboxField label={t("daily.fields.cacheFullText")} name="arxiv_cache_full_text" checked={settings.arxiv_cache_full_text} onChange={onSettingChange} />
           <TextField label={t("daily.fields.pdfDirectory")} name="arxiv_pdf_dir" placeholder="./data/arxiv_pdfs" value={settings.arxiv_pdf_dir} onChange={onSettingChange} />
           <TextField label={t("daily.fields.txtDirectory")} name="arxiv_text_dir" placeholder="./data/arxiv_text" value={settings.arxiv_text_dir} onChange={onSettingChange} />
-          <NumberField label={t("daily.fields.globalLlmConcurrency")} name="global_llm_request_concurrency" min="1" step="1" value={settings.global_llm_request_concurrency ?? 4} onChange={onSettingChange} />
-          <NumberField label={t("daily.fields.globalEmbeddingConcurrency")} name="global_embedding_request_concurrency" min="1" step="1" value={settings.global_embedding_request_concurrency ?? 4} onChange={onSettingChange} />
-          <NumberField label={t("daily.fields.embeddingConcurrency")} name="embedding_concurrency" min="1" step="1" value={settings.embedding_concurrency} onChange={onSettingChange} />
-          <NumberField label={t("daily.fields.judgmentConcurrency")} name="project_judgment_concurrency" min="1" max="8" step="1" value={settings.project_judgment_concurrency ?? 3} onChange={onSettingChange} />
           <NumberField label={t("daily.fields.retryLimit")} name="retry_daily_max_results" min="1" step="1" value={settings.retry_daily_max_results} onChange={onSettingChange} />
         </SettingsSection>
+
+        <WorkerConcurrencyCard
+          settings={settings}
+          workerStatus={workerStatus}
+          conflict={concurrencyConflict}
+          applyState={capacityApplyState}
+          onChange={onWorkerConcurrencyChange}
+          onReload={onReloadWorkerConcurrency}
+          t={t}
+        />
 
       </form>
 

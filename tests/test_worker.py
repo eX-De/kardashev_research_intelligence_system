@@ -2264,17 +2264,27 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(payload["scheduler_enabled"])
         self.assertFalse(payload["run_daily_on_startup_enabled"])
 
-    def test_worker_concurrency_settings_are_configurable(self) -> None:
+    def test_worker_concurrency_settings_use_runtime_policy_as_canonical_source(self) -> None:
         conn = connect_test_db()
         init_db(conn)
 
+        conn.execute(
+            """
+            UPDATE worker_runtime_policy
+            SET revision = revision + 1,
+                global_embedding_request_concurrency = 12,
+                global_llm_request_concurrency = 4,
+                embedding_concurrency = 12,
+                project_judgment_concurrency = 4
+            WHERE singleton_id = 1
+            """
+        )
+        conn.commit()
         save_app_settings(
             conn,
             {
-                "global_embedding_request_concurrency": 12,
-                "global_llm_request_concurrency": 4,
-                "embedding_concurrency": 12,
-                "project_judgment_concurrency": 4,
+                "global_embedding_request_concurrency": 2,
+                "embedding_concurrency": 2,
             },
         )
         payload = get_app_settings(conn, test_settings())["settings"]
@@ -2282,11 +2292,21 @@ class WorkerTests(unittest.TestCase):
 
         self.assertEqual(payload["embedding_concurrency"], 12)
         self.assertEqual(payload["project_judgment_concurrency"], 4)
+        self.assertEqual(payload["worker_concurrency"]["global_embedding_request_concurrency"], 12)
         self.assertEqual(applied.embedding_concurrency, 12)
         self.assertEqual(applied.project_judgment_concurrency, 4)
         self.assertEqual(_embedding_concurrency(applied), 12)
 
-        save_app_settings(conn, {"global_embedding_request_concurrency": 3})
+        conn.execute(
+            """
+            UPDATE worker_runtime_policy
+            SET revision = revision + 1,
+                global_embedding_request_concurrency = 3,
+                embedding_concurrency = 3
+            WHERE singleton_id = 1
+            """
+        )
+        conn.commit()
         lowered = apply_stored_settings(conn, test_settings())
         self.assertEqual(lowered.global_embedding_request_concurrency, 3)
         self.assertEqual(lowered.embedding_concurrency, 3)
